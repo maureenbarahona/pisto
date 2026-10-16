@@ -12,11 +12,13 @@ rules_version = '2';
 //   - uid: string (required, immutable, 1..128 chars) - Firebase Auth UID
 //   - email: string (required, immutable on family link, valid email, <= 120 chars) - User email
 //   - name: string (required, 1..80 chars) - Display name
+//   - displayName: string (optional, 0..80 chars) - Google/Auth display name
+//   - photoURL: string (optional, 0..512 chars) - Google/Auth avatar URL
 //   - country: string (required, 2..10 chars) - ISO country code (e.g., 'HN', 'US')
 //   - defaultCurrency: string (required, 3..10 chars) - ISO currency code (e.g., 'HNL', 'USD')
 //   - personalViewMode: bool (required) - Whether personal view mode is active
 //   - filterByDefaultCurrency: bool (required) - Whether dashboard filters by defaultCurrency
-//   - workspaceId: string (optional, 1..128 chars) - Shared family workspace ID (e.g., 'ws_<uid>')
+//   - workspaceId: string (optional, 1..128 chars) - Shared family workspace ID (e.g., 'ws_<uid>', '<uid>', or shared ID)
 //   - sharedWithEmails: list of strings (optional, max 50 items) - Linked family member emails
 //   - createdAt: string (required, immutable, <= 40 chars) - ISO creation timestamp
 //   - updatedAt: string (required, <= 40 chars) - ISO update timestamp
@@ -40,7 +42,7 @@ rules_version = '2';
 //   - createdByName: string (optional, <= 80 chars) - Nombre para mostrar del creador
 //   - ownerUid: string (optional, <= 128 chars) - Alias de propietario de la transacción
 //   - ownerName: string (optional, <= 80 chars) - Nombre del propietario
-//   - workspaceId: string (required, immutable, 1..128 chars) - ID del grupo familiar / workspace
+//   - workspaceId: string (required, immutable for non-creators, 1..128 chars) - ID del grupo familiar / workspace
 //   - amount: number (required, > 0, <= 1000000000) - Monto positivo de la transacción
 //   - type: string (required, enum: 'expense', 'income', 'transfer') - Tipo de movimiento
 //   - currency: string (required, 3..10 chars) - Código de moneda ('HNL', 'USD', etc.)
@@ -159,6 +161,8 @@ service cloud.firestore {
         (
           wsId == 'ws_default' ||
           wsId == ('ws_' + request.auth.uid) ||
+          wsId == request.auth.uid ||
+          (request.auth.token.email != null && wsId == request.auth.token.email) ||
           (
             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId == wsId
@@ -194,6 +198,8 @@ service cloud.firestore {
         'uid',
         'email',
         'name',
+        'displayName',
+        'photoURL',
         'country',
         'defaultCurrency',
         'personalViewMode',
@@ -208,6 +214,8 @@ service cloud.firestore {
         validStringLength('uid', 1, 128) &&
         isValidEmail(data.email) &&
         validStringLength('name', 1, 80) &&
+        isValidOptionalString('displayName', 0, 80) &&
+        isValidOptionalString('photoURL', 0, 512) &&
         validStringLength('country', 2, 10) &&
         validStringLength('defaultCurrency', 3, 10) &&
         data.personalViewMode is bool &&
@@ -325,6 +333,7 @@ service cloud.firestore {
           (request.auth.uid == uid && request.resource.data.uid == resource.data.uid) ||
           (
             resource.data.email == request.resource.data.email &&
+            isAuthorizedWorkspaceMember(request.resource.data.workspaceId) &&
             request.resource.data.diff(resource.data).affectedKeys().hasOnly(['workspaceId', 'sharedWithEmails', 'updatedAt'])
           )
         );
@@ -383,6 +392,14 @@ service cloud.firestore {
             isAuthorizedWorkspaceMember(resource.data.workspaceId)
           ) &&
           isAuthorizedWorkspaceMember(request.resource.data.workspaceId) &&
+          (
+            areImmutableFieldsUnchanged(['createdByUid', 'createdByEmail', 'workspaceId', 'createdAt']) ||
+            (
+              areImmutableFieldsUnchanged(['createdByUid', 'createdByEmail', 'createdAt']) &&
+              resource.data.createdByUid == request.auth.uid &&
+              isAuthorizedWorkspaceMember(request.resource.data.workspaceId)
+            )
+          ) &&
           request.resource.data.createdByUid == resource.data.createdByUid &&
           request.resource.data.amount > 0;
 
@@ -418,6 +435,14 @@ service cloud.firestore {
           isAuthorizedWorkspaceMember(resource.data.workspaceId)
         ) &&
         isAuthorizedWorkspaceMember(request.resource.data.workspaceId) &&
+        (
+          areImmutableFieldsUnchanged(['createdByUid', 'createdByEmail', 'workspaceId', 'createdAt']) ||
+          (
+            areImmutableFieldsUnchanged(['createdByUid', 'createdByEmail', 'createdAt']) &&
+            resource.data.createdByUid == request.auth.uid &&
+            isAuthorizedWorkspaceMember(request.resource.data.workspaceId)
+          )
+        ) &&
         request.resource.data.createdByUid == resource.data.createdByUid &&
         request.resource.data.amount > 0;
 
