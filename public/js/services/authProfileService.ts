@@ -7,18 +7,53 @@
  * 3. Browser-Only Gemini API Key Storage: Persists user's Google AI Studio API Key strictly in `localStorage`
  *    so Genkit AI calls use the user's own key without backend key costs or cloud database exposure.
  * 4. Personal View Mode & Default Currency Filtering: Filters transactions by `ownerUid` and `currency`.
+ * 5. Privacy & LocalStorage Isolation: Automatically purges sensitive keys (`pisto_user_gemini_api_key_v1`,
+ *    `pisto_custom_firebase_config`, `pisto_firebase_web_config_v1`) upon sign-out.
  */
 
 import { CURRENCIES } from '../domain/models.js';
+import {
+  CUSTOM_FIREBASE_CONFIG_STORAGE_KEY,
+  LEGACY_FIREBASE_CONFIG_STORAGE_KEY,
+  defaultFirebaseConfig,
+  getDefaultFirebaseConfig,
+  isValidFirebaseConfig,
+  normalizeFirebaseConfig,
+  getCustomFirebaseConfig,
+  getFirebaseConfigSource,
+  getFirebaseConfig,
+  isLiveFirebaseCredentials,
+  registerFirebaseSdkAdapter,
+  getApps,
+  getApp,
+  initializeFirebaseApp,
+  onFirebaseConfigUpdated,
+  updateFirebaseConfig,
+  type FirebaseWebConfig,
+  type UpdateFirebaseConfigResult,
+} from './firebase.ts';
+import { migrateTransactionsToSharedWorkspace } from './transactions.ts';
 
-export interface FirebaseWebConfig {
-  apiKey: string;
-  authDomain: string;
-  projectId: string;
-  storageBucket?: string;
-  messagingSenderId?: string;
-  appId?: string;
-}
+export {
+  CUSTOM_FIREBASE_CONFIG_STORAGE_KEY,
+  defaultFirebaseConfig,
+  getDefaultFirebaseConfig,
+  isValidFirebaseConfig,
+  normalizeFirebaseConfig,
+  getCustomFirebaseConfig,
+  getFirebaseConfigSource,
+  getFirebaseConfig,
+  isLiveFirebaseCredentials,
+  registerFirebaseSdkAdapter,
+  getApps,
+  getApp,
+  initializeFirebaseApp,
+  onFirebaseConfigUpdated,
+  updateFirebaseConfig,
+  migrateTransactionsToSharedWorkspace,
+  type FirebaseWebConfig,
+  type UpdateFirebaseConfigResult,
+};
 
 export interface AuthUser {
   uid: string;
@@ -43,6 +78,13 @@ export interface UserProfile {
   createdAt: string;
 }
 
+export interface PrivacyConsentState {
+  accepted: boolean;
+  localStorageEnabled: boolean;
+  timestamp: string;
+  version: string;
+}
+
 export interface TransactionRecord {
   id: string;
   type: string;
@@ -62,11 +104,13 @@ export interface TransactionRecord {
 }
 
 export const GEMINI_API_KEY_STORAGE_KEY = 'pisto_user_gemini_api_key_v1';
-export const FIREBASE_CONFIG_STORAGE_KEY = 'pisto_firebase_web_config_v1';
+export const FIREBASE_CONFIG_STORAGE_KEY = LEGACY_FIREBASE_CONFIG_STORAGE_KEY;
+export const PRIVACY_CONSENT_STORAGE_KEY = 'pisto_privacy_consent_v1';
 export const LOCAL_AUTH_SESSION_KEY = 'pisto_auth_session_v1';
 export const LOCAL_USERS_DB_KEY = 'pisto_local_users_auth_v1';
 export const FIRESTORE_USERS_CACHE_PREFIX = 'pisto_firestore_users_doc_';
 export const FIRESTORE_WORKSPACES_CACHE_PREFIX = 'pisto_firestore_workspaces_doc_';
+export const FIRESTORE_EMAIL_WORKSPACE_PREFIX = 'pisto_workspace_by_email_';
 
 export const SUPPORTED_COUNTRIES: ReadonlyArray<{ code: string; name: string; flag: string; defaultCurrency: string }> = Object.freeze([
   { code: 'HN', name: 'Honduras', flag: '🇭🇳', defaultCurrency: 'HNL' },
@@ -246,8 +290,6 @@ export class GeminiKeyLocalStore {
 
 /**
  * Service managing Firebase Auth (Google + Email/Password) and Firestore `users/{uid}` persistence.
- * Automatically uses the official Firebase v11 Modular Web SDK when Firebase project credentials are configured,
- * and seamlessly provides a Local-First Free Tier emulator in the browser or Node test environment.
  */
 export class FirebaseAuthProfileService {
   private storage: Storage | null;
@@ -288,49 +330,74 @@ export class FirebaseAuthProfileService {
     }
   }
 
-  /**
-   * Returns saved Firebase Web Config if configured by the user or window globals.
-   */
-  getFirebaseConfig(): FirebaseWebConfig | null {
-    try {
-      const globalCfg = (globalThis as any).__PISTO_FIREBASE_CONFIG__;
-      if (globalCfg && globalCfg.apiKey && globalCfg.projectId) {
-        return globalCfg as FirebaseWebConfig;
+  private getStorageAdapter(): Storage {
+    return {
+      length: 0,
+      clear: () => {
+        this.memoryStore.clear();
+      },
+      key: () => null,
+      getItem: (k: string) => this.getItem(k),
+      setItem: (k: string, v: string) => this.setItem(k, v),
+      removeItem: (k: string) => this.removeItem(k),
+    };
+  }
+
+  getFirebaseConfig(): FirebaseWebConfig {
+    return getFirebaseConfig(this.getStorageAdapter());
+  }
+
+  getCustomFirebaseConfig(): FirebaseWebConfig | null {
+    return getCustomFirebaseConfig(this.getStorageAdapter());
+  }
+
+  getFirebaseConfigSource(): 'custom' | 'default' {
+    return getFirebaseConfigSource(this.getStorageAdapter());
+  }
+
+  hasCustomFirebaseConfig(): boolean {
+    return Boolean(this.getCustomFirebaseConfig());
+  }
+
+  async updateFirebaseConfig(
+    userConfig: Partial<FirebaseWebConfig> | string | null
+  ): Promise<UpdateFirebaseConfigResult> {
+    const result = await updateFirebaseConfig(userConfig, {
+      storage: this.getStorageAdapter(),
+    });
+    this.firebaseApp = result.app;
+
+    if (!isLiveFirebaseCredentials(result.config)) {
+      this.firebaseAuth = null;
+      this.firestoreDb = null;
+    } else if (this.authModule && this.firestoreModule) {
+      try {
+        this.firebaseAuth = this.authModule.getAuth(this.firebaseApp);
+        this.firestoreDb = this.firestoreModule.getFirestore(this.firebaseApp);
+      } catch {
+        // Keep Local-First fallback if remote SDK re-binding fails
       }
-      const raw = this.getItem(FIREBASE_CONFIG_STORAGE_KEY);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.apiKey && parsed.projectId) {
-        return parsed as FirebaseWebConfig;
-      }
-    } catch {
-      // Ignore invalid JSON
     }
-    return null;
+
+    return result;
   }
 
   saveFirebaseConfig(config: FirebaseWebConfig | null): void {
-    if (!config || !config.apiKey || !config.projectId) {
-      this.removeItem(FIREBASE_CONFIG_STORAGE_KEY);
-      this.firebaseApp = null;
-      this.firebaseAuth = null;
-      this.firestoreDb = null;
-      return;
-    }
-    this.setItem(FIREBASE_CONFIG_STORAGE_KEY, JSON.stringify(config));
+    void this.updateFirebaseConfig(config);
   }
 
   isLiveFirebaseConfigured(): boolean {
-    return Boolean(this.getFirebaseConfig() && this.firebaseAuth && this.firestoreDb);
+    const cfg = this.getFirebaseConfig();
+    return Boolean(isLiveFirebaseCredentials(cfg) && this.firebaseAuth && this.firestoreDb);
   }
 
-  /**
-   * Initializes Firebase App, Auth, and Firestore (`users/{uid}`) if config is available,
-   * then restores the user session and loads `users/{uid}` profile.
-   */
   async init(): Promise<{ user: AuthUser | null; profile: UserProfile | null }> {
-    const config = this.getFirebaseConfig();
-    if (config && typeof window !== 'undefined') {
+    const { app, config } = await initializeFirebaseApp({
+      storage: this.getStorageAdapter(),
+    });
+    this.firebaseApp = app;
+
+    if (isLiveFirebaseCredentials(config) && typeof window !== 'undefined') {
       try {
         const [appMod, authMod, firestoreMod] = await Promise.all([
           import('https://www.gstatic.com/firebasejs/11.4.0/firebase-app.js' as any),
@@ -338,7 +405,12 @@ export class FirebaseAuthProfileService {
           import('https://www.gstatic.com/firebasejs/11.4.0/firebase-firestore.js' as any),
         ]);
 
-        this.firebaseApp = appMod.initializeApp(config);
+        registerFirebaseSdkAdapter(appMod);
+        const liveInit = await initializeFirebaseApp({
+          storage: this.getStorageAdapter(),
+          sdk: appMod,
+        });
+        this.firebaseApp = liveInit.app;
         this.firebaseAuth = authMod.getAuth(this.firebaseApp);
         this.firestoreDb = firestoreMod.getFirestore(this.firebaseApp);
         this.authModule = authMod;
@@ -377,7 +449,6 @@ export class FirebaseAuthProfileService {
       }
     }
 
-    // Local-First Free Tier session restoration
     const rawSession = this.getItem(LOCAL_AUTH_SESSION_KEY);
     if (rawSession) {
       try {
@@ -418,10 +489,18 @@ export class FirebaseAuthProfileService {
     return this.currentProfile;
   }
 
-  /**
-   * Signs in with Google via Firebase Auth `signInWithPopup(auth, new GoogleAuthProvider())`
-   * or Local-First Google Account flow when running without remote Firebase credentials.
-   */
+  getFirestoreContext(): {
+    firestoreDb: any;
+    firestoreModule: any;
+    storage: Storage;
+  } {
+    return {
+      firestoreDb: this.firestoreDb,
+      firestoreModule: this.firestoreModule,
+      storage: this.getStorageAdapter(),
+    };
+  }
+
   async signInWithGoogle(customGoogleAccount?: { email?: string; name?: string }): Promise<{
     user: AuthUser;
     profile: UserProfile;
@@ -469,10 +548,6 @@ export class FirebaseAuthProfileService {
     return { user, profile: this.currentProfile };
   }
 
-  /**
-   * Signs in or registers a user with Email and Password via Firebase Auth
-   * (`signInWithEmailAndPassword` / `createUserWithEmailAndPassword`).
-   */
   async signInOrRegisterWithEmail(params: {
     email: string;
     password: string;
@@ -530,7 +605,6 @@ export class FirebaseAuthProfileService {
       return { user, profile: this.currentProfile };
     }
 
-    // Local-First Free Tier Email/Password Auth Store
     const usersDbRaw = this.getItem(LOCAL_USERS_DB_KEY);
     const usersDb: Record<string, { uid: string; email: string; passwordHash: string; displayName: string }> =
       usersDbRaw ? JSON.parse(usersDbRaw) : {};
@@ -553,7 +627,6 @@ export class FirebaseAuthProfileService {
       this.setItem(LOCAL_USERS_DB_KEY, JSON.stringify(usersDb));
     } else {
       if (!existingRecord) {
-        // Auto-provision account on first sign-in for smooth onboarding if not registered yet
         const uid = `uid_${cleanEmail.replace(/[^a-z0-9]/g, '_').slice(0, 24)}`;
         const displayName = String(params.name || cleanEmail.split('@')[0]).trim();
         usersDb[cleanEmail] = {
@@ -590,22 +663,153 @@ export class FirebaseAuthProfileService {
   }
 
   /**
-   * Signs out the active user from Firebase Auth and clears the session.
+   * Returns the user's privacy & LocalStorage consent state.
+   */
+  getPrivacyConsent(): PrivacyConsentState | null {
+    const raw = this.getItem(PRIVACY_CONSENT_STORAGE_KEY);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.accepted === 'boolean') {
+        return {
+          accepted: Boolean(parsed.accepted),
+          localStorageEnabled: Boolean(parsed.localStorageEnabled ?? true),
+          timestamp: String(parsed.timestamp || new Date().toISOString()),
+          version: String(parsed.version || '1.0'),
+        };
+      }
+    } catch {
+      // Ignore malformed consent state
+    }
+    return null;
+  }
+
+  /**
+   * Persists the user's privacy & LocalStorage consent decision.
+   */
+  savePrivacyConsent(accepted: boolean = true): PrivacyConsentState {
+    const state: PrivacyConsentState = {
+      accepted: Boolean(accepted),
+      localStorageEnabled: true,
+      timestamp: new Date().toISOString(),
+      version: '1.0',
+    };
+    this.setItem(PRIVACY_CONSENT_STORAGE_KEY, JSON.stringify(state));
+    return state;
+  }
+
+  /**
+   * Purges sensitive credentials (Gemini API Key and custom Firebase configurations)
+   * from `localStorage` and memory to guarantee strict session isolation.
+   */
+  async clearSensitiveLocalStorage(): Promise<void> {
+    this.geminiKeyStore.setApiKey('');
+    this.removeItem(GEMINI_API_KEY_STORAGE_KEY);
+    this.removeItem(CUSTOM_FIREBASE_CONFIG_STORAGE_KEY);
+    this.removeItem(LEGACY_FIREBASE_CONFIG_STORAGE_KEY);
+    await this.updateFirebaseConfig(null);
+  }
+
+  /**
+   * Signs out the active user from Firebase Auth, cleans sensitive `localStorage` credentials,
+   * and clears the session.
    */
   async signOut(): Promise<void> {
     if (this.firebaseAuth && this.authModule) {
       await this.authModule.signOut(this.firebaseAuth);
     }
     this.removeItem(LOCAL_AUTH_SESSION_KEY);
+    await this.clearSensitiveLocalStorage();
     this.currentUser = null;
     this.currentProfile = null;
     this.notifyListeners();
   }
 
-  /**
-   * Loads the user profile from Firestore collection `users/{uid}` (with local cache mirror).
-   * Creates the initial `users/{uid}` document if it does not exist yet.
-   */
+  private async resolveSharedWorkspaceForProfile(profile: UserProfile): Promise<UserProfile> {
+    const cleanEmail = String(profile.email || this.currentUser?.email || '')
+      .trim()
+      .toLowerCase();
+    if (!cleanEmail) return profile;
+
+    let resolvedWorkspaceId = profile.workspaceId;
+    let resolvedSharedEmails = Array.isArray(profile.sharedWithEmails)
+      ? [...profile.sharedWithEmails]
+      : [];
+
+    const emailIdxRaw = this.getItem(`${FIRESTORE_EMAIL_WORKSPACE_PREFIX}${cleanEmail}`);
+    if (emailIdxRaw) {
+      try {
+        const parsedIdx = JSON.parse(emailIdxRaw) as {
+          workspaceId?: string;
+          memberEmails?: string[];
+        };
+        if (
+          parsedIdx.workspaceId &&
+          parsedIdx.workspaceId !== 'ws_default' &&
+          (!resolvedWorkspaceId || resolvedWorkspaceId === 'ws_default')
+        ) {
+          resolvedWorkspaceId = parsedIdx.workspaceId;
+        }
+        if (Array.isArray(parsedIdx.memberEmails)) {
+          resolvedSharedEmails = Array.from(
+            new Set([
+              ...resolvedSharedEmails,
+              ...parsedIdx.memberEmails.filter((e) => e && e !== cleanEmail),
+            ])
+          );
+        }
+      } catch {
+        // Ignore malformed cache
+      }
+    }
+
+    if (
+      this.firestoreDb &&
+      this.firestoreModule &&
+      (!resolvedWorkspaceId || resolvedWorkspaceId === 'ws_default')
+    ) {
+      try {
+        const wsCol = this.firestoreModule.collection(this.firestoreDb, 'workspaces');
+        const wsQuery = this.firestoreModule.query(
+          wsCol,
+          this.firestoreModule.where('memberEmails', 'array-contains', cleanEmail)
+        );
+        const wsSnap = await this.firestoreModule.getDocs(wsQuery);
+        if (!wsSnap.empty) {
+          const wsData = wsSnap.docs[0].data();
+          const foundWsId = wsData.workspaceId || wsSnap.docs[0].id;
+          if (foundWsId && foundWsId !== 'ws_default') {
+            resolvedWorkspaceId = foundWsId;
+            if (Array.isArray(wsData.memberEmails)) {
+              resolvedSharedEmails = Array.from(
+                new Set([
+                  ...resolvedSharedEmails,
+                  ...wsData.memberEmails.filter((e: string) => e && e !== cleanEmail),
+                ])
+              );
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[Firestore workspaces lookup] Fallback local:', err);
+      }
+    }
+
+    if (
+      resolvedWorkspaceId !== profile.workspaceId ||
+      resolvedSharedEmails.length !== (profile.sharedWithEmails || []).length
+    ) {
+      return createUserProfile({
+        ...profile,
+        workspaceId: resolvedWorkspaceId,
+        sharedWithEmails: resolvedSharedEmails,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    return profile;
+  }
+
   async loadUserProfile(
     uid: string,
     defaults: Partial<UserProfile> = {}
@@ -618,12 +822,16 @@ export class FirebaseAuthProfileService {
         const snap = await this.firestoreModule.getDoc(userDocRef);
         if (snap.exists()) {
           const data = snap.data() as Partial<UserProfile>;
-          const profile = createUserProfile({ ...defaults, ...data, uid });
+          let profile = createUserProfile({ ...defaults, ...data, uid });
+          profile = await this.resolveSharedWorkspaceForProfile(profile);
+          if (profile.workspaceId !== data.workspaceId) {
+            await this.firestoreModule.setDoc(userDocRef, profile, { merge: true });
+          }
           this.setItem(docKey, JSON.stringify(profile));
           this.currentProfile = profile;
           return profile;
         }
-        const initialProfile = createUserProfile({
+        let initialProfile = createUserProfile({
           uid,
           email: defaults.email || this.currentUser?.email || '',
           name: defaults.name || this.currentUser?.displayName || 'Usuario Catracho',
@@ -632,6 +840,7 @@ export class FirebaseAuthProfileService {
           personalViewMode: defaults.personalViewMode ?? false,
           filterByDefaultCurrency: defaults.filterByDefaultCurrency ?? true,
         });
+        initialProfile = await this.resolveSharedWorkspaceForProfile(initialProfile);
         await this.firestoreModule.setDoc(userDocRef, initialProfile, { merge: true });
         this.setItem(docKey, JSON.stringify(initialProfile));
         this.currentProfile = initialProfile;
@@ -645,7 +854,9 @@ export class FirebaseAuthProfileService {
     if (cachedRaw) {
       try {
         const parsed = JSON.parse(cachedRaw) as Partial<UserProfile>;
-        const profile = createUserProfile({ ...defaults, ...parsed, uid });
+        let profile = createUserProfile({ ...defaults, ...parsed, uid });
+        profile = await this.resolveSharedWorkspaceForProfile(profile);
+        this.setItem(docKey, JSON.stringify(profile));
         this.currentProfile = profile;
         return profile;
       } catch {
@@ -653,7 +864,7 @@ export class FirebaseAuthProfileService {
       }
     }
 
-    const freshProfile = createUserProfile({
+    let freshProfile = createUserProfile({
       uid,
       email: defaults.email || this.currentUser?.email || '',
       name: defaults.name || this.currentUser?.displayName || 'Usuario Catracho',
@@ -662,15 +873,12 @@ export class FirebaseAuthProfileService {
       personalViewMode: defaults.personalViewMode ?? false,
       filterByDefaultCurrency: defaults.filterByDefaultCurrency ?? true,
     });
+    freshProfile = await this.resolveSharedWorkspaceForProfile(freshProfile);
     this.setItem(docKey, JSON.stringify(freshProfile));
     this.currentProfile = freshProfile;
     return freshProfile;
   }
 
-  /**
-   * Persists the updated user profile to Firestore `users/{uid}` (`setDoc(doc(db, 'users', uid), profile, { merge: true })`)
-   * and updates the local mirror.
-   */
   async saveUserProfile(
     uid: string,
     updates: Partial<UserProfile>
@@ -711,10 +919,6 @@ export class FirebaseAuthProfileService {
     return updatedProfile;
   }
 
-  /**
-   * Links the active user's financial workspace (`workspaceId`) with another registered user by email
-   * ("Compartir Finanzas"), updating both `users/{uid}` profiles and `workspaces/{workspaceId}`.
-   */
   async shareWorkspaceWithEmail(targetEmail: string): Promise<{
     workspaceId: string;
     profile: UserProfile;
@@ -732,7 +936,6 @@ export class FirebaseAuthProfileService {
       throw new Error('No puedes compartir el espacio financiero con tu propio correo.');
     }
 
-    // 1. Resolve target user's UID and existing profile (from Firestore or Local-First user registry)
     const usersDbRaw = this.getItem(LOCAL_USERS_DB_KEY);
     const usersDb: Record<string, { uid: string; email: string; passwordHash: string; displayName: string }> =
       usersDbRaw ? JSON.parse(usersDbRaw) : {};
@@ -769,7 +972,6 @@ export class FirebaseAuthProfileService {
       }
     }
 
-    // 2. Determine shared workspaceId
     let sharedWorkspaceId = myProfile.workspaceId;
     if (!sharedWorkspaceId || sharedWorkspaceId === 'ws_default') {
       if (targetExistingProfile?.workspaceId && targetExistingProfile.workspaceId !== 'ws_default') {
@@ -792,7 +994,6 @@ export class FirebaseAuthProfileService {
     const mySharedList = combinedEmails.filter((e) => e !== myProfile.email?.toLowerCase());
     const targetSharedList = combinedEmails.filter((e) => e !== cleanTargetEmail);
 
-    // 3. Persist target user's linked workspace profile
     const nowIso = new Date().toISOString();
     const updatedTargetProfile = createUserProfile({
       ...(targetExistingProfile || {
@@ -807,6 +1008,19 @@ export class FirebaseAuthProfileService {
       updatedAt: nowIso,
     });
     this.setItem(`${FIRESTORE_USERS_CACHE_PREFIX}${targetUid}`, JSON.stringify(updatedTargetProfile));
+
+    for (const memberEmail of combinedEmails) {
+      const normalizedEmail = String(memberEmail || '').trim().toLowerCase();
+      if (!normalizedEmail) continue;
+      this.setItem(
+        `${FIRESTORE_EMAIL_WORKSPACE_PREFIX}${normalizedEmail}`,
+        JSON.stringify({
+          workspaceId: sharedWorkspaceId,
+          memberEmails: combinedEmails,
+          updatedAt: nowIso,
+        })
+      );
+    }
 
     if (this.firestoreDb && this.firestoreModule) {
       try {
@@ -825,7 +1039,6 @@ export class FirebaseAuthProfileService {
       }
     }
 
-    // 4. Persist workspace document in `workspaces/{workspaceId}`
     const workspaceDoc = {
       workspaceId: sharedWorkspaceId,
       ownerUid: currentUid,
@@ -845,7 +1058,15 @@ export class FirebaseAuthProfileService {
       }
     }
 
-    // 5. Save current user's profile with the shared workspaceId
+    await migrateTransactionsToSharedWorkspace(
+      sharedWorkspaceId,
+      [currentUid, targetUid],
+      combinedEmails,
+      this.storage,
+      this.firestoreDb,
+      this.firestoreModule
+    );
+
     const updatedMyProfile = await this.saveUserProfile(currentUid, {
       workspaceId: sharedWorkspaceId,
       sharedWithEmails: mySharedList,
@@ -858,9 +1079,6 @@ export class FirebaseAuthProfileService {
     };
   }
 
-  /**
-   * Removes a shared member email from the current user's shared list.
-   */
   async unlinkSharedMember(emailToRemove: string): Promise<UserProfile> {
     const cleanRemove = String(emailToRemove || '').trim().toLowerCase();
     const currentUid = this.currentUser?.uid || this.currentProfile?.uid || 'local_default_user';
@@ -871,9 +1089,6 @@ export class FirebaseAuthProfileService {
     });
   }
 
-  /**
-   * Returns the Firestore document path for the given user ID.
-   */
   getFirestoreUserPath(uid: string): string {
     return `users/${uid}`;
   }
