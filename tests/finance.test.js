@@ -1029,5 +1029,45 @@ describe('Shared Family Finances (Finanzas Familiares Compartidas)', () => {
     assert.equal(fetchedPersonalB[0].id, 'tx_shared_luis');
     assert.equal(fetchedPersonalB[0].createdByUid, 'uid_luis');
   });
+
+  it('persists Local-First privacy consent and cleans up sensitive API keys & custom Firebase configs on signOut', async () => {
+    const map = new Map();
+    const storage = {
+      getItem: (key) => (map.has(key) ? map.get(key) : null),
+      setItem: (key, val) => map.set(key, String(val)),
+      removeItem: (key) => map.delete(key),
+    };
+    const authService = new FirebaseAuthProfileService(storage);
+    await authService.init();
+
+    // 1. Default privacy consent state is unaccepted until confirmed
+    assert.equal(authService.getPrivacyConsent().accepted, false);
+    const savedConsent = authService.savePrivacyConsent(true);
+    assert.equal(savedConsent.accepted, true);
+    assert.equal(authService.getPrivacyConsent().accepted, true);
+
+    // 2. Sign in and store sensitive Gemini API Key + custom Firebase config in localStorage
+    await authService.signInWithDemoMode();
+    authService.geminiKeyStore.setApiKey('AIzaSySensitiveGeminiKey_999');
+    await authService.updateFirebaseConfig({
+      apiKey: 'AIzaSyCustomFirebaseKey_123',
+      authDomain: 'custom-pisto.firebaseapp.com',
+      projectId: 'custom-pisto',
+    });
+    storage.setItem('Pisto_open_finance_v1', JSON.stringify({ nonSensitiveLedger: true }));
+
+    assert.equal(authService.geminiKeyStore.hasApiKey(), true);
+    assert.equal(Boolean(storage.getItem('pisto_custom_firebase_config')), true);
+
+    // 3. Signing out automatically wipes sensitive API keys and custom Firebase credentials while keeping Local-First ledger data intact
+    await authService.signOut();
+    assert.equal(authService.getCurrentUser(), null);
+    assert.equal(authService.geminiKeyStore.hasApiKey(), false);
+    assert.equal(authService.geminiKeyStore.getApiKey(), '');
+    assert.equal(storage.getItem('pisto_custom_firebase_config'), null);
+    assert.equal(storage.getItem('pisto_firebase_web_config_v1'), null);
+    assert.equal(Boolean(storage.getItem('Pisto_open_finance_v1')), true);
+  });
 });
+
 

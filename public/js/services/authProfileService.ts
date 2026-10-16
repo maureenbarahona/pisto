@@ -548,6 +548,42 @@ export class FirebaseAuthProfileService {
     return { user, profile: this.currentProfile };
   }
 
+  /**
+   * Activates the local Demo Mode user ("Google Catracho") explicitly when the user clicks "🚀 Probar Modo Demo".
+   */
+  async signInWithDemoMode(customDemoAccount?: { email?: string; name?: string }): Promise<{
+    user: AuthUser;
+    profile: UserProfile;
+  }> {
+    const email = String(customDemoAccount?.email || 'catracho.google@gmail.com').trim().toLowerCase();
+    const displayName = String(customDemoAccount?.name || 'Google Catracho (Demo)').trim();
+    const uid = `uid_demo_${email.replace(/[^a-z0-9]/g, '_').slice(0, 24)}`;
+
+    const user: AuthUser = {
+      uid,
+      email,
+      displayName,
+      provider: 'google',
+      emailVerified: true,
+    };
+
+    this.setItem(LOCAL_AUTH_SESSION_KEY, JSON.stringify(user));
+    this.currentUser = user;
+    this.currentProfile = await this.loadUserProfile(uid, {
+      email,
+      name: displayName,
+    });
+    this.notifyListeners();
+    return { user, profile: this.currentProfile };
+  }
+
+  async signInDemoMode(customDemoAccount?: { email?: string; name?: string }): Promise<{
+    user: AuthUser;
+    profile: UserProfile;
+  }> {
+    return this.signInWithDemoMode(customDemoAccount);
+  }
+
   async signInOrRegisterWithEmail(params: {
     email: string;
     password: string;
@@ -665,9 +701,15 @@ export class FirebaseAuthProfileService {
   /**
    * Returns the user's privacy & LocalStorage consent state.
    */
-  getPrivacyConsent(): PrivacyConsentState | null {
+  getPrivacyConsent(): PrivacyConsentState {
+    const defaultState: PrivacyConsentState = {
+      accepted: false,
+      localStorageEnabled: true,
+      timestamp: '',
+      version: '1.0',
+    };
     const raw = this.getItem(PRIVACY_CONSENT_STORAGE_KEY);
-    if (!raw) return null;
+    if (!raw) return defaultState;
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed.accepted === 'boolean') {
@@ -681,7 +723,7 @@ export class FirebaseAuthProfileService {
     } catch {
       // Ignore malformed consent state
     }
-    return null;
+    return defaultState;
   }
 
   /**

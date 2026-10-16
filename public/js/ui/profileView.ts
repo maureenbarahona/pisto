@@ -70,6 +70,25 @@ export class ProfileViewController {
       }
     });
 
+    const demoBtn = document.getElementById('btn-auth-demo-mode') as HTMLButtonElement | null;
+    demoBtn?.addEventListener('click', async () => {
+      try {
+        demoBtn.disabled = true;
+        this.hideAuthModalError();
+        const { user, profile } = await this.authService.signInWithDemoMode();
+        authDialog.close();
+        this.callbacks.showToast(
+          `🚀 Modo Demo activado (${user.displayName}). Moneda activa: ${profile.defaultCurrency}`
+        );
+        this.renderProfileTab();
+        this.callbacks.onAuthAndProfileUpdated(user, profile, 'login');
+      } catch (err: any) {
+        this.showAuthModalError(err?.message || 'Error al activar el Modo Demo.');
+      } finally {
+        demoBtn.disabled = false;
+      }
+    });
+
     const emailForm = document.getElementById('auth-email-form') as HTMLFormElement | null;
     emailForm?.addEventListener('submit', async (e) => {
       e.preventDefault();
