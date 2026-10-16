@@ -167,6 +167,8 @@ export function createTransaction({
   note = '',
   date = new Date().toISOString().slice(0, 10),
   createdAt = new Date().toISOString(),
+  ownerUid = '',
+  ownerName = '',
 }) {
   const cleanAmount = Money.fromCents(Money.toCents(amount));
   if (cleanAmount <= 0) {
@@ -190,6 +192,8 @@ export function createTransaction({
     note: String(note || '').trim().slice(0, 160),
     date: String(date).slice(0, 10),
     createdAt,
+    ownerUid: String(ownerUid || '').trim(),
+    ownerName: String(ownerName || '').trim().slice(0, 80),
   };
 }
 

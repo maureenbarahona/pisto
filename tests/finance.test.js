@@ -46,6 +46,12 @@ import {
   executeSmartParse,
   executeFinancialInsights,
 } from '../server/ai/genkitFlows.js';
+import {
+  FirebaseAuthProfileService,
+  GeminiKeyLocalStore,
+  createUserProfile,
+  filterTransactionsForUserView,
+} from '../public/js/services/authProfileService.ts';
 import { handleRequest } from '../server/index.js';
 import http from 'node:http';
 
@@ -371,7 +377,15 @@ describe('Cloud Run HTTP Server Endpoints', () => {
       const htmlRes = await fetch(`${baseUrl}/`);
       assert.equal(htmlRes.status, 200);
       const htmlText = await htmlRes.text();
-      assert.ok(htmlText.includes('Pisto Open-Finance'));
+      assert.ok(htmlText.includes('Pisto'));
+      assert.ok(htmlText.includes('tab-btn-profile'));
+
+      // Also verify that TypeScript modules are transpiled and served as JavaScript
+      const tsRes = await fetch(`${baseUrl}/js/services/authProfileService.ts`);
+      assert.equal(tsRes.status, 200);
+      assert.ok((tsRes.headers.get('content-type') || '').includes('javascript'));
+      const tsBody = await tsRes.text();
+      assert.ok(tsBody.includes('FirebaseAuthProfileService'));
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -520,6 +534,175 @@ describe('Account Detail View & Custom Date Range Filtering', () => {
     assert.equal(editedItem.account.id, 'acc_bank');
   });
 });
+
+describe('Firebase Auth, Firestore Profile (users/{uid}) & Dashboard Currency/Personal View Filtering', () => {
+  function createMemoryStorage() {
+    const map = new Map();
+    return {
+      getItem: (key) => (map.has(key) ? map.get(key) : null),
+      setItem: (key, val) => map.set(key, String(val)),
+      removeItem: (key) => map.delete(key),
+    };
+  }
+
+  it('stores and retrieves Gemini API Key in localStorage without persisting it to Firestore profile', () => {
+    const storage = createMemoryStorage();
+    const keyStore = new GeminiKeyLocalStore(storage);
+
+    assert.equal(keyStore.hasApiKey(), false);
+    keyStore.setApiKey('  AIzaSyDemoBrowserKey123456789  ');
+    assert.equal(keyStore.hasApiKey(), true);
+    assert.equal(keyStore.getApiKey(), 'AIzaSyDemoBrowserKey123456789');
+
+    keyStore.setApiKey('');
+    assert.equal(keyStore.hasApiKey(), false);
+  });
+
+  it('supports Email/Password registration, Google Sign-In, and persists profile in users/{uid}', async () => {
+    const storage = createMemoryStorage();
+    const authService = new FirebaseAuthProfileService(storage);
+    await authService.init();
+
+    // 1. Register with Email & Password
+    const registered = await authService.signInOrRegisterWithEmail({
+      email: 'maureen@pisto.hn',
+      password: 'segura123',
+      name: 'Maureen Barahona',
+      country: 'HN',
+      defaultCurrency: 'HNL',
+      isRegister: true,
+    });
+    assert.equal(registered.user.email, 'maureen@pisto.hn');
+    assert.equal(registered.user.provider, 'password');
+    assert.equal(registered.profile.name, 'Maureen Barahona');
+    assert.equal(registered.profile.defaultCurrency, 'HNL');
+    assert.equal(authService.getFirestoreUserPath(registered.user.uid), `users/${registered.user.uid}`);
+
+    // 2. Edit profile fields (Name, Country, Default Currency, Personal View Mode) + Gemini API key in localStorage
+    authService.geminiKeyStore.setApiKey('AIzaSyLocalGeminiKeyOnly');
+    const updatedProfile = await authService.saveUserProfile(registered.user.uid, {
+      name: 'Maureen B.',
+      country: 'HN',
+      defaultCurrency: 'USD',
+      personalViewMode: true,
+    });
+
+    assert.equal(updatedProfile.uid, registered.user.uid);
+    assert.equal(updatedProfile.name, 'Maureen B.');
+    assert.equal(updatedProfile.country, 'HN');
+    assert.equal(updatedProfile.defaultCurrency, 'USD');
+    assert.equal(updatedProfile.personalViewMode, true);
+    // Ensure Gemini key is ONLY in localStorage and NOT in users/{uid} document
+    assert.equal('geminiApiKey' in updatedProfile, false);
+    assert.equal(authService.geminiKeyStore.getApiKey(), 'AIzaSyLocalGeminiKeyOnly');
+
+    // 3. Sign out and sign back in with Email/Password -> restores users/{uid} profile
+    await authService.signOut();
+    assert.equal(authService.getCurrentUser(), null);
+
+    const signedIn = await authService.signInOrRegisterWithEmail({
+      email: 'maureen@pisto.hn',
+      password: 'segura123',
+      isRegister: false,
+    });
+    assert.equal(signedIn.user.uid, registered.user.uid);
+    assert.equal(signedIn.profile.name, 'Maureen B.');
+    assert.equal(signedIn.profile.defaultCurrency, 'USD');
+    assert.equal(signedIn.profile.personalViewMode, true);
+
+    // 4. Sign in with Google
+    const googleSession = await authService.signInWithGoogle({
+      email: 'carlos.familia@gmail.com',
+      name: 'Carlos Familia',
+    });
+    assert.equal(googleSession.user.provider, 'google');
+    assert.equal(googleSession.profile.name, 'Carlos Familia');
+  });
+
+  it('filters Dashboard analytics and Ledger transactions by defaultCurrency and personalViewMode', () => {
+    const state = createSeedState();
+    state.settings.baseCurrency = 'HNL';
+    state.transactions = [
+      createTransaction({
+        id: 'tx_hnl_mau',
+        type: TRANSACTION_TYPES.EXPENSE,
+        amount: 500,
+        currency: 'HNL',
+        categoryId: 'food',
+        accountId: 'acc_cash',
+        date: '2026-10-15',
+        note: 'Baleadas Kennedy',
+        ownerUid: 'uid_maureen',
+        ownerName: 'Maureen',
+      }),
+      createTransaction({
+        id: 'tx_usd_mau',
+        type: TRANSACTION_TYPES.EXPENSE,
+        amount: 40,
+        currency: 'USD',
+        categoryId: 'services',
+        accountId: 'acc_card',
+        date: '2026-10-15',
+        note: 'Cloud Hosting',
+        ownerUid: 'uid_maureen',
+        ownerName: 'Maureen',
+      }),
+      createTransaction({
+        id: 'tx_hnl_family',
+        type: TRANSACTION_TYPES.EXPENSE,
+        amount: 1200,
+        currency: 'HNL',
+        categoryId: 'groceries',
+        accountId: 'acc_bank',
+        date: '2026-10-15',
+        note: 'Supermercado Familiar',
+        ownerUid: 'uid_carlos',
+        ownerName: 'Carlos',
+      }),
+    ];
+
+    // 1. Filter by user's defaultCurrency (HNL) in family mode (personalViewMode = false)
+    const hnlFamilyAnalytics = computePeriodAnalytics(state, {
+      period: 'all',
+      currencyFilter: 'HNL',
+      personalViewMode: false,
+      currentUid: 'uid_maureen',
+    });
+    assert.equal(hnlFamilyAnalytics.currencyFilter, 'HNL');
+    assert.equal(hnlFamilyAnalytics.totalExpense, 1700); // 500 + 1200 HNL
+
+    // 2. Enable "Modo Vista Personal" (personalViewMode = true) -> only Maureen's HNL transactions
+    const hnlPersonalAnalytics = computePeriodAnalytics(state, {
+      period: 'all',
+      currencyFilter: 'HNL',
+      personalViewMode: true,
+      currentUid: 'uid_maureen',
+    });
+    assert.equal(hnlPersonalAnalytics.totalExpense, 500);
+
+    // 3. Ledger day groups also honor currencyFilter and personalViewMode
+    const ledgerPersonalGroups = groupTransactionsByDay(state, {
+      period: 'all',
+      currencyFilter: 'HNL',
+      personalViewMode: true,
+      currentUid: 'uid_maureen',
+    });
+    assert.equal(ledgerPersonalGroups.length, 1);
+    assert.equal(ledgerPersonalGroups[0].items.length, 1);
+    assert.equal(ledgerPersonalGroups[0].items[0].id, 'tx_hnl_mau');
+
+    // 4. Direct helper verification
+    const helperFiltered = filterTransactionsForUserView(state.transactions, {
+      currencyFilter: 'USD',
+      personalViewMode: true,
+      currentUid: 'uid_maureen',
+    });
+    assert.equal(helperFiltered.length, 1);
+    assert.equal(helperFiltered[0].id, 'tx_usd_mau');
+  });
+});
+
+
 
 
 

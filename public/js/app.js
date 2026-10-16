@@ -39,10 +39,13 @@ import {
   KeypadModalController,
   attachDialogLightDismissFallback,
 } from './ui/keypadModal.js?v=9';
+import { FirebaseAuthProfileService } from './services/authProfileService.js?v=11';
+import { ProfileViewController } from './ui/profileView.js?v=11';
 
 class FinanceAppController {
   constructor() {
     this.repo = new StorageRepository();
+    this.authService = new FirebaseAuthProfileService();
     this.state = this.repo.loadState();
     if (this.state.settings.periodFilter !== 'custom') {
       this.state.settings.startDate = '';
@@ -56,6 +59,7 @@ class FinanceAppController {
       searchQuery: '',
       typeFilter: 'all',
       accountFilter: 'all',
+      currencyFilter: 'all',
     };
     this.activeDetailAccountId = null;
     this.accountDetailFilters = {
@@ -70,9 +74,14 @@ class FinanceAppController {
     this.lastScannedVoucher = null;
     this.currentStatementData = null;
     this.preferredStatementAccountId = null;
+    this.profileView = new ProfileViewController(this.authService, {
+      onAuthAndProfileUpdated: (user, profile, reason) =>
+        this.handleAuthAndProfileUpdated(user, profile, reason),
+      showToast: (msg) => this.showToast(msg),
+    });
   }
 
-  init() {
+  async init() {
     this.setupKeypadModal();
     this.setupAccountModal();
     this.setupAccountDetailModal();
@@ -83,8 +92,65 @@ class FinanceAppController {
     this.setupValidationAriaSync();
     this.bindGlobalEvents();
     this.applyTheme(this.state.settings?.theme || 'system');
-    this.renderAll();
+    this.profileView.init();
+
+    const { user, profile } = await this.authService.init();
+    if (user || profile) {
+      this.handleAuthAndProfileUpdated(user, profile, 'init');
+      this.profileView.renderProfileTab();
+    } else {
+      this.renderAll();
+    }
     this.fetchServerAiStatus();
+  }
+
+  /**
+   * Synchronizes Dashboard baseCurrency, automatic transaction currency filtering, and Personal View Mode
+   * whenever the user logs in or saves their `users/{uid}` Firestore profile.
+   */
+  handleAuthAndProfileUpdated(user, profile, reason = '') {
+    if (profile) {
+      this.state.settings.currentUid = user?.uid || profile.uid || 'local_default_user';
+      this.state.settings.personalViewMode = Boolean(profile.personalViewMode);
+
+      if (profile.defaultCurrency) {
+        this.state.settings.baseCurrency = profile.defaultCurrency;
+        if (reason === 'login' || reason === 'profile-saved' || reason === 'init') {
+          this.ledgerFilters.currencyFilter = profile.defaultCurrency;
+          this.state.settings.currencyFilter = profile.defaultCurrency;
+        }
+      }
+      this.repo.saveState(this.state);
+    } else if (reason === 'logout') {
+      this.state.settings.currentUid = '';
+      this.state.settings.personalViewMode = false;
+      this.state.settings.currencyFilter = 'all';
+      this.ledgerFilters.currencyFilter = 'all';
+      this.repo.saveState(this.state);
+    }
+    this.renderAll();
+  }
+
+  /**
+   * Handles clicks on the Header "🔐 Iniciar Sesión" / User Profile button (#header-auth-btn).
+   * Opens the Firebase Auth modal when unauthenticated, or navigates to the Profile tab when logged in.
+   */
+  handleHeaderAuthButtonClick() {
+    const user = this.authService.getCurrentUser();
+    if (user) {
+      this.switchTab('profile');
+    } else {
+      this.profileView.openAuthModal(false);
+    }
+  }
+
+  getActiveOwnerMetadata() {
+    const user = this.authService.getCurrentUser();
+    const profile = this.authService.getCurrentProfile();
+    return {
+      ownerUid: user?.uid || profile?.uid || this.state.settings?.currentUid || 'local_default_user',
+      ownerName: profile?.name || user?.displayName || 'Miembro Principal',
+    };
   }
 
   setupKeypadModal() {
@@ -110,7 +176,11 @@ class FinanceAppController {
             `Transacción actualizada: ${Money.format(updatedTx.amount, updatedTx.currency)}`
           );
         } else {
-          const newTx = createTransaction(txInput);
+          const ownerMeta = this.getActiveOwnerMetadata();
+          const newTx = createTransaction({
+            ...txInput,
+            ...ownerMeta,
+          });
           this.state.transactions.unshift(newTx);
           this.repo.saveState(this.state);
           this.showToast(`Transacción registrada: ${Money.format(newTx.amount, newTx.currency)}`);
@@ -1536,7 +1606,24 @@ class FinanceAppController {
         this.lastInsightsResult = null;
         this.showToast('Datos de demostración restaurados.');
         this.renderAll();
+      } else if (action === 'open-profile-or-auth') {
+        this.handleHeaderAuthButtonClick();
+      } else if (action === 'open-auth-modal') {
+        this.profileView.openAuthModal(false);
+      } else if (action === 'clear-currency-filter') {
+        this.ledgerFilters.currencyFilter = 'all';
+        this.state.settings.currencyFilter = 'all';
+        this.repo.saveState(this.state);
+        this.renderAll();
       }
+    });
+
+    // Direct binding on Header "Iniciar Sesión" button (#header-auth-btn)
+    const headerAuthBtn = document.getElementById('header-auth-btn');
+    headerAuthBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.handleHeaderAuthButtonClick();
     });
 
     // Keyboard accessibility for clickable account cards and transaction rows
@@ -1634,6 +1721,13 @@ class FinanceAppController {
       this.renderLedgerSection();
     });
 
+    document.getElementById('ledger-currency-select')?.addEventListener('change', (e) => {
+      this.ledgerFilters.currencyFilter = e.target.value;
+      this.state.settings.currencyFilter = e.target.value;
+      this.repo.saveState(this.state);
+      this.renderAll();
+    });
+
     // Budget Inline Changes
     document.addEventListener('change', (e) => {
       const budgetInput = e.target.closest('[data-budget-category]');
@@ -1684,10 +1778,17 @@ class FinanceAppController {
   renderAll() {
     const currentPeriod = this.state.settings.periodFilter || 'month';
     const isCustomPeriod = currentPeriod === 'custom';
+    const activeCurrencyFilter = this.ledgerFilters.currencyFilter || this.state.settings.currencyFilter || 'all';
+    const personalViewMode = Boolean(this.state.settings.personalViewMode);
+    const currentUid = this.state.settings.currentUid || null;
+
     const filterOpts = {
       period: currentPeriod,
       startDate: isCustomPeriod ? (this.state.settings.startDate || '') : '',
       endDate: isCustomPeriod ? (this.state.settings.endDate || '') : '',
+      currencyFilter: activeCurrencyFilter,
+      personalViewMode,
+      currentUid,
     };
     const accountsSummary = computeAccountsSummary(this.state, filterOpts);
     const analytics = computePeriodAnalytics(this.state, filterOpts);
@@ -1698,6 +1799,7 @@ class FinanceAppController {
     this.currentMicroPayload = micro;
 
     this.renderHeaderKpis(accountsSummary, analytics);
+    this.renderProfileFilterBanner(activeCurrencyFilter, personalViewMode);
     this.renderCategoriesView(analytics);
     this.renderAccountsView(accountsSummary);
     this.renderLedgerSection();
@@ -1708,6 +1810,45 @@ class FinanceAppController {
     if (accountDetailDialog?.open && this.activeDetailAccountId) {
       this.renderAccountDetailModal();
     }
+  }
+
+  renderProfileFilterBanner(activeCurrencyFilter, personalViewMode) {
+    const bannerEl = document.getElementById('active-profile-filter-bar');
+    if (!bannerEl) return;
+
+    const currencySelectEl = document.getElementById('ledger-currency-select');
+    if (currencySelectEl) {
+      currencySelectEl.value = activeCurrencyFilter || 'all';
+    }
+
+    const hasCurrencyFilter = activeCurrencyFilter && activeCurrencyFilter !== 'all';
+    if (!hasCurrencyFilter && !personalViewMode) {
+      bannerEl.classList.add('is-hidden');
+      bannerEl.innerHTML = '';
+      return;
+    }
+
+    const badges = [];
+    if (hasCurrencyFilter) {
+      badges.push(`💱 Moneda filtrada: <strong>${activeCurrencyFilter}</strong>`);
+    }
+    if (personalViewMode) {
+      const profileName = this.authService.getCurrentProfile()?.name || 'Mis movimientos';
+      badges.push(`🔒 Modo Vista Personal activo (<strong>${profileName}</strong>)`);
+    }
+
+    bannerEl.classList.remove('is-hidden');
+    bannerEl.innerHTML = `
+      <span>${badges.join(' · ')}</span>
+      <div style="display: flex; gap: 0.45rem; flex-wrap: wrap;">
+        ${
+          hasCurrencyFilter
+            ? `<button type="button" class="btn-secondary btn-sm" data-action="clear-currency-filter">Ver Todas las Monedas</button>`
+            : ''
+        }
+        <button type="button" class="btn-secondary btn-sm" data-tab-target="profile">Ajustar en Perfil →</button>
+      </div>
+    `;
   }
 
   renderHeaderKpis(accountsSummary, analytics) {
@@ -2040,17 +2181,24 @@ class FinanceAppController {
     }
 
     const isCustomPeriod = this.state.settings.periodFilter === 'custom';
+    const personalViewMode = Boolean(this.state.settings.personalViewMode);
+    const currentUid = this.state.settings.currentUid || null;
+
     const groups = groupTransactionsByDay(this.state, {
       ...this.ledgerFilters,
       period: this.state.settings.periodFilter,
       startDate: isCustomPeriod ? this.state.settings.startDate : '',
       endDate: isCustomPeriod ? this.state.settings.endDate : '',
+      personalViewMode,
+      currentUid,
     });
     const allHistoryGroups = groupTransactionsByDay(this.state, {
       ...this.ledgerFilters,
       period: 'all',
       startDate: '',
       endDate: '',
+      personalViewMode,
+      currentUid,
     });
 
     const shownCount = groups.reduce((acc, g) => acc + g.items.length, 0);
@@ -2096,9 +2244,10 @@ class FinanceAppController {
               const isTransfer = tx.type === TRANSACTION_TYPES.TRANSFER;
               const sign = isIncome ? '+' : isTransfer ? '⇄' : '-';
               const amountClass = isIncome ? 'text-income' : isTransfer ? 'text-transfer' : 'text-expense';
+              const ownerLabel = tx.ownerName ? ` · 👤 ${tx.ownerName}` : '';
               const subtitle = isTransfer
-                ? `${tx.account.name} → ${tx.toAccount?.name || 'Destino'}`
-                : `${tx.account.name}${tx.note ? ` · ${tx.note}` : ''}`;
+                ? `${tx.account.name} → ${tx.toAccount?.name || 'Destino'}${ownerLabel}`
+                : `${tx.account.name}${tx.note ? ` · ${tx.note}` : ''}${ownerLabel}`;
 
               return `
                 <div
@@ -2298,7 +2447,10 @@ class FinanceAppController {
       return;
     }
 
-    const tx = createTransaction(result.transaction);
+    const tx = createTransaction({
+      ...result.transaction,
+      ...this.getActiveOwnerMetadata(),
+    });
     this.state.transactions.unshift(tx);
     this.state.aiTelemetry.localParsesSaved = (this.state.aiTelemetry.localParsesSaved || 0) + 1;
     this.repo.saveState(this.state);
@@ -2311,6 +2463,7 @@ class FinanceAppController {
 
   /**
    * Calls the server's Genkit parseTransactionsFlow (/api/ai/parse) on explicit user request.
+   * Forwards the user's localStorage Gemini API key via x-gemini-api-key header when configured.
    */
   async handleGenkitSmartParse() {
     const input = document.getElementById('quick-nlp-input');
@@ -2323,10 +2476,16 @@ class FinanceAppController {
     const btn = document.querySelector('[data-action="smart-parse-ai"]');
     if (btn) btn.disabled = true;
 
+    const localGeminiKey = this.authService?.geminiKeyStore?.getApiKey() || '';
+    const headers = { 'Content-Type': 'application/json' };
+    if (localGeminiKey) {
+      headers['x-gemini-api-key'] = localGeminiKey;
+    }
+
     try {
       const response = await fetch('/api/ai/parse', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           text,
           categories: this.state.categories.map((c) => c.id),
@@ -2337,6 +2496,7 @@ class FinanceAppController {
         throw new Error(data.error || 'No se pudieron extraer transacciones del texto.');
       }
 
+      const ownerMeta = this.getActiveOwnerMetadata();
       for (const item of data.items) {
         const tx = createTransaction({
           type: item.type || TRANSACTION_TYPES.EXPENSE,
@@ -2345,6 +2505,7 @@ class FinanceAppController {
           categoryId: item.categoryId || 'food',
           accountId: this.state.accounts[0]?.id || 'acc_bank',
           note: item.note || 'Genkit Smart Parse',
+          ...ownerMeta,
         });
         this.state.transactions.unshift(tx);
       }
@@ -2367,6 +2528,7 @@ class FinanceAppController {
 
   /**
    * Calls the server's Genkit financialInsightsFlow (/api/ai/insights) with the compressed micro-payload.
+   * Forwards the user's localStorage Gemini API key via x-gemini-api-key header when configured.
    */
   async handleGenkitInsights() {
     const micro = this.currentMicroPayload;
@@ -2390,10 +2552,16 @@ class FinanceAppController {
       btn.textContent = 'Analizando micro-payload...';
     }
 
+    const localGeminiKey = this.authService?.geminiKeyStore?.getApiKey() || '';
+    const headers = { 'Content-Type': 'application/json' };
+    if (localGeminiKey) {
+      headers['x-gemini-api-key'] = localGeminiKey;
+    }
+
     try {
       const response = await fetch('/api/ai/insights', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           compactPayload: micro.compactPayload,
           lang: 'es',
@@ -2474,10 +2642,12 @@ class FinanceAppController {
 
     const used = this.state.aiTelemetry?.totalTokensUsed || 0;
     const saved = this.state.aiTelemetry?.localParsesSaved || 0;
-    const modeLabel = this.serverStatus?.genkitConfigured ? 'Genkit Ready' : 'Modo 0-Tokens';
+    const hasLocalKey = Boolean(this.authService?.geminiKeyStore?.hasApiKey());
+    const isGenkitActive = Boolean(this.serverStatus?.genkitConfigured || hasLocalKey);
+    const modeLabel = isGenkitActive ? 'Genkit Ready' : 'Modo 0-Tokens';
 
     badgeEl.innerHTML = `
-      <span class="telemetry-dot ${this.serverStatus?.genkitConfigured ? 'is-live' : ''}"></span>
+      <span class="telemetry-dot ${isGenkitActive ? 'is-live' : ''}"></span>
       <span>${modeLabel}: <strong>${used} tok</strong> · Ahorrados: <strong>${saved}</strong></span>
     `;
   }

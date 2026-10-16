@@ -202,6 +202,9 @@ export function computePeriodAnalytics(state, options = {}) {
   const baseCurrency = state.settings?.baseCurrency || 'USD';
   const period = options.period || state.settings?.periodFilter || 'month';
   const accountFilter = options.accountFilter || 'all';
+  const currencyFilter = options.currencyFilter || 'all';
+  const personalViewMode = Boolean(options.personalViewMode ?? state.settings?.personalViewMode ?? false);
+  const currentUid = options.currentUid ?? state.settings?.currentUid ?? null;
   const startDate =
     options.startDate !== undefined ? options.startDate : (state.settings?.startDate || '');
   const endDate =
@@ -211,6 +214,13 @@ export function computePeriodAnalytics(state, options = {}) {
     if (!isDateInPeriod(tx.date, period, new Date(), { startDate, endDate })) return false;
     if (accountFilter !== 'all' && tx.accountId !== accountFilter && tx.toAccountId !== accountFilter) {
       return false;
+    }
+    if (currencyFilter !== 'all' && tx.currency !== currencyFilter) {
+      return false;
+    }
+    if (personalViewMode && currentUid) {
+      const txOwner = tx.ownerUid || currentUid;
+      if (txOwner !== currentUid) return false;
     }
     return true;
   });
@@ -289,6 +299,9 @@ export function computePeriodAnalytics(state, options = {}) {
   return {
     baseCurrency,
     period,
+    currencyFilter,
+    personalViewMode,
+    currentUid,
     totalIncome,
     totalExpense,
     netCashflow,
@@ -316,6 +329,9 @@ export function groupTransactionsByDay(state, filters = {}) {
   const query = String(filters.searchQuery || '').trim().toLowerCase();
   const typeFilter = filters.typeFilter || 'all';
   const accountFilter = filters.accountFilter || 'all';
+  const currencyFilter = filters.currencyFilter || 'all';
+  const personalViewMode = Boolean(filters.personalViewMode ?? state.settings?.personalViewMode ?? false);
+  const currentUid = filters.currentUid ?? state.settings?.currentUid ?? null;
   const period = filters.period || state.settings?.periodFilter || 'month';
   const startDate =
     filters.startDate !== undefined ? filters.startDate : (state.settings?.startDate || '');
@@ -331,6 +347,13 @@ export function groupTransactionsByDay(state, filters = {}) {
       if (typeFilter !== 'all' && tx.type !== typeFilter) return false;
       if (accountFilter !== 'all' && tx.accountId !== accountFilter && tx.toAccountId !== accountFilter) {
         return false;
+      }
+      if (currencyFilter !== 'all' && tx.currency !== currencyFilter) {
+        return false;
+      }
+      if (personalViewMode && currentUid) {
+        const txOwner = tx.ownerUid || currentUid;
+        if (txOwner !== currentUid) return false;
       }
       if (query) {
         const catName = categoryMap.get(tx.categoryId)?.name || '';
