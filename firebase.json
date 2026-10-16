@@ -2,5 +2,18 @@
   "firestore": {
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
+  },
+  "auth": {
+    "providers": {
+      "emailPassword": true,
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "PistoApp",
+        "supportEmail": "maureenbarahona@gmail.com",
+        "authorizedRedirectUris": [
+          "https://gen-lang-client-0806891468.firebaseapp.com/__/auth/handler",
+          "http://localhost:8080"
+        ]
+      }
+    }
   }
 }

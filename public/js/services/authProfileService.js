@@ -489,11 +489,26 @@ export class FirebaseAuthProfileService {
    * Throws an explicit `auth/configuration-not-found` error if Firebase credentials are not configured.
    */
   async ensureFirebaseAuthSdkLoaded() {
-    if (this.firebaseAuth && this.authModule) {
+    if (this.firebaseAuth && (this.authModule || this.firebaseAuthModule)) {
       return;
     }
 
-    const config = this.getFirebaseConfig();
+    let config = this.getFirebaseConfig();
+    if (!isLiveFirebaseCredentials(config) && typeof window !== 'undefined' && typeof fetch === 'function') {
+      try {
+        const res = await fetch('/api/config/firebase');
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.config && isValidFirebaseConfig(data.config)) {
+            globalThis.__PISTO_FIREBASE_CONFIG__ = data.config;
+            config = this.getFirebaseConfig();
+          }
+        }
+      } catch {
+        // Ignore fetch errors in offline mode
+      }
+    }
+
     if (!isLiveFirebaseCredentials(config)) {
       const cfgError = new Error(
         'No se encontró una configuración activa de Firebase Auth (credenciales por defecto de demostración activas). Configura las credenciales de tu proyecto Firebase en la pestaña Perfil o usa "🚀 Probar Modo Demo".'

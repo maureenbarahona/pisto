@@ -118,6 +118,60 @@ function readJsonBody(req) {
  * @param {http.IncomingMessage} req
  * @param {http.ServerResponse} res
  */
+/**
+ * Resolves the public Firebase Web SDK configuration from environment variables (.env / process.env).
+ */
+export function getPublicFirebaseEnvConfig() {
+  const apiKey = String(
+    process.env.VITE_FIREBASE_API_KEY ||
+      process.env.NEXT_PUBLIC_FIREBASE_API_KEY ||
+      'AIzaSyBOtK3rmUmsIgFOIXqczESqWfomRNariis'
+  ).trim();
+  const projectId = String(
+    process.env.VITE_FIREBASE_PROJECT_ID ||
+      process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ||
+      'gen-lang-client-0806891468'
+  ).trim();
+  const authDomain = String(
+    process.env.VITE_FIREBASE_AUTH_DOMAIN ||
+      process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN ||
+      `${projectId}.firebaseapp.com`
+  ).trim();
+  const storageBucket = String(
+    process.env.VITE_FIREBASE_STORAGE_BUCKET ||
+      process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET ||
+      `${projectId}.firebasestorage.app`
+  ).trim();
+  const messagingSenderId = String(
+    process.env.VITE_FIREBASE_MESSAGING_SENDER_ID ||
+      process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID ||
+      '842169471386'
+  ).trim();
+  const appId = String(
+    process.env.VITE_FIREBASE_APP_ID ||
+      process.env.NEXT_PUBLIC_FIREBASE_APP_ID ||
+      '1:842169471386:web:8b1e4ff1a879fef6f16a23'
+  ).trim();
+
+  return {
+    apiKey,
+    authDomain,
+    projectId,
+    storageBucket,
+    messagingSenderId,
+    appId,
+  };
+}
+
+function injectRuntimeFirebaseConfigIntoHtml(htmlString) {
+  const cfg = getPublicFirebaseEnvConfig();
+  const scriptTag = `<script>globalThis.__PISTO_FIREBASE_CONFIG__ = ${JSON.stringify(cfg)};</script>`;
+  if (htmlString.includes('</head>')) {
+    return htmlString.replace('</head>', `  ${scriptTag}\n</head>`);
+  }
+  return `${scriptTag}\n${htmlString}`;
+}
+
 export async function handleRequest(req, res) {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   const pathname = url.pathname;
@@ -135,6 +189,15 @@ export async function handleRequest(req, res) {
   // 2. Genkit & Token Optimizer Status
   if (req.method === 'GET' && pathname === '/api/ai/status') {
     return sendJson(res, 200, getAiTelemetryStatus());
+  }
+
+  // 2b. Public Firebase Web SDK Configuration (.env bridge for browser ES modules)
+  if (req.method === 'GET' && pathname === '/api/config/firebase') {
+    await loadEnvFileIfPresent(path.resolve(__dirname, '../.env'));
+    return sendJson(res, 200, {
+      ok: true,
+      config: getPublicFirebaseEnvConfig(),
+    });
   }
 
   // 3. On-Demand Genkit NLP Transaction Parser
@@ -198,6 +261,19 @@ export async function handleRequest(req, res) {
         return;
       }
 
+      if (path.basename(targetFile) === 'index.html') {
+        await loadEnvFileIfPresent(path.resolve(__dirname, '../.env'));
+        const rawHtml = await fs.readFile(targetFile, 'utf8');
+        const injectedHtml = injectRuntimeFirebaseConfigIntoHtml(rawHtml);
+        applySecurityHeaders(res);
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+        });
+        res.end(req.method === 'HEAD' ? undefined : injectedHtml);
+        return;
+      }
+
       const content = await fs.readFile(targetFile);
 
       applySecurityHeaders(res);
@@ -211,10 +287,12 @@ export async function handleRequest(req, res) {
       // SPA Fallback to index.html for navigation routes
       if (!path.extname(pathname)) {
         try {
-          const indexContent = await fs.readFile(path.join(PUBLIC_DIR, 'index.html'));
+          await loadEnvFileIfPresent(path.resolve(__dirname, '../.env'));
+          const indexContent = await fs.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+          const injectedHtml = injectRuntimeFirebaseConfigIntoHtml(indexContent);
           applySecurityHeaders(res);
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(indexContent);
+          res.end(injectedHtml);
           return;
         } catch {
           // Fallthrough to 404

@@ -48,7 +48,17 @@ export interface UpdateFirebaseConfigResult {
  * Reads an environment variable safely across Vite (`import.meta.env.VITE_*`),
  * Next.js / Node (`process.env.NEXT_PUBLIC_*`), or global runtime injection.
  */
-function readEnvVar(viteKey: string, nextPublicKey: string, fallbackValue: string): string {
+function readEnvVar(
+  viteKey: string,
+  nextPublicKey: string,
+  fallbackValue: string,
+  configKey?: string
+): string {
+  const globalCfg =
+    typeof globalThis !== 'undefined' && (globalThis as any).__PISTO_FIREBASE_CONFIG__
+      ? ((globalThis as any).__PISTO_FIREBASE_CONFIG__ as Record<string, string | undefined>)
+      : {};
+
   const metaEnv =
     typeof import.meta !== 'undefined' && (import.meta as any).env
       ? ((import.meta as any).env as Record<string, string | undefined>)
@@ -60,6 +70,8 @@ function readEnvVar(viteKey: string, nextPublicKey: string, fallbackValue: strin
       : {};
 
   const val =
+    (configKey && globalCfg[configKey]) ||
+    globalCfg[viteKey] ||
     metaEnv[viteKey] ||
     procEnv[nextPublicKey] ||
     procEnv[viteKey] ||
@@ -77,42 +89,48 @@ export const defaultFirebaseConfig: FirebaseWebConfig = {
     return readEnvVar(
       'VITE_FIREBASE_API_KEY',
       'NEXT_PUBLIC_FIREBASE_API_KEY',
-      'pisto-spark-default-api-key'
+      'AIzaSyBOtK3rmUmsIgFOIXqczESqWfomRNariis',
+      'apiKey'
     );
   },
   get authDomain(): string {
     return readEnvVar(
       'VITE_FIREBASE_AUTH_DOMAIN',
       'NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN',
-      'pisto-spark-free.firebaseapp.com'
+      'gen-lang-client-0806891468.firebaseapp.com',
+      'authDomain'
     );
   },
   get projectId(): string {
     return readEnvVar(
       'VITE_FIREBASE_PROJECT_ID',
       'NEXT_PUBLIC_FIREBASE_PROJECT_ID',
-      'pisto-spark-free'
+      'gen-lang-client-0806891468',
+      'projectId'
     );
   },
   get storageBucket(): string {
     return readEnvVar(
       'VITE_FIREBASE_STORAGE_BUCKET',
       'NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET',
-      'pisto-spark-free.appspot.com'
+      'gen-lang-client-0806891468.firebasestorage.app',
+      'storageBucket'
     );
   },
   get messagingSenderId(): string {
     return readEnvVar(
       'VITE_FIREBASE_MESSAGING_SENDER_ID',
       'NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID',
-      '000000000000'
+      '842169471386',
+      'messagingSenderId'
     );
   },
   get appId(): string {
     return readEnvVar(
       'VITE_FIREBASE_APP_ID',
       'NEXT_PUBLIC_FIREBASE_APP_ID',
-      '1:000000000000:web:pistosparkdefault'
+      '1:842169471386:web:8b1e4ff1a879fef6f16a23',
+      'appId'
     );
   },
 };
