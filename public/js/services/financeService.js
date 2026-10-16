@@ -190,6 +190,36 @@ export function computeAccountsSummary(state, options = {}) {
 }
 
 /**
+ * Checks whether a transaction belongs to the active `workspaceId` and satisfies `personalViewMode`.
+ * - When `personalViewMode === false`: includes ALL transactions belonging to `workspaceId`, regardless of `createdByUid`.
+ * - When `personalViewMode === true`: includes only transactions in `workspaceId` where `createdByUid === currentUid`.
+ *
+ * @param {object} tx
+ * @param {{ workspaceId?: string, personalViewMode?: boolean, currentUid?: string | null }} context
+ * @returns {boolean}
+ */
+export function isTransactionVisibleInWorkspace(
+  tx,
+  { workspaceId = 'ws_default', personalViewMode = false, currentUid = null } = {}
+) {
+  if (workspaceId && workspaceId !== 'all') {
+    const txWorkspace = tx.workspaceId || 'ws_default';
+    if (txWorkspace !== workspaceId) {
+      return false;
+    }
+  }
+
+  if (personalViewMode && currentUid) {
+    const txCreator = tx.createdByUid || tx.ownerUid || currentUid;
+    if (txCreator !== currentUid) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
  * Computes period totals and Pisto category ring analytics.
  * @param {object} state
  * @param {object} [options]
@@ -202,6 +232,10 @@ export function computePeriodAnalytics(state, options = {}) {
   const baseCurrency = state.settings?.baseCurrency || 'USD';
   const period = options.period || state.settings?.periodFilter || 'month';
   const accountFilter = options.accountFilter || 'all';
+  const currencyFilter = options.currencyFilter || 'all';
+  const personalViewMode = Boolean(options.personalViewMode ?? state.settings?.personalViewMode ?? false);
+  const currentUid = options.currentUid ?? state.settings?.currentUid ?? null;
+  const workspaceId = options.workspaceId ?? state.settings?.workspaceId ?? 'ws_default';
   const startDate =
     options.startDate !== undefined ? options.startDate : (state.settings?.startDate || '');
   const endDate =
@@ -210,6 +244,12 @@ export function computePeriodAnalytics(state, options = {}) {
   const periodTransactions = state.transactions.filter((tx) => {
     if (!isDateInPeriod(tx.date, period, new Date(), { startDate, endDate })) return false;
     if (accountFilter !== 'all' && tx.accountId !== accountFilter && tx.toAccountId !== accountFilter) {
+      return false;
+    }
+    if (currencyFilter !== 'all' && tx.currency !== currencyFilter) {
+      return false;
+    }
+    if (!isTransactionVisibleInWorkspace(tx, { workspaceId, personalViewMode, currentUid })) {
       return false;
     }
     return true;
@@ -289,6 +329,10 @@ export function computePeriodAnalytics(state, options = {}) {
   return {
     baseCurrency,
     period,
+    currencyFilter,
+    personalViewMode,
+    currentUid,
+    workspaceId,
     totalIncome,
     totalExpense,
     netCashflow,
@@ -316,6 +360,10 @@ export function groupTransactionsByDay(state, filters = {}) {
   const query = String(filters.searchQuery || '').trim().toLowerCase();
   const typeFilter = filters.typeFilter || 'all';
   const accountFilter = filters.accountFilter || 'all';
+  const currencyFilter = filters.currencyFilter || 'all';
+  const personalViewMode = Boolean(filters.personalViewMode ?? state.settings?.personalViewMode ?? false);
+  const currentUid = filters.currentUid ?? state.settings?.currentUid ?? null;
+  const workspaceId = filters.workspaceId ?? state.settings?.workspaceId ?? 'ws_default';
   const period = filters.period || state.settings?.periodFilter || 'month';
   const startDate =
     filters.startDate !== undefined ? filters.startDate : (state.settings?.startDate || '');
@@ -332,10 +380,17 @@ export function groupTransactionsByDay(state, filters = {}) {
       if (accountFilter !== 'all' && tx.accountId !== accountFilter && tx.toAccountId !== accountFilter) {
         return false;
       }
+      if (currencyFilter !== 'all' && tx.currency !== currencyFilter) {
+        return false;
+      }
+      if (!isTransactionVisibleInWorkspace(tx, { workspaceId, personalViewMode, currentUid })) {
+        return false;
+      }
       if (query) {
         const catName = categoryMap.get(tx.categoryId)?.name || '';
         const accName = accountMap.get(tx.accountId)?.name || '';
-        const haystack = `${tx.note} ${catName} ${accName} ${tx.amount}`.toLowerCase();
+        const authorTag = (tx.createdByEmail || '').split('@')[0] || '';
+        const haystack = `${tx.note} ${catName} ${accName} ${tx.amount} ${authorTag}`.toLowerCase();
         if (!haystack.includes(query)) return false;
       }
       return true;

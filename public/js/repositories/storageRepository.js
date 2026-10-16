@@ -211,6 +211,9 @@ export function createSeedState() {
       baseCurrency: 'USD',
       periodFilter: 'month', // 'all' | 'month' | 'week' | 'today'
       theme: 'system', // 'system' | 'dark' | 'light'
+      workspaceId: 'ws_default',
+      personalViewMode: false,
+      currentUid: 'local_default_user',
     },
     accounts,
     categories,
@@ -246,10 +249,19 @@ export class StorageRepository {
         return seeded;
       }
       const parsed = JSON.parse(raw);
-      return {
-        ...createSeedState(),
+      const base = createSeedState();
+      const merged = {
+        ...base,
         ...parsed,
+        settings: {
+          ...base.settings,
+          ...(parsed.settings || {}),
+        },
       };
+      if (Array.isArray(merged.transactions)) {
+        merged.transactions = merged.transactions.map((tx) => createTransaction(tx));
+      }
+      return merged;
     } catch {
       return createSeedState();
     }

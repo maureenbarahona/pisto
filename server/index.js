@@ -12,6 +12,7 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { stripTypeScriptTypes } from 'node:module';
 import {
   executeSmartParse,
   executeFinancialInsights,
@@ -32,6 +33,7 @@ const MIME_TYPES = Object.freeze({
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
+  '.ts': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
@@ -139,9 +141,12 @@ export async function handleRequest(req, res) {
   if (req.method === 'POST' && pathname === '/api/ai/parse') {
     try {
       const body = await readJsonBody(req);
+      const headerKey = String(req.headers['x-gemini-api-key'] || '').trim();
+      const apiKey = headerKey || String(body.apiKey || '').trim() || undefined;
       const result = await executeSmartParse({
         text: body.text,
         categories: body.categories,
+        apiKey,
       });
       return sendJson(res, 200, { ok: true, ...result, telemetry: getAiTelemetryStatus() });
     } catch (error) {
@@ -153,9 +158,12 @@ export async function handleRequest(req, res) {
   if (req.method === 'POST' && pathname === '/api/ai/insights') {
     try {
       const body = await readJsonBody(req);
+      const headerKey = String(req.headers['x-gemini-api-key'] || '').trim();
+      const apiKey = headerKey || String(body.apiKey || '').trim() || undefined;
       const result = await executeFinancialInsights({
         compactPayload: body.compactPayload,
         lang: body.lang || 'es',
+        apiKey,
       });
       return sendJson(res, 200, { ok: true, ...result, telemetry: getAiTelemetryStatus() });
     } catch (error) {
@@ -163,7 +171,7 @@ export async function handleRequest(req, res) {
     }
   }
 
-  // 5. Static File Serving from /public
+  // 5. Static File Serving from /public (with native TypeScript type-stripping for .ts modules)
   if (req.method === 'GET' || req.method === 'HEAD') {
     const safeRelative = path.normalize(pathname === '/' ? '/index.html' : pathname).replace(/^(\.\.(\/|\\|$))+/, '');
     const filePath = path.join(PUBLIC_DIR, safeRelative);
@@ -177,6 +185,19 @@ export async function handleRequest(req, res) {
       const targetFile = stat.isDirectory() ? path.join(filePath, 'index.html') : filePath;
       const ext = path.extname(targetFile).toLowerCase();
       const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+
+      if (ext === '.ts' && typeof stripTypeScriptTypes === 'function') {
+        const tsSource = await fs.readFile(targetFile, 'utf8');
+        const jsOutput = stripTypeScriptTypes(tsSource);
+        applySecurityHeaders(res);
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+        });
+        res.end(req.method === 'HEAD' ? undefined : jsOutput);
+        return;
+      }
+
       const content = await fs.readFile(targetFile);
 
       applySecurityHeaders(res);

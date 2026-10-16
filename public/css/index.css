@@ -302,11 +302,11 @@ p {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Primary Navigation Tabs (Pisto 4-Tab Bar)                                 */
+/* Primary Navigation Tabs (Pisto 5-Tab Bar)                                 */
 /* -------------------------------------------------------------------------- */
 .nav-tabs {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 0.5rem;
   background: var(--bg-surface);
   border: 1px solid var(--surface-border);
@@ -314,6 +314,12 @@ p {
   border-radius: var(--radius-md);
   margin-bottom: 1.5rem;
   box-shadow: var(--shadow-card);
+}
+
+@media (max-width: 780px) {
+  .nav-tabs {
+    grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  }
 }
 
 .nav-tab-btn {
@@ -1887,3 +1893,280 @@ dialog[open]::backdrop,
   color: var(--text-primary);
 }
 
+/* -------------------------------------------------------------------------- */
+/* Tab 5: Perfil de Usuario, Firebase Auth & Firestore (users/{uid})          */
+/* -------------------------------------------------------------------------- */
+#header-auth-btn,
+.header-user-pill {
+  position: relative;
+  z-index: 20;
+  pointer-events: auto !important;
+  cursor: pointer !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  padding: 0.6rem 1.15rem;
+  min-height: 42px;
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  color: #ffffff;
+  border: 1px solid rgba(52, 211, 153, 0.45);
+  box-shadow: 0 4px 14px rgba(16, 185, 129, 0.35), 0 0 0 1px rgba(16, 185, 129, 0.15);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease,
+    border-color 0.18s ease;
+}
+
+#header-auth-btn > *,
+.header-user-pill > * {
+  pointer-events: none;
+}
+
+#header-auth-btn:hover,
+.header-user-pill:hover {
+  background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+  border-color: rgba(110, 231, 183, 0.75);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(16, 185, 129, 0.5), 0 0 14px rgba(16, 185, 129, 0.35);
+}
+
+#header-auth-btn:active,
+.header-user-pill:active {
+  transform: translateY(0);
+}
+
+#header-auth-btn:focus-visible,
+.header-user-pill:focus-visible {
+  outline: 2px solid #34d399;
+  outline-offset: 2px;
+}
+
+.user-avatar-chip {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  color: #ffffff;
+  font-size: 0.72rem;
+  font-weight: 800;
+  display: inline-grid;
+  place-items: center;
+}
+
+.profile-filter-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  padding: 0.65rem 1rem;
+  margin-bottom: 1rem;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-brand) 11%, var(--bg-surface));
+  border: 1px solid color-mix(in srgb, var(--color-brand) 38%, var(--surface-border));
+  font-size: 0.82rem;
+}
+
+.profile-workspace {
+  display: grid;
+  grid-template-columns: 350px 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+@media (max-width: 920px) {
+  .profile-workspace {
+    grid-template-columns: 1fr;
+  }
+}
+
+.profile-identity-card,
+.profile-form-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-lg);
+  padding: 1.4rem;
+  box-shadow: var(--shadow-card);
+}
+
+.profile-identity-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.profile-identity-header {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+}
+
+.profile-meta-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.85rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--surface-border);
+  font-size: 0.8rem;
+}
+
+.profile-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.firestore-path-pill {
+  background: var(--bg-surface);
+  border: 1px solid var(--surface-border);
+  padding: 0.2rem 0.5rem;
+  border-radius: 6px;
+  font-size: 0.74rem;
+  color: var(--color-brand);
+}
+
+.profile-checkbox-card {
+  padding: 0.9rem 1rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--surface-border);
+}
+
+.firebase-config-accordion {
+  margin-top: 0.4rem;
+  padding: 0.75rem 0.9rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--surface-border);
+  font-size: 0.8rem;
+}
+
+.firebase-config-accordion summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* Auth Modal OAuth Button & Divider */
+.btn-google-oauth {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  padding: 0.7rem 1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--surface-border);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-weight: 600;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.btn-google-oauth:hover {
+  border-color: var(--color-brand);
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1rem 0;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--surface-border);
+}
+
+/* Shared Family Finances ("Compartir Finanzas") & Discrete Transaction Author Badge */
+.tx-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.tx-author-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--color-brand, #10b981);
+  border: 1px solid rgba(16, 185, 129, 0.28);
+  white-space: nowrap;
+}
+
+.shared-finances-box {
+  margin-top: 0.25rem;
+  padding: 1rem 1.1rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  border: 1px solid var(--surface-border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.shared-finances-header strong {
+  font-size: 0.92rem;
+  color: var(--text-primary);
+}
+
+.share-workspace-form-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.share-workspace-form-row .form-input {
+  flex: 1;
+  min-width: 210px;
+}
+
+.shared-members-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.shared-member-pill {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.45rem 0.75rem;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  border: 1px solid var(--surface-border);
+  font-size: 0.8rem;
+}
+
+.shared-member-empty {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}

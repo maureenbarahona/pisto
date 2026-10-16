@@ -39,10 +39,21 @@ import {
   KeypadModalController,
   attachDialogLightDismissFallback,
 } from './ui/keypadModal.js?v=9';
+import { FirebaseAuthProfileService } from './services/authProfileService.js?v=11';
+import {
+  prepareTransactionForWorkspace,
+  subscribeWorkspaceTransactions,
+  saveTransactionToWorkspace,
+  deleteTransactionFromWorkspace,
+  migrateTransactionsToSharedWorkspace,
+} from './services/transactions.js?v=11';
+import { ProfileViewController } from './ui/profileView.js?v=11';
 
 class FinanceAppController {
   constructor() {
     this.repo = new StorageRepository();
+    this.authService = new FirebaseAuthProfileService();
+    this.workspaceTransactionsUnsubscribe = null;
     this.state = this.repo.loadState();
     if (this.state.settings.periodFilter !== 'custom') {
       this.state.settings.startDate = '';
@@ -56,6 +67,7 @@ class FinanceAppController {
       searchQuery: '',
       typeFilter: 'all',
       accountFilter: 'all',
+      currencyFilter: 'all',
     };
     this.activeDetailAccountId = null;
     this.accountDetailFilters = {
@@ -70,9 +82,14 @@ class FinanceAppController {
     this.lastScannedVoucher = null;
     this.currentStatementData = null;
     this.preferredStatementAccountId = null;
+    this.profileView = new ProfileViewController(this.authService, {
+      onAuthAndProfileUpdated: (user, profile, reason) =>
+        this.handleAuthAndProfileUpdated(user, profile, reason),
+      showToast: (msg) => this.showToast(msg),
+    });
   }
 
-  init() {
+  async init() {
     this.setupKeypadModal();
     this.setupAccountModal();
     this.setupAccountDetailModal();
@@ -83,8 +100,219 @@ class FinanceAppController {
     this.setupValidationAriaSync();
     this.bindGlobalEvents();
     this.applyTheme(this.state.settings?.theme || 'system');
-    this.renderAll();
+    this.profileView.init();
+
+    const { user, profile } = await this.authService.init();
+    if (user || profile) {
+      this.handleAuthAndProfileUpdated(user, profile, 'init');
+      this.profileView.renderProfileTab();
+    } else {
+      this.renderAll();
+    }
     this.fetchServerAiStatus();
+  }
+
+  /**
+   * Synchronizes Dashboard baseCurrency, automatic transaction currency filtering, Personal View Mode,
+   * and Shared Family Workspace (`workspaceId`) realtime listener whenever the user logs in or updates their `users/{uid}` profile.
+   */
+  handleAuthAndProfileUpdated(user, profile, reason = '') {
+    if (profile) {
+      const nextUid = user?.uid || profile.uid || 'local_default_user';
+      const nextEmail = user?.email || profile.email || 'personal@pisto.hn';
+      const nextWorkspaceId = profile.workspaceId || 'ws_default';
+
+      this.state.settings.currentUid = nextUid;
+      this.state.settings.personalViewMode = Boolean(profile.personalViewMode);
+      this.state.settings.workspaceId = nextWorkspaceId;
+
+      // Sync local seed/current-user transactions into the active workspace when linking or signing in
+      if (Array.isArray(this.state.transactions)) {
+        this.state.transactions.forEach((tx) => {
+          if (tx.workspaceId === 'ws_default' || tx.createdByUid === nextUid) {
+            tx.workspaceId = nextWorkspaceId;
+          }
+          if (tx.createdByUid === 'local_default_user' && nextUid !== 'local_default_user') {
+            tx.createdByUid = nextUid;
+            tx.ownerUid = nextUid;
+            if (!tx.createdByEmail || tx.createdByEmail === 'personal@pisto.hn') {
+              tx.createdByEmail = nextEmail;
+            }
+          }
+        });
+      }
+
+      if (profile.defaultCurrency) {
+        this.state.settings.baseCurrency = profile.defaultCurrency;
+        if (reason === 'login' || reason === 'profile-saved' || reason === 'init') {
+          this.ledgerFilters.currencyFilter = profile.defaultCurrency;
+          this.state.settings.currencyFilter = profile.defaultCurrency;
+        }
+      }
+      this.repo.saveState(this.state);
+
+      // Ensure member transactions are migrated & subscribed via workspaceId query
+      const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
+      if (nextWorkspaceId && nextWorkspaceId !== 'ws_default') {
+        migrateTransactionsToSharedWorkspace(
+          nextWorkspaceId,
+          [nextUid],
+          [nextEmail, ...(profile.sharedWithEmails || [])],
+          storage,
+          firestoreDb,
+          firestoreModule
+        ).catch(() => {});
+      }
+      this.syncWorkspaceSubscription(user, profile);
+    } else if (reason === 'logout') {
+      if (typeof this.workspaceTransactionsUnsubscribe === 'function') {
+        this.workspaceTransactionsUnsubscribe();
+        this.workspaceTransactionsUnsubscribe = null;
+      }
+      this.state.settings.currentUid = 'local_default_user';
+      this.state.settings.personalViewMode = false;
+      this.state.settings.workspaceId = 'ws_default';
+      this.state.settings.currencyFilter = 'all';
+      this.ledgerFilters.currencyFilter = 'all';
+      this.repo.saveState(this.state);
+    }
+    this.renderAll();
+  }
+
+  /**
+   * Subscribes to Firestore / Local-First workspace transactions using:
+   * - `where("workspaceId", "==", currentUserProfile.workspaceId)` when `personalViewMode === false`
+   * - `where("workspaceId", "==", currentUserProfile.workspaceId)` + `where("createdByUid", "==", currentUser.uid)` when `personalViewMode === true`
+   */
+  syncWorkspaceSubscription(user, profile) {
+    if (typeof this.workspaceTransactionsUnsubscribe === 'function') {
+      this.workspaceTransactionsUnsubscribe();
+      this.workspaceTransactionsUnsubscribe = null;
+    }
+    if (!profile) return;
+
+    const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
+    const workspaceId = profile.workspaceId || 'ws_default';
+    const personalViewMode = Boolean(profile.personalViewMode);
+    const currentUid = user?.uid || profile.uid || this.state.settings.currentUid;
+
+    this.workspaceTransactionsUnsubscribe = subscribeWorkspaceTransactions(
+      {
+        workspaceId,
+        personalViewMode,
+        currentUid,
+        firestoreDb,
+        firestoreModule,
+        storage,
+      },
+      (workspaceTransactions) => {
+        if (!Array.isArray(workspaceTransactions) || workspaceTransactions.length === 0) {
+          return;
+        }
+        const mergedById = new Map();
+        for (const tx of this.state.transactions || []) {
+          if (tx && tx.id) mergedById.set(tx.id, tx);
+        }
+        let hasChanges = false;
+        for (const incomingTx of workspaceTransactions) {
+          if (!incomingTx || !incomingTx.id) continue;
+          const prev = mergedById.get(incomingTx.id);
+          if (
+            !prev ||
+            prev.workspaceId !== incomingTx.workspaceId ||
+            prev.amount !== incomingTx.amount ||
+            prev.note !== incomingTx.note ||
+            prev.createdByEmail !== incomingTx.createdByEmail
+          ) {
+            hasChanges = true;
+          }
+          mergedById.set(incomingTx.id, createTransaction({ ...prev, ...incomingTx }));
+        }
+        if (hasChanges || mergedById.size !== (this.state.transactions || []).length) {
+          this.state.transactions = Array.from(mergedById.values()).sort((a, b) => {
+            if (b.date !== a.date) return String(b.date).localeCompare(String(a.date));
+            return String(b.createdAt).localeCompare(String(a.createdAt));
+          });
+          this.repo.saveState(this.state);
+          this.renderAll();
+        }
+      }
+    );
+  }
+
+  /**
+   * Handles clicks on the Header "🔐 Iniciar Sesión" / User Profile button (#header-auth-btn).
+   * Opens the Firebase Auth modal when unauthenticated, or navigates to the Profile tab when logged in.
+   */
+  handleHeaderAuthButtonClick() {
+    const user = this.authService.getCurrentUser();
+    if (user) {
+      this.switchTab('profile');
+    } else {
+      this.profileView.openAuthModal(false);
+    }
+  }
+
+  getActiveOwnerMetadata() {
+    const user = this.authService.getCurrentUser();
+    const profile = this.authService.getCurrentProfile();
+    const createdByUid =
+      user?.uid || profile?.uid || this.state.settings?.currentUid || 'local_default_user';
+    const createdByEmail =
+      user?.email || profile?.email || 'personal@pisto.hn';
+    const workspaceId =
+      profile?.workspaceId || this.state.settings?.workspaceId || 'ws_default';
+
+    return {
+      createdByUid,
+      createdByEmail,
+      workspaceId,
+      ownerUid: createdByUid,
+      ownerName: profile?.name || user?.displayName || createdByEmail.split('@')[0],
+    };
+  }
+
+  /**
+   * Creates or updates a transaction with mandatory workspace & author metadata
+   * (`workspaceId`, `createdByUid`, `createdByEmail`) and syncs it to the shared workspace store & Firestore.
+   */
+  recordWorkspaceTransaction(txInput, existingTx = null) {
+    const user = this.authService.getCurrentUser();
+    const profile = this.authService.getCurrentProfile();
+    const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
+
+    let preparedTx;
+    if (existingTx) {
+      preparedTx = createTransaction({
+        ...existingTx,
+        ...txInput,
+        id: existingTx.id,
+        createdAt: existingTx.createdAt,
+        workspaceId:
+          existingTx.workspaceId && existingTx.workspaceId !== 'ws_default'
+            ? existingTx.workspaceId
+            : (profile?.workspaceId || this.state.settings?.workspaceId || 'ws_default'),
+        createdByUid: existingTx.createdByUid || user?.uid || profile?.uid || 'local_default_user',
+        createdByEmail: existingTx.createdByEmail || user?.email || profile?.email || 'personal@pisto.hn',
+      });
+    } else {
+      preparedTx = prepareTransactionForWorkspace(
+        {
+          ...txInput,
+          ...this.getActiveOwnerMetadata(),
+        },
+        user,
+        profile
+      );
+    }
+
+    saveTransactionToWorkspace(preparedTx, user, profile, {
+      firestoreDb,
+      firestoreModule,
+      storage,
+    }).catch(() => {});
+
+    return preparedTx;
   }
 
   setupKeypadModal() {
@@ -98,19 +326,14 @@ class FinanceAppController {
 
         if (existingIdx !== -1) {
           const prevTx = this.state.transactions[existingIdx];
-          const updatedTx = createTransaction({
-            ...prevTx,
-            ...txInput,
-            id: prevTx.id,
-            createdAt: prevTx.createdAt,
-          });
+          const updatedTx = this.recordWorkspaceTransaction(txInput, prevTx);
           this.state.transactions[existingIdx] = updatedTx;
           this.repo.saveState(this.state);
           this.showToast(
             `Transacción actualizada: ${Money.format(updatedTx.amount, updatedTx.currency)}`
           );
         } else {
-          const newTx = createTransaction(txInput);
+          const newTx = this.recordWorkspaceTransaction(txInput, null);
           this.state.transactions.unshift(newTx);
           this.repo.saveState(this.state);
           this.showToast(`Transacción registrada: ${Money.format(newTx.amount, newTx.currency)}`);
@@ -132,8 +355,17 @@ class FinanceAppController {
 
   deleteTransaction(txId) {
     if (!txId) return;
+    const targetTx = this.state.transactions.find((t) => t.id === txId);
+    const wsId =
+      targetTx?.workspaceId ||
+      this.authService.getCurrentProfile()?.workspaceId ||
+      this.state.settings?.workspaceId ||
+      'ws_default';
     this.state.transactions = this.state.transactions.filter((t) => t.id !== txId);
     this.repo.saveState(this.state);
+    deleteTransactionFromWorkspace(txId, wsId, this.authService.getFirestoreContext()).catch(
+      () => {}
+    );
     this.showToast('Transacción eliminada.');
     this.renderAll();
   }
@@ -673,7 +905,10 @@ class FinanceAppController {
               </span>
             </td>
             <td class="stmt-concept-cell">
-              <strong>${conceptText}</strong>
+              <div class="tx-title-row">
+                <strong>${conceptText}</strong>
+                <span class="tx-author-badge">Por: ${String(tx.createdByEmail || 'personal@pisto.hn').split('@')[0]}</span>
+              </div>
               <small>${typeBadge}</small>
             </td>
             <td class="num-col">
@@ -896,7 +1131,7 @@ class FinanceAppController {
       const noteParts = [merchant];
       if (cardLast4) noteParts.push(`Tarjeta *${cardLast4}`);
 
-      const newTx = createTransaction({
+      const newTx = this.recordWorkspaceTransaction({
         type: TRANSACTION_TYPES.EXPENSE,
         amount,
         currency,
@@ -1172,7 +1407,7 @@ class FinanceAppController {
           ? `${item.concept} · Ref ${item.reference}`
           : item.concept;
 
-        const newTx = createTransaction({
+        const newTx = this.recordWorkspaceTransaction({
           type: TRANSACTION_TYPES.EXPENSE,
           amount: item.amount,
           currency: item.currency,
@@ -1536,7 +1771,24 @@ class FinanceAppController {
         this.lastInsightsResult = null;
         this.showToast('Datos de demostración restaurados.');
         this.renderAll();
+      } else if (action === 'open-profile-or-auth') {
+        this.handleHeaderAuthButtonClick();
+      } else if (action === 'open-auth-modal') {
+        this.profileView.openAuthModal(false);
+      } else if (action === 'clear-currency-filter') {
+        this.ledgerFilters.currencyFilter = 'all';
+        this.state.settings.currencyFilter = 'all';
+        this.repo.saveState(this.state);
+        this.renderAll();
       }
+    });
+
+    // Direct binding on Header "Iniciar Sesión" button (#header-auth-btn)
+    const headerAuthBtn = document.getElementById('header-auth-btn');
+    headerAuthBtn?.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.handleHeaderAuthButtonClick();
     });
 
     // Keyboard accessibility for clickable account cards and transaction rows
@@ -1634,6 +1886,13 @@ class FinanceAppController {
       this.renderLedgerSection();
     });
 
+    document.getElementById('ledger-currency-select')?.addEventListener('change', (e) => {
+      this.ledgerFilters.currencyFilter = e.target.value;
+      this.state.settings.currencyFilter = e.target.value;
+      this.repo.saveState(this.state);
+      this.renderAll();
+    });
+
     // Budget Inline Changes
     document.addEventListener('change', (e) => {
       const budgetInput = e.target.closest('[data-budget-category]');
@@ -1684,10 +1943,19 @@ class FinanceAppController {
   renderAll() {
     const currentPeriod = this.state.settings.periodFilter || 'month';
     const isCustomPeriod = currentPeriod === 'custom';
+    const activeCurrencyFilter = this.ledgerFilters.currencyFilter || this.state.settings.currencyFilter || 'all';
+    const personalViewMode = Boolean(this.state.settings.personalViewMode);
+    const currentUid = this.state.settings.currentUid || null;
+    const workspaceId = this.state.settings.workspaceId || 'ws_default';
+
     const filterOpts = {
       period: currentPeriod,
       startDate: isCustomPeriod ? (this.state.settings.startDate || '') : '',
       endDate: isCustomPeriod ? (this.state.settings.endDate || '') : '',
+      currencyFilter: activeCurrencyFilter,
+      personalViewMode,
+      currentUid,
+      workspaceId,
     };
     const accountsSummary = computeAccountsSummary(this.state, filterOpts);
     const analytics = computePeriodAnalytics(this.state, filterOpts);
@@ -1698,6 +1966,7 @@ class FinanceAppController {
     this.currentMicroPayload = micro;
 
     this.renderHeaderKpis(accountsSummary, analytics);
+    this.renderProfileFilterBanner(activeCurrencyFilter, personalViewMode);
     this.renderCategoriesView(analytics);
     this.renderAccountsView(accountsSummary);
     this.renderLedgerSection();
@@ -1708,6 +1977,45 @@ class FinanceAppController {
     if (accountDetailDialog?.open && this.activeDetailAccountId) {
       this.renderAccountDetailModal();
     }
+  }
+
+  renderProfileFilterBanner(activeCurrencyFilter, personalViewMode) {
+    const bannerEl = document.getElementById('active-profile-filter-bar');
+    if (!bannerEl) return;
+
+    const currencySelectEl = document.getElementById('ledger-currency-select');
+    if (currencySelectEl) {
+      currencySelectEl.value = activeCurrencyFilter || 'all';
+    }
+
+    const hasCurrencyFilter = activeCurrencyFilter && activeCurrencyFilter !== 'all';
+    if (!hasCurrencyFilter && !personalViewMode) {
+      bannerEl.classList.add('is-hidden');
+      bannerEl.innerHTML = '';
+      return;
+    }
+
+    const badges = [];
+    if (hasCurrencyFilter) {
+      badges.push(`💱 Moneda filtrada: <strong>${activeCurrencyFilter}</strong>`);
+    }
+    if (personalViewMode) {
+      const profileName = this.authService.getCurrentProfile()?.name || 'Mis movimientos';
+      badges.push(`🔒 Modo Vista Personal activo (<strong>${profileName}</strong>)`);
+    }
+
+    bannerEl.classList.remove('is-hidden');
+    bannerEl.innerHTML = `
+      <span>${badges.join(' · ')}</span>
+      <div style="display: flex; gap: 0.45rem; flex-wrap: wrap;">
+        ${
+          hasCurrencyFilter
+            ? `<button type="button" class="btn-secondary btn-sm" data-action="clear-currency-filter">Ver Todas las Monedas</button>`
+            : ''
+        }
+        <button type="button" class="btn-secondary btn-sm" data-tab-target="profile">Ajustar en Perfil →</button>
+      </div>
+    `;
   }
 
   renderHeaderKpis(accountsSummary, analytics) {
@@ -2040,17 +2348,27 @@ class FinanceAppController {
     }
 
     const isCustomPeriod = this.state.settings.periodFilter === 'custom';
+    const personalViewMode = Boolean(this.state.settings.personalViewMode);
+    const currentUid = this.state.settings.currentUid || null;
+    const workspaceId = this.state.settings.workspaceId || 'ws_default';
+
     const groups = groupTransactionsByDay(this.state, {
       ...this.ledgerFilters,
       period: this.state.settings.periodFilter,
       startDate: isCustomPeriod ? this.state.settings.startDate : '',
       endDate: isCustomPeriod ? this.state.settings.endDate : '',
+      personalViewMode,
+      currentUid,
+      workspaceId,
     });
     const allHistoryGroups = groupTransactionsByDay(this.state, {
       ...this.ledgerFilters,
       period: 'all',
       startDate: '',
       endDate: '',
+      personalViewMode,
+      currentUid,
+      workspaceId,
     });
 
     const shownCount = groups.reduce((acc, g) => acc + g.items.length, 0);
@@ -2096,6 +2414,9 @@ class FinanceAppController {
               const isTransfer = tx.type === TRANSACTION_TYPES.TRANSFER;
               const sign = isIncome ? '+' : isTransfer ? '⇄' : '-';
               const amountClass = isIncome ? 'text-income' : isTransfer ? 'text-transfer' : 'text-expense';
+              const authorHandle = String(tx.createdByEmail || tx.ownerName || 'personal@pisto.hn')
+                .split('@')[0]
+                .trim();
               const subtitle = isTransfer
                 ? `${tx.account.name} → ${tx.toAccount?.name || 'Destino'}`
                 : `${tx.account.name}${tx.note ? ` · ${tx.note}` : ''}`;
@@ -2114,7 +2435,10 @@ class FinanceAppController {
                     ${renderIcon(tx.category.icon, 18)}
                   </div>
                   <div class="tx-details">
-                    <strong class="tx-cat-title">${isTransfer ? 'Transferencia entre cuentas' : tx.category.name}</strong>
+                    <div class="tx-title-row">
+                      <strong class="tx-cat-title">${isTransfer ? 'Transferencia entre cuentas' : tx.category.name}</strong>
+                      <span class="tx-author-badge" title="Ingresado por ${tx.createdByEmail || authorHandle}">Por: ${authorHandle}</span>
+                    </div>
                     <span class="tx-subtitle">${subtitle}</span>
                   </div>
                   <div class="tx-amount-col">
@@ -2298,7 +2622,7 @@ class FinanceAppController {
       return;
     }
 
-    const tx = createTransaction(result.transaction);
+    const tx = this.recordWorkspaceTransaction(result.transaction);
     this.state.transactions.unshift(tx);
     this.state.aiTelemetry.localParsesSaved = (this.state.aiTelemetry.localParsesSaved || 0) + 1;
     this.repo.saveState(this.state);
@@ -2311,6 +2635,7 @@ class FinanceAppController {
 
   /**
    * Calls the server's Genkit parseTransactionsFlow (/api/ai/parse) on explicit user request.
+   * Forwards the user's localStorage Gemini API key via x-gemini-api-key header when configured.
    */
   async handleGenkitSmartParse() {
     const input = document.getElementById('quick-nlp-input');
@@ -2323,10 +2648,16 @@ class FinanceAppController {
     const btn = document.querySelector('[data-action="smart-parse-ai"]');
     if (btn) btn.disabled = true;
 
+    const localGeminiKey = this.authService?.geminiKeyStore?.getApiKey() || '';
+    const headers = { 'Content-Type': 'application/json' };
+    if (localGeminiKey) {
+      headers['x-gemini-api-key'] = localGeminiKey;
+    }
+
     try {
       const response = await fetch('/api/ai/parse', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           text,
           categories: this.state.categories.map((c) => c.id),
@@ -2338,7 +2669,7 @@ class FinanceAppController {
       }
 
       for (const item of data.items) {
-        const tx = createTransaction({
+        const tx = this.recordWorkspaceTransaction({
           type: item.type || TRANSACTION_TYPES.EXPENSE,
           amount: item.amount,
           currency: this.state.settings.baseCurrency || 'USD',
@@ -2367,6 +2698,7 @@ class FinanceAppController {
 
   /**
    * Calls the server's Genkit financialInsightsFlow (/api/ai/insights) with the compressed micro-payload.
+   * Forwards the user's localStorage Gemini API key via x-gemini-api-key header when configured.
    */
   async handleGenkitInsights() {
     const micro = this.currentMicroPayload;
@@ -2390,10 +2722,16 @@ class FinanceAppController {
       btn.textContent = 'Analizando micro-payload...';
     }
 
+    const localGeminiKey = this.authService?.geminiKeyStore?.getApiKey() || '';
+    const headers = { 'Content-Type': 'application/json' };
+    if (localGeminiKey) {
+      headers['x-gemini-api-key'] = localGeminiKey;
+    }
+
     try {
       const response = await fetch('/api/ai/insights', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           compactPayload: micro.compactPayload,
           lang: 'es',
@@ -2474,10 +2812,12 @@ class FinanceAppController {
 
     const used = this.state.aiTelemetry?.totalTokensUsed || 0;
     const saved = this.state.aiTelemetry?.localParsesSaved || 0;
-    const modeLabel = this.serverStatus?.genkitConfigured ? 'Genkit Ready' : 'Modo 0-Tokens';
+    const hasLocalKey = Boolean(this.authService?.geminiKeyStore?.hasApiKey());
+    const isGenkitActive = Boolean(this.serverStatus?.genkitConfigured || hasLocalKey);
+    const modeLabel = isGenkitActive ? 'Genkit Ready' : 'Modo 0-Tokens';
 
     badgeEl.innerHTML = `
-      <span class="telemetry-dot ${this.serverStatus?.genkitConfigured ? 'is-live' : ''}"></span>
+      <span class="telemetry-dot ${isGenkitActive ? 'is-live' : ''}"></span>
       <span>${modeLabel}: <strong>${used} tok</strong> · Ahorrados: <strong>${saved}</strong></span>
     `;
   }

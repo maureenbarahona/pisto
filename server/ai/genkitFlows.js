@@ -29,27 +29,22 @@ const telemetry = {
   totalOutputTokens: 0,
 };
 
-let genkitInstance = null;
-let googleAiPlugin = null;
-let zodLib = null;
-let genkitInitAttempted = false;
+const genkitRuntimeCache = new Map();
 
 /**
  * Lazily initializes Firebase Genkit only when an AI flow is actually invoked
- * and GEMINI_API_KEY is present.
+ * and GEMINI_API_KEY (or a client-provided apiKey from localStorage) is present.
+ * @param {string} [userApiKey]
  */
-async function getGenkitRuntime() {
-  if (!process.env.GEMINI_API_KEY) {
+async function getGenkitRuntime(userApiKey) {
+  const effectiveKey = String(userApiKey || process.env.GEMINI_API_KEY || '').trim();
+  if (!effectiveKey) {
     return null;
   }
-  if (genkitInstance) {
-    return { ai: genkitInstance, googleAI: googleAiPlugin, z: zodLib };
-  }
-  if (genkitInitAttempted) {
-    return null;
+  if (genkitRuntimeCache.has(effectiveKey)) {
+    return genkitRuntimeCache.get(effectiveKey);
   }
 
-  genkitInitAttempted = true;
   try {
     const [{ genkit, z }, { googleAI }] = await Promise.all([
       import('genkit'),
@@ -57,22 +52,18 @@ async function getGenkitRuntime() {
     ]);
 
     const ai = genkit({
-      plugins: [googleAI({ apiKey: process.env.GEMINI_API_KEY })],
+      plugins: [googleAI({ apiKey: effectiveKey })],
     });
 
-    genkitInstance = ai;
-    googleAiPlugin = googleAI;
-    zodLib = z;
-
-    registerGenkitFlows(ai, googleAI, z);
-    return { ai, googleAI, z };
+    const flows = registerGenkitFlows(ai, googleAI, z);
+    const runtime = { ai, googleAI, z, flows };
+    genkitRuntimeCache.set(effectiveKey, runtime);
+    return runtime;
   } catch (error) {
     console.warn('[Genkit] Running in 0-token local mode (Genkit packages or API key unavailable):', error.message);
     return null;
   }
 }
-
-let registeredFlows = null;
 
 /**
  * Registers structured Genkit flows using Zod schemas and token caps.
@@ -169,7 +160,7 @@ function registerGenkitFlows(ai, googleAI, z) {
     }
   );
 
-  registeredFlows = { parseTransactionsFlow, financialInsightsFlow };
+    return { parseTransactionsFlow, financialInsightsFlow };
 }
 
 /**
@@ -217,9 +208,9 @@ function setCachedResponse(key, data, tokensUsed = 0) {
 
 /**
  * Executes the Genkit transaction parser or falls back to deterministic multi-clause parsing.
- * @param {{ text: string, categories?: string[] }} input
+ * @param {{ text: string, categories?: string[], apiKey?: string }} input
  */
-export async function executeSmartParse({ text, categories = [] }) {
+export async function executeSmartParse({ text, categories = [], apiKey }) {
   const cleanText = String(text || '').trim().slice(0, 400);
   if (!cleanText) {
     throw new Error('El texto para analizar no puede estar vacío.');
@@ -235,11 +226,11 @@ export async function executeSmartParse({ text, categories = [] }) {
     return { ...cached, cached: true, tokensUsed: 0 };
   }
 
-  const runtime = await getGenkitRuntime();
-  if (runtime && registeredFlows) {
+  const runtime = await getGenkitRuntime(apiKey);
+  if (runtime && runtime.flows) {
     try {
       const beforeTokens = telemetry.totalInputTokens + telemetry.totalOutputTokens;
-      const output = await registeredFlows.parseTransactionsFlow({
+      const output = await runtime.flows.parseTransactionsFlow({
         text: cleanText,
         categories: allowedCategories,
       });
@@ -272,9 +263,9 @@ export async function executeSmartParse({ text, categories = [] }) {
 
 /**
  * Executes the Genkit Financial Insights flow using a micro-compressed payload.
- * @param {{ compactPayload: object, lang?: string }} input
+ * @param {{ compactPayload: object, lang?: string, apiKey?: string }} input
  */
-export async function executeFinancialInsights({ compactPayload, lang = 'es' }) {
+export async function executeFinancialInsights({ compactPayload, lang = 'es', apiKey }) {
   const compactSummary = JSON.stringify(compactPayload || {});
   const cacheKey = buildCacheKey('insights', { compactSummary, lang });
   const cached = getCachedResponse(cacheKey);
@@ -282,11 +273,11 @@ export async function executeFinancialInsights({ compactPayload, lang = 'es' }) 
     return { ...cached, cached: true, tokensUsed: 0 };
   }
 
-  const runtime = await getGenkitRuntime();
-  if (runtime && registeredFlows) {
+  const runtime = await getGenkitRuntime(apiKey);
+  if (runtime && runtime.flows) {
     try {
       const beforeTokens = telemetry.totalInputTokens + telemetry.totalOutputTokens;
-      const insights = await registeredFlows.financialInsightsFlow({
+      const insights = await runtime.flows.financialInsightsFlow({
         compactSummary,
         lang,
       });

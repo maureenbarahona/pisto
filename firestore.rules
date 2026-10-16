@@ -1,0 +1,436 @@
+rules_version = '2';
+
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// This security rules file assumes the following data structures:
+//
+// Collection: users
+// Document ID: {uid} (matches Firebase Auth request.auth.uid)
+// Fields:
+//   - uid: string (required, immutable, 1..128 chars) - Firebase Auth UID
+//   - email: string (required, immutable on family link, valid email, <= 120 chars) - User email
+//   - name: string (required, 1..80 chars) - Display name
+//   - country: string (required, 2..10 chars) - ISO country code (e.g., 'HN', 'US')
+//   - defaultCurrency: string (required, 3..10 chars) - ISO currency code (e.g., 'HNL', 'USD')
+//   - personalViewMode: bool (required) - Whether personal view mode is active
+//   - filterByDefaultCurrency: bool (required) - Whether dashboard filters by defaultCurrency
+//   - workspaceId: string (optional, 1..128 chars) - Shared family workspace ID (e.g., 'ws_<uid>')
+//   - sharedWithEmails: list of strings (optional, max 50 items) - Linked family member emails
+//   - createdAt: string (required, immutable, <= 40 chars) - ISO creation timestamp
+//   - updatedAt: string (required, <= 40 chars) - ISO update timestamp
+//
+// Collection: workspaces
+// Document ID: {workspaceId}
+// Fields:
+//   - workspaceId: string (required, immutable, 1..128 chars) - Unique workspace ID
+//   - ownerUid: string (required, immutable, 1..128 chars) - UID of the workspace creator
+//   - memberUids: list of strings (required, max 50 items) - UIDs of family members
+//   - memberEmails: list of strings (required, max 50 items) - Normalized emails of family members
+//   - createdAt: string (required, immutable, <= 40 chars) - ISO creation timestamp
+//   - updatedAt: string (required, <= 40 chars) - ISO update timestamp
+//
+// Collection: transactions (and subcollection /workspaces/{workspaceId}/transactions)
+// Document ID: {txId}
+// Fields:
+//   - id: string (optional, immutable, 1..128 chars) - Transaction ID
+//   - createdByUid: string (required, immutable, 1..128 chars) - UID del usuario que creó la transacción
+//   - createdByEmail: string (required, immutable, <= 120 chars) - Email para mostrar "Por: usuario"
+//   - createdByName: string (optional, <= 80 chars) - Nombre para mostrar del creador
+//   - ownerUid: string (optional, <= 128 chars) - Alias de propietario de la transacción
+//   - ownerName: string (optional, <= 80 chars) - Nombre del propietario
+//   - workspaceId: string (required, immutable, 1..128 chars) - ID del grupo familiar / workspace
+//   - amount: number (required, > 0, <= 1000000000) - Monto positivo de la transacción
+//   - type: string (required, enum: 'expense', 'income', 'transfer') - Tipo de movimiento
+//   - currency: string (required, 3..10 chars) - Código de moneda ('HNL', 'USD', etc.)
+//   - categoryId: string (required, 1..64 chars) - Identificador de categoría
+//   - accountId: string (required, 1..64 chars) - Cuenta origen
+//   - toAccountId: string or null (optional, <= 64 chars) - Cuenta destino en transferencias
+//   - note: string (optional, <= 160 chars) - Nota o concepto
+//   - date: string (required, <= 25 chars) - Fecha YYYY-MM-DD
+//   - createdAt: string (optional, immutable, <= 40 chars) - ISO creation timestamp
+//   - updatedAt: string (optional, <= 40 chars) - ISO update timestamp
+//
+// ===============================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    // Check if the user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Check if user owns the resource (for user-owned documents)
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Check if user is owner based on document's uid field
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.uid;
+    }
+
+    // Verify UID hasn't been tampered with on create
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) ||
+        request.resource.data.uid == request.auth.uid;
+    }
+
+    // Ensure uid field is not modified on update
+    function uidNotModified() {
+      return !('uid' in request.resource.data) ||
+        request.resource.data.uid == resource.data.uid;
+    }
+
+    // Validate required fields exist
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    // Validate that the document contains only the allowed fields
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // Validate string length
+    function validStringLength(field, minLen, maxLen) {
+      return request.resource.data[field] is string &&
+        request.resource.data[field].size() >= minLen &&
+        request.resource.data[field].size() <= maxLen;
+    }
+
+    // Validate optional string (if present, must be string and within length)
+    function isValidOptionalString(field, minLen, maxLen) {
+      return !(field in request.resource.data) ||
+        request.resource.data[field] == null ||
+        (request.resource.data[field] is string &&
+         request.resource.data[field].size() >= minLen &&
+         request.resource.data[field].size() <= maxLen);
+    }
+
+    // Validate email format
+    function isValidEmail(email) {
+      return email is string &&
+        email.size() >= 3 &&
+        email.size() <= 120 &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    // Validate ISO 8601 date string format
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.size() >= 10 &&
+        dateStr.size() <= 40 &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}.*$");
+    }
+
+    // Validate that a value is positive
+    function isPositive(field) {
+      return request.resource.data[field] is number &&
+        request.resource.data[field] > 0 &&
+        request.resource.data[field] <= 1000000000;
+    }
+
+    // Validate that a list is a list and enforces size limits
+    function isValidList(list, maxSize) {
+      return list is list && list.size() <= maxSize;
+    }
+
+    // Validate that immutable fields have not changed during update
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    // Helper to resolve the caller's linked workspaceId from their user profile
+    function callerWorkspaceId() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId;
+    }
+
+    // Check if the authenticated user is an authorized member of the target workspace
+    function isAuthorizedWorkspaceMember(wsId) {
+      return isAuthenticated() &&
+        wsId is string &&
+        (
+          wsId == 'ws_default' ||
+          wsId == ('ws_' + request.auth.uid) ||
+          (
+            exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId == wsId
+          ) ||
+          (
+            exists(/databases/$(database)/documents/workspaces/$(wsId)) &&
+            (
+              request.auth.uid in get(/databases/$(database)/documents/workspaces/$(wsId)).data.memberUids ||
+              request.auth.token.email in get(/databases/$(database)/documents/workspaces/$(wsId)).data.memberEmails ||
+              get(/databases/$(database)/documents/workspaces/$(wsId)).data.ownerUid == request.auth.uid
+            )
+          )
+        );
+    }
+
+    // ===============================================================
+    // Domain Validators (Used in BOTH create and update)
+    // ===============================================================
+
+    function isValidUser(data) {
+      let requiredFields = [
+        'uid',
+        'email',
+        'name',
+        'country',
+        'defaultCurrency',
+        'personalViewMode',
+        'filterByDefaultCurrency',
+        'createdAt',
+        'updatedAt'
+      ];
+      let allowedFields = [
+        'uid',
+        'email',
+        'name',
+        'country',
+        'defaultCurrency',
+        'personalViewMode',
+        'filterByDefaultCurrency',
+        'workspaceId',
+        'sharedWithEmails',
+        'createdAt',
+        'updatedAt'
+      ];
+      return hasRequiredFields(requiredFields) &&
+        hasOnlyAllowedFields(allowedFields) &&
+        validStringLength('uid', 1, 128) &&
+        isValidEmail(data.email) &&
+        validStringLength('name', 1, 80) &&
+        validStringLength('country', 2, 10) &&
+        validStringLength('defaultCurrency', 3, 10) &&
+        data.personalViewMode is bool &&
+        data.filterByDefaultCurrency is bool &&
+        isValidOptionalString('workspaceId', 1, 128) &&
+        (!('sharedWithEmails' in data) || isValidList(data.sharedWithEmails, 50)) &&
+        isValidDateString(data.createdAt) &&
+        isValidDateString(data.updatedAt);
+    }
+
+    function isValidWorkspace(data) {
+      let requiredFields = [
+        'workspaceId',
+        'ownerUid',
+        'memberUids',
+        'memberEmails',
+        'createdAt',
+        'updatedAt'
+      ];
+      let allowedFields = [
+        'workspaceId',
+        'ownerUid',
+        'memberUids',
+        'memberEmails',
+        'createdAt',
+        'updatedAt'
+      ];
+      return hasRequiredFields(requiredFields) &&
+        hasOnlyAllowedFields(allowedFields) &&
+        validStringLength('workspaceId', 1, 128) &&
+        validStringLength('ownerUid', 1, 128) &&
+        isValidList(data.memberUids, 50) &&
+        isValidList(data.memberEmails, 50) &&
+        isValidDateString(data.createdAt) &&
+        isValidDateString(data.updatedAt);
+    }
+
+    function isValidTransaction(data) {
+      let requiredFields = [
+        'createdByUid',
+        'createdByEmail',
+        'workspaceId',
+        'amount',
+        'type',
+        'currency',
+        'categoryId',
+        'accountId',
+        'date'
+      ];
+      let allowedFields = [
+        'id',
+        'createdByUid',
+        'createdByEmail',
+        'createdByName',
+        'ownerUid',
+        'ownerName',
+        'workspaceId',
+        'amount',
+        'type',
+        'currency',
+        'categoryId',
+        'accountId',
+        'toAccountId',
+        'note',
+        'date',
+        'createdAt',
+        'updatedAt'
+      ];
+      return hasRequiredFields(requiredFields) &&
+        hasOnlyAllowedFields(allowedFields) &&
+        data.createdByUid is string &&
+        validStringLength('createdByUid', 1, 128) &&
+        data.createdByEmail is string &&
+        validStringLength('createdByEmail', 3, 120) &&
+        data.workspaceId is string &&
+        validStringLength('workspaceId', 1, 128) &&
+        data.amount is number &&
+        data.amount > 0 &&
+        isPositive('amount') &&
+        data.type in ['expense', 'income', 'transfer'] &&
+        validStringLength('currency', 3, 10) &&
+        validStringLength('categoryId', 1, 64) &&
+        validStringLength('accountId', 1, 64) &&
+        isValidDateString(data.date) &&
+        isValidOptionalString('id', 1, 128) &&
+        isValidOptionalString('createdByName', 0, 80) &&
+        isValidOptionalString('ownerUid', 0, 128) &&
+        isValidOptionalString('ownerName', 0, 80) &&
+        isValidOptionalString('toAccountId', 0, 64) &&
+        isValidOptionalString('note', 0, 160) &&
+        isValidOptionalString('createdAt', 10, 40) &&
+        isValidOptionalString('updatedAt', 10, 40);
+    }
+
+    // ===============================================================
+    // Collection Rules
+    // ===============================================================
+
+    // 1. User Profiles (`users/{uid}`)
+    match /users/{uid} {
+      // Authenticated users can read their own profile and query by email to link a family member's workspaceId
+      allow get, list: if request.auth != null;
+
+      allow create: if request.auth != null &&
+        request.auth.uid == uid &&
+        request.resource.data.uid == uid &&
+        uidUnchanged() &&
+        isValidUser(request.resource.data);
+
+      allow update: if request.auth != null &&
+        isValidUser(request.resource.data) &&
+        uidNotModified() &&
+        areImmutableFieldsUnchanged(['uid', 'createdAt']) &&
+        (
+          (request.auth.uid == uid && request.resource.data.uid == resource.data.uid) ||
+          (
+            resource.data.email == request.resource.data.email &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['workspaceId', 'sharedWithEmails', 'updatedAt'])
+          )
+        );
+
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // 2. Shared Family Workspaces (`workspaces/{workspaceId}`)
+    match /workspaces/{workspaceId} {
+      allow get, list: if request.auth != null &&
+        (
+          request.auth.uid in resource.data.memberUids ||
+          request.auth.token.email in resource.data.memberEmails ||
+          resource.data.ownerUid == request.auth.uid
+        );
+
+      allow create: if request.auth != null &&
+        request.resource.data.ownerUid == request.auth.uid &&
+        request.resource.data.workspaceId == workspaceId &&
+        isValidWorkspace(request.resource.data);
+
+      allow update: if request.auth != null &&
+        isValidWorkspace(request.resource.data) &&
+        areImmutableFieldsUnchanged(['workspaceId', 'ownerUid', 'createdAt']) &&
+        (
+          request.auth.uid in resource.data.memberUids ||
+          request.auth.token.email in resource.data.memberEmails ||
+          resource.data.ownerUid == request.auth.uid
+        );
+
+      allow delete: if request.auth != null &&
+        resource.data.ownerUid == request.auth.uid;
+
+      // Subcollection for workspace-scoped transactions (`/workspaces/{workspaceId}/transactions/{txId}`)
+      match /transactions/{txId} {
+        allow read: if isAuthenticated() &&
+          (
+            resource.data.createdByUid == request.auth.uid ||
+            isAuthorizedWorkspaceMember(resource.data.workspaceId)
+          );
+
+        allow create: if isAuthenticated() &&
+          isValidTransaction(request.resource.data) &&
+          request.resource.data.createdByUid == request.auth.uid &&
+          request.resource.data.createdByEmail is string &&
+          request.resource.data.workspaceId is string &&
+          request.resource.data.workspaceId == workspaceId &&
+          request.resource.data.amount is number &&
+          request.resource.data.amount > 0 &&
+          isAuthorizedWorkspaceMember(request.resource.data.workspaceId);
+
+        allow update: if isAuthenticated() &&
+          isValidTransaction(request.resource.data) &&
+          (
+            resource.data.createdByUid == request.auth.uid ||
+            isAuthorizedWorkspaceMember(resource.data.workspaceId)
+          ) &&
+          isAuthorizedWorkspaceMember(request.resource.data.workspaceId) &&
+          request.resource.data.createdByUid == resource.data.createdByUid &&
+          request.resource.data.amount > 0;
+
+        allow delete: if isAuthenticated() &&
+          (
+            resource.data.createdByUid == request.auth.uid ||
+            isAuthorizedWorkspaceMember(resource.data.workspaceId)
+          );
+      }
+    }
+
+    // 3. Top-Level Transactions (`transactions/{txId}`)
+    match /transactions/{txId} {
+      allow read: if isAuthenticated() &&
+        (
+          resource.data.createdByUid == request.auth.uid ||
+          isAuthorizedWorkspaceMember(resource.data.workspaceId)
+        );
+
+      allow create: if isAuthenticated() &&
+        isValidTransaction(request.resource.data) &&
+        request.resource.data.createdByUid == request.auth.uid &&
+        request.resource.data.createdByEmail is string &&
+        request.resource.data.workspaceId is string &&
+        request.resource.data.amount is number &&
+        request.resource.data.amount > 0 &&
+        isAuthorizedWorkspaceMember(request.resource.data.workspaceId);
+
+      allow update: if isAuthenticated() &&
+        isValidTransaction(request.resource.data) &&
+        (
+          resource.data.createdByUid == request.auth.uid ||
+          isAuthorizedWorkspaceMember(resource.data.workspaceId)
+        ) &&
+        isAuthorizedWorkspaceMember(request.resource.data.workspaceId) &&
+        request.resource.data.createdByUid == resource.data.createdByUid &&
+        request.resource.data.amount > 0;
+
+      allow delete: if isAuthenticated() &&
+        (
+          resource.data.createdByUid == request.auth.uid ||
+          isAuthorizedWorkspaceMember(resource.data.workspaceId)
+        );
+    }
+
+    // Default deny for all other collections and paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

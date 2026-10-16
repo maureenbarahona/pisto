@@ -46,6 +46,20 @@ import {
   executeSmartParse,
   executeFinancialInsights,
 } from '../server/ai/genkitFlows.js';
+import {
+  FirebaseAuthProfileService,
+  GeminiKeyLocalStore,
+  createUserProfile,
+  buildWorkspaceTransactionIndex,
+  filterTransactionsForUserView,
+} from '../public/js/services/authProfileService.ts';
+import {
+  prepareTransactionForWorkspace,
+  buildWorkspaceTransactionsQuery,
+  fetchWorkspaceTransactions,
+  subscribeWorkspaceTransactions,
+  saveTransactionToWorkspace,
+} from '../src/services/transactions.ts';
 import { handleRequest } from '../server/index.js';
 import http from 'node:http';
 
@@ -371,7 +385,15 @@ describe('Cloud Run HTTP Server Endpoints', () => {
       const htmlRes = await fetch(`${baseUrl}/`);
       assert.equal(htmlRes.status, 200);
       const htmlText = await htmlRes.text();
-      assert.ok(htmlText.includes('Pisto Open-Finance'));
+      assert.ok(htmlText.includes('Pisto'));
+      assert.ok(htmlText.includes('tab-btn-profile'));
+
+      // Also verify that TypeScript modules are transpiled and served as JavaScript
+      const tsRes = await fetch(`${baseUrl}/js/services/authProfileService.ts`);
+      assert.equal(tsRes.status, 200);
+      assert.ok((tsRes.headers.get('content-type') || '').includes('javascript'));
+      const tsBody = await tsRes.text();
+      assert.ok(tsBody.includes('FirebaseAuthProfileService'));
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -521,5 +543,491 @@ describe('Account Detail View & Custom Date Range Filtering', () => {
   });
 });
 
+describe('Firebase Auth, Firestore Profile (users/{uid}) & Dashboard Currency/Personal View Filtering', () => {
+  function createMemoryStorage() {
+    const map = new Map();
+    return {
+      getItem: (key) => (map.has(key) ? map.get(key) : null),
+      setItem: (key, val) => map.set(key, String(val)),
+      removeItem: (key) => map.delete(key),
+    };
+  }
 
+  it('stores and retrieves Gemini API Key in localStorage without persisting it to Firestore profile', () => {
+    const storage = createMemoryStorage();
+    const keyStore = new GeminiKeyLocalStore(storage);
+
+    assert.equal(keyStore.hasApiKey(), false);
+    keyStore.setApiKey('  AIzaSyDemoBrowserKey123456789  ');
+    assert.equal(keyStore.hasApiKey(), true);
+    assert.equal(keyStore.getApiKey(), 'AIzaSyDemoBrowserKey123456789');
+
+    keyStore.setApiKey('');
+    assert.equal(keyStore.hasApiKey(), false);
+  });
+
+  it('supports Email/Password registration, Google Sign-In, and persists profile in users/{uid}', async () => {
+    const storage = createMemoryStorage();
+    const authService = new FirebaseAuthProfileService(storage);
+    await authService.init();
+
+    // 1. Register with Email & Password
+    const registered = await authService.signInOrRegisterWithEmail({
+      email: 'maureen@pisto.hn',
+      password: 'segura123',
+      name: 'Maureen Barahona',
+      country: 'HN',
+      defaultCurrency: 'HNL',
+      isRegister: true,
+    });
+    assert.equal(registered.user.email, 'maureen@pisto.hn');
+    assert.equal(registered.user.provider, 'password');
+    assert.equal(registered.profile.name, 'Maureen Barahona');
+    assert.equal(registered.profile.defaultCurrency, 'HNL');
+    assert.equal(authService.getFirestoreUserPath(registered.user.uid), `users/${registered.user.uid}`);
+
+    // 2. Edit profile fields (Name, Country, Default Currency, Personal View Mode) + Gemini API key in localStorage
+    authService.geminiKeyStore.setApiKey('AIzaSyLocalGeminiKeyOnly');
+    const updatedProfile = await authService.saveUserProfile(registered.user.uid, {
+      name: 'Maureen B.',
+      country: 'HN',
+      defaultCurrency: 'USD',
+      personalViewMode: true,
+    });
+
+    assert.equal(updatedProfile.uid, registered.user.uid);
+    assert.equal(updatedProfile.name, 'Maureen B.');
+    assert.equal(updatedProfile.country, 'HN');
+    assert.equal(updatedProfile.defaultCurrency, 'USD');
+    assert.equal(updatedProfile.personalViewMode, true);
+    // Ensure Gemini key is ONLY in localStorage and NOT in users/{uid} document
+    assert.equal('geminiApiKey' in updatedProfile, false);
+    assert.equal(authService.geminiKeyStore.getApiKey(), 'AIzaSyLocalGeminiKeyOnly');
+
+    // 3. Sign out and sign back in with Email/Password -> restores users/{uid} profile
+    await authService.signOut();
+    assert.equal(authService.getCurrentUser(), null);
+
+    const signedIn = await authService.signInOrRegisterWithEmail({
+      email: 'maureen@pisto.hn',
+      password: 'segura123',
+      isRegister: false,
+    });
+    assert.equal(signedIn.user.uid, registered.user.uid);
+    assert.equal(signedIn.profile.name, 'Maureen B.');
+    assert.equal(signedIn.profile.defaultCurrency, 'USD');
+    assert.equal(signedIn.profile.personalViewMode, true);
+
+    // 4. Sign in with Google
+    const googleSession = await authService.signInWithGoogle({
+      email: 'carlos.familia@gmail.com',
+      name: 'Carlos Familia',
+    });
+    assert.equal(googleSession.user.provider, 'google');
+    assert.equal(googleSession.profile.name, 'Carlos Familia');
+  });
+
+  it('filters Dashboard analytics and Ledger transactions by defaultCurrency and personalViewMode', () => {
+    const state = createSeedState();
+    state.settings.baseCurrency = 'HNL';
+    state.transactions = [
+      createTransaction({
+        id: 'tx_hnl_mau',
+        type: TRANSACTION_TYPES.EXPENSE,
+        amount: 500,
+        currency: 'HNL',
+        categoryId: 'food',
+        accountId: 'acc_cash',
+        date: '2026-10-15',
+        note: 'Baleadas Kennedy',
+        ownerUid: 'uid_maureen',
+        ownerName: 'Maureen',
+      }),
+      createTransaction({
+        id: 'tx_usd_mau',
+        type: TRANSACTION_TYPES.EXPENSE,
+        amount: 40,
+        currency: 'USD',
+        categoryId: 'services',
+        accountId: 'acc_card',
+        date: '2026-10-15',
+        note: 'Cloud Hosting',
+        ownerUid: 'uid_maureen',
+        ownerName: 'Maureen',
+      }),
+      createTransaction({
+        id: 'tx_hnl_family',
+        type: TRANSACTION_TYPES.EXPENSE,
+        amount: 1200,
+        currency: 'HNL',
+        categoryId: 'groceries',
+        accountId: 'acc_bank',
+        date: '2026-10-15',
+        note: 'Supermercado Familiar',
+        ownerUid: 'uid_carlos',
+        ownerName: 'Carlos',
+      }),
+    ];
+
+    // 1. Filter by user's defaultCurrency (HNL) in family mode (personalViewMode = false)
+    const hnlFamilyAnalytics = computePeriodAnalytics(state, {
+      period: 'all',
+      currencyFilter: 'HNL',
+      personalViewMode: false,
+      currentUid: 'uid_maureen',
+    });
+    assert.equal(hnlFamilyAnalytics.currencyFilter, 'HNL');
+    assert.equal(hnlFamilyAnalytics.totalExpense, 1700); // 500 + 1200 HNL
+
+    // 2. Enable "Modo Vista Personal" (personalViewMode = true) -> only Maureen's HNL transactions
+    const hnlPersonalAnalytics = computePeriodAnalytics(state, {
+      period: 'all',
+      currencyFilter: 'HNL',
+      personalViewMode: true,
+      currentUid: 'uid_maureen',
+    });
+    assert.equal(hnlPersonalAnalytics.totalExpense, 500);
+
+    // 3. Ledger day groups also honor currencyFilter and personalViewMode
+    const ledgerPersonalGroups = groupTransactionsByDay(state, {
+      period: 'all',
+      currencyFilter: 'HNL',
+      personalViewMode: true,
+      currentUid: 'uid_maureen',
+    });
+    assert.equal(ledgerPersonalGroups.length, 1);
+    assert.equal(ledgerPersonalGroups[0].items.length, 1);
+    assert.equal(ledgerPersonalGroups[0].items[0].id, 'tx_hnl_mau');
+
+    // 4. Direct helper verification
+    const helperFiltered = filterTransactionsForUserView(state.transactions, {
+      currencyFilter: 'USD',
+      personalViewMode: true,
+      currentUid: 'uid_maureen',
+    });
+    assert.equal(helperFiltered.length, 1);
+    assert.equal(helperFiltered[0].id, 'tx_usd_mau');
+  });
+});
+
+describe('Shared Family Finances (Finanzas Familiares Compartidas)', () => {
+  it('stores createdByUid, createdByEmail, and workspaceId on Transaction domain model', () => {
+    const tx = createTransaction({
+      type: TRANSACTION_TYPES.EXPENSE,
+      amount: 850,
+      currency: 'HNL',
+      categoryId: 'groceries',
+      accountId: 'acc_bank',
+      date: '2026-10-16',
+      note: 'Compra familiar supermercado',
+      createdByUid: 'uid_maureen_01',
+      createdByEmail: 'maureen@familia.hn',
+      workspaceId: 'ws_familia_barahona',
+    });
+
+    assert.equal(tx.createdByUid, 'uid_maureen_01');
+    assert.equal(tx.createdByEmail, 'maureen@familia.hn');
+    assert.equal(tx.workspaceId, 'ws_familia_barahona');
+    assert.equal(`Por: ${tx.createdByEmail.split('@')[0]}`, 'Por: maureen');
+  });
+
+  it('links two registered family users to the same workspaceId via shareWorkspaceWithEmail', async () => {
+    const mockStorage = {
+      map: new Map(),
+      getItem(k) {
+        return this.map.has(k) ? this.map.get(k) : null;
+      },
+      setItem(k, v) {
+        this.map.set(k, String(v));
+      },
+      removeItem(k) {
+        this.map.delete(k);
+      },
+    };
+
+    const authService = new FirebaseAuthProfileService(mockStorage);
+
+    // 1. Register Family Member B (Carlos)
+    const carlosReg = await authService.signInOrRegisterWithEmail({
+      email: 'carlos@familia.hn',
+      password: 'password123',
+      name: 'Carlos',
+      isRegister: true,
+    });
+    assert.ok(carlosReg.profile.workspaceId.startsWith('ws_'));
+
+    // 2. Register Family Member A (Maureen)
+    await authService.signOut();
+    const maureenReg = await authService.signInOrRegisterWithEmail({
+      email: 'maureen@familia.hn',
+      password: 'password123',
+      name: 'Maureen',
+      isRegister: true,
+    });
+
+    // 3. Maureen shares her financial workspace with Carlos by email
+    const shareRes = await authService.shareWorkspaceWithEmail('carlos@familia.hn');
+    assert.equal(shareRes.linkedEmail, 'carlos@familia.hn');
+    assert.ok(shareRes.profile.sharedWithEmails.includes('carlos@familia.hn'));
+    assert.equal(shareRes.profile.workspaceId, shareRes.workspaceId);
+
+    // 4. Verify Carlos now shares the exact same workspaceId when he signs in
+    await authService.signOut();
+    const carlosLogin = await authService.signInOrRegisterWithEmail({
+      email: 'carlos@familia.hn',
+      password: 'password123',
+      isRegister: false,
+    });
+    assert.equal(carlosLogin.profile.workspaceId, shareRes.workspaceId);
+    assert.ok(carlosLogin.profile.sharedWithEmails.includes('maureen@familia.hn'));
+  });
+
+  it('filters Dashboard and Ledger by workspaceId when personalViewMode is INACTIVE and by createdByUid when ACTIVE', () => {
+    const state = createSeedState();
+    state.settings.baseCurrency = 'HNL';
+    state.transactions = [
+      createTransaction({
+        id: 'tx_fam_maureen',
+        type: TRANSACTION_TYPES.EXPENSE,
+        amount: 600,
+        currency: 'HNL',
+        categoryId: 'food',
+        accountId: 'acc_cash',
+        date: '2026-10-16',
+        note: 'Almuerzo familiar',
+        createdByUid: 'uid_maureen',
+        createdByEmail: 'maureen@familia.hn',
+        workspaceId: 'ws_shared_home',
+      }),
+      createTransaction({
+        id: 'tx_fam_carlos',
+        type: TRANSACTION_TYPES.EXPENSE,
+        amount: 1400,
+        currency: 'HNL',
+        categoryId: 'groceries',
+        accountId: 'acc_bank',
+        date: '2026-10-16',
+        note: 'Despensa mensual',
+        createdByUid: 'uid_carlos',
+        createdByEmail: 'carlos@familia.hn',
+        workspaceId: 'ws_shared_home',
+      }),
+      createTransaction({
+        id: 'tx_other_workspace',
+        type: TRANSACTION_TYPES.EXPENSE,
+        amount: 5000,
+        currency: 'HNL',
+        categoryId: 'housing',
+        accountId: 'acc_bank',
+        date: '2026-10-16',
+        note: 'Otro grupo familiar ajeno',
+        createdByUid: 'uid_externo',
+        createdByEmail: 'externo@otro.hn',
+        workspaceId: 'ws_other_family',
+      }),
+    ];
+
+    // 1. Lightweight O(1) index check
+    const idx = buildWorkspaceTransactionIndex(state.transactions);
+    assert.equal(idx.byWorkspace.get('ws_shared_home')?.length, 2);
+    assert.equal(idx.byCreator.get('uid_maureen')?.length, 1);
+
+    // 2. personalViewMode INACTIVE (false): shows ALL transactions in `ws_shared_home` (600 + 1400 = 2000), excluding `ws_other_family`
+    const sharedAnalytics = computePeriodAnalytics(state, {
+      period: 'all',
+      personalViewMode: false,
+      currentUid: 'uid_maureen',
+      workspaceId: 'ws_shared_home',
+    });
+    assert.equal(sharedAnalytics.totalExpense, 2000);
+
+    const sharedGroups = groupTransactionsByDay(state, {
+      period: 'all',
+      personalViewMode: false,
+      currentUid: 'uid_maureen',
+      workspaceId: 'ws_shared_home',
+    });
+    assert.equal(sharedGroups[0].items.length, 2);
+
+    // 3. personalViewMode ACTIVE (true): shows ONLY transactions where `createdByUid === 'uid_maureen'` (600)
+    const personalAnalytics = computePeriodAnalytics(state, {
+      period: 'all',
+      personalViewMode: true,
+      currentUid: 'uid_maureen',
+      workspaceId: 'ws_shared_home',
+    });
+    assert.equal(personalAnalytics.totalExpense, 600);
+
+    const personalGroups = groupTransactionsByDay(state, {
+      period: 'all',
+      personalViewMode: true,
+      currentUid: 'uid_maureen',
+      workspaceId: 'ws_shared_home',
+    });
+    assert.equal(personalGroups[0].items.length, 1);
+    assert.equal(personalGroups[0].items[0].createdByUid, 'uid_maureen');
+    assert.equal(personalGroups[0].items[0].createdByEmail.split('@')[0], 'maureen');
+  });
+
+  it('queries Firestore transactions by workspaceId (all members when personalViewMode is false) and attaches workspaceId/createdByUid/createdByEmail on creation', async () => {
+    const capturedWhereConstraints = [];
+    const mockFirestoreDocs = [];
+
+    const mockFirestoreModule = {
+      collection: (_db, name) => ({ type: 'collection', name }),
+      where: (field, op, value) => {
+        const constraint = { field, op, value };
+        capturedWhereConstraints.push(constraint);
+        return constraint;
+      },
+      query: (col, ...constraints) => ({ col, constraints }),
+      getDocs: async (q) => {
+        const matched = mockFirestoreDocs.filter((docData) =>
+          q.constraints.every((c) => docData[c.field] === c.value)
+        );
+        return {
+          empty: matched.length === 0,
+          docs: matched.map((d) => ({ id: d.id, data: () => d })),
+        };
+      },
+      onSnapshot: (q, onNext) => {
+        const matched = mockFirestoreDocs.filter((docData) =>
+          q.constraints.every((c) => docData[c.field] === c.value)
+        );
+        onNext({
+          empty: matched.length === 0,
+          docs: matched.map((d) => ({ id: d.id, data: () => d })),
+        });
+        return () => {};
+      },
+      doc: (_db, col, id) => ({ col, id }),
+      setDoc: async (ref, data) => {
+        const idx = mockFirestoreDocs.findIndex((d) => d.id === ref.id);
+        if (idx >= 0) {
+          mockFirestoreDocs[idx] = { ...mockFirestoreDocs[idx], ...data };
+        } else {
+          mockFirestoreDocs.push({ ...data, id: ref.id });
+        }
+      },
+      deleteDoc: async () => {},
+    };
+
+    const mockDb = { name: 'mock_firestore_db' };
+
+    // 1. User A creates a transaction in shared workspace `ws_fam_hogar123`
+    const userA = { uid: 'uid_ana', email: 'ana@familia.hn', displayName: 'Ana' };
+    const profileA = createUserProfile({
+      uid: 'uid_ana',
+      email: 'ana@familia.hn',
+      workspaceId: 'ws_fam_hogar123',
+      personalViewMode: false,
+    });
+
+    const txA = await saveTransactionToWorkspace(
+      {
+        id: 'tx_shared_ana',
+        type: 'expense',
+        amount: 850,
+        currency: 'HNL',
+        categoryId: 'groceries',
+        accountId: 'acc_bank',
+        date: '2026-10-16',
+        note: 'Supermercado La Colonia',
+      },
+      userA,
+      profileA,
+      { firestoreDb: mockDb, firestoreModule: mockFirestoreModule, storage: null }
+    );
+
+    assert.equal(txA.workspaceId, 'ws_fam_hogar123');
+    assert.equal(txA.createdByUid, 'uid_ana');
+    assert.equal(txA.createdByEmail, 'ana@familia.hn');
+
+    // 2. User B creates a transaction in the same shared workspace `ws_fam_hogar123`
+    const userB = { uid: 'uid_luis', email: 'luis@familia.hn', displayName: 'Luis' };
+    const profileB = createUserProfile({
+      uid: 'uid_luis',
+      email: 'luis@familia.hn',
+      workspaceId: 'ws_fam_hogar123',
+      personalViewMode: false,
+    });
+
+    const txB = await saveTransactionToWorkspace(
+      {
+        id: 'tx_shared_luis',
+        type: 'expense',
+        amount: 420,
+        currency: 'HNL',
+        categoryId: 'utilities',
+        accountId: 'acc_bank',
+        date: '2026-10-16',
+        note: 'Recibo de internet',
+      },
+      userB,
+      profileB,
+      { firestoreDb: mockDb, firestoreModule: mockFirestoreModule, storage: null }
+    );
+
+    assert.equal(txB.workspaceId, 'ws_fam_hogar123');
+    assert.equal(txB.createdByUid, 'uid_luis');
+    assert.equal(txB.createdByEmail, 'luis@familia.hn');
+
+    // 3. Verify `buildWorkspaceTransactionsQuery` when personalViewMode is FALSE:
+    // Must ONLY filter by `where("workspaceId", "==", currentUserProfile.workspaceId)` (no createdByUid constraint!)
+    capturedWhereConstraints.length = 0;
+    const sharedQuery = buildWorkspaceTransactionsQuery(mockDb, mockFirestoreModule, {
+      workspaceId: profileB.workspaceId,
+      personalViewMode: false,
+      currentUid: userB.uid,
+    });
+    assert.equal(sharedQuery.constraints.length, 1);
+    assert.deepEqual(sharedQuery.constraints[0], {
+      field: 'workspaceId',
+      op: '==',
+      value: 'ws_fam_hogar123',
+    });
+
+    // 4. Verify `fetchWorkspaceTransactions` (`getDocs`) and `subscribeWorkspaceTransactions` (`onSnapshot`) for User B
+    // when personalViewMode is FALSE -> returns BOTH Ana's and Luis's transactions!
+    const fetchedShared = await fetchWorkspaceTransactions({
+      workspaceId: profileB.workspaceId,
+      personalViewMode: false,
+      currentUid: userB.uid,
+      firestoreDb: mockDb,
+      firestoreModule: mockFirestoreModule,
+      storage: null,
+    });
+    assert.equal(fetchedShared.length, 2);
+
+    let snapshotShared = [];
+    const unsubscribe = subscribeWorkspaceTransactions(
+      {
+        workspaceId: profileB.workspaceId,
+        personalViewMode: false,
+        currentUid: userB.uid,
+        firestoreDb: mockDb,
+        firestoreModule: mockFirestoreModule,
+        storage: null,
+      },
+      (txs) => {
+        snapshotShared = txs;
+      }
+    );
+    assert.equal(snapshotShared.length, 2);
+    unsubscribe();
+
+    // 5. Verify when personalViewMode is TRUE -> queries by workspaceId AND createdByUid === currentUser.uid
+    const fetchedPersonalB = await fetchWorkspaceTransactions({
+      workspaceId: profileB.workspaceId,
+      personalViewMode: true,
+      currentUid: userB.uid,
+      firestoreDb: mockDb,
+      firestoreModule: mockFirestoreModule,
+      storage: null,
+    });
+    assert.equal(fetchedPersonalB.length, 1);
+    assert.equal(fetchedPersonalB[0].id, 'tx_shared_luis');
+    assert.equal(fetchedPersonalB[0].createdByUid, 'uid_luis');
+  });
+});
 
