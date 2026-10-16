@@ -618,11 +618,24 @@ describe('Firebase Auth, Firestore Profile (users/{uid}) & Dashboard Currency/Pe
     assert.equal(signedIn.profile.defaultCurrency, 'USD');
     assert.equal(signedIn.profile.personalViewMode, true);
 
-    // 4. Sign in with Google
-    const googleSession = await authService.signInWithGoogle({
-      email: 'carlos.familia@gmail.com',
-      name: 'Carlos Familia',
-    });
+    // 4. Sign in with Google (via Firebase Auth GoogleAuthProvider + signInWithPopup)
+    authService.firebaseAuth = { name: 'mock_auth' };
+    authService.firebaseAuthModule = {
+      GoogleAuthProvider: class MockGoogleAuthProvider {
+        setCustomParameters(params) {
+          this.customParams = params;
+        }
+      },
+      signInWithPopup: async () => ({
+        user: {
+          uid: 'uid_carlos_google',
+          email: 'carlos.familia@gmail.com',
+          displayName: 'Carlos Familia',
+          photoURL: 'https://lh3.googleusercontent.com/a/carlos',
+        },
+      }),
+    };
+    const googleSession = await authService.signInWithGoogle();
     assert.equal(googleSession.user.provider, 'google');
     assert.equal(googleSession.profile.name, 'Carlos Familia');
   });
@@ -1068,6 +1081,127 @@ describe('Shared Family Finances (Finanzas Familiares Compartidas)', () => {
     assert.equal(storage.getItem('pisto_firebase_web_config_v1'), null);
     assert.equal(Boolean(storage.getItem('Pisto_open_finance_v1')), true);
   });
+
+  it('configures GoogleAuthProvider with prompt=select_account, surfaces error.code & error.message on signInWithPopup failures, and syncs users/{uid} in Firestore', async () => {
+    const map = new Map();
+    const storage = {
+      getItem: (key) => (map.has(key) ? map.get(key) : null),
+      setItem: (key, val) => map.set(key, String(val)),
+      removeItem: (key) => map.delete(key),
+    };
+    const authService = new FirebaseAuthProfileService(storage);
+    await authService.init();
+
+    // 1. Verify `auth/configuration-not-found` error when Firebase Auth is not configured
+    await assert.rejects(
+      async () => authService.signInWithGoogle(),
+      (err) => {
+        assert.equal(err.code, 'auth/configuration-not-found');
+        assert.ok(err.message.includes('auth/configuration-not-found'));
+        return true;
+      }
+    );
+
+    // 2. Verify `signInWithPopup` error diagnostics (`auth/unauthorized-domain`, `auth/popup-blocked`)
+    let capturedCustomParams = null;
+    let simulatedPopupError = null;
+    const firestoreDocs = new Map();
+
+    authService.firebaseAuth = { name: 'mock_firebase_auth' };
+    authService.firestoreDb = { name: 'mock_firestore_db' };
+    authService.firestoreModule = {
+      doc: (_db, col, id) => ({ col, id, path: `${col}/${id}` }),
+      getDoc: async (ref) => ({
+        exists: () => firestoreDocs.has(ref.path),
+        data: () => firestoreDocs.get(ref.path),
+      }),
+      setDoc: async (ref, data, options) => {
+        const prev = firestoreDocs.get(ref.path) || {};
+        firestoreDocs.set(ref.path, options?.merge ? { ...prev, ...data } : { ...data });
+      },
+    };
+    authService.firebaseAuthModule = {
+      GoogleAuthProvider: class MockGoogleAuthProvider {
+        setCustomParameters(params) {
+          capturedCustomParams = params;
+        }
+      },
+      signInWithPopup: async () => {
+        if (simulatedPopupError) {
+          throw simulatedPopupError;
+        }
+        return {
+          user: {
+            uid: 'uid_google_101',
+            displayName: 'Maureen Google',
+            email: 'maureen.google@gmail.com',
+            photoURL: 'https://lh3.googleusercontent.com/a/maureen',
+          },
+        };
+      },
+    };
+
+    simulatedPopupError = Object.assign(new Error('This domain is not authorized for OAuth operations.'), {
+      code: 'auth/unauthorized-domain',
+    });
+    await assert.rejects(
+      async () => authService.signInWithGoogle(),
+      (err) => {
+        assert.equal(err.code, 'auth/unauthorized-domain');
+        assert.ok(err.message.includes('[auth/unauthorized-domain]'));
+        assert.ok(err.message.includes('This domain is not authorized for OAuth operations.'));
+        return true;
+      }
+    );
+    assert.deepEqual(capturedCustomParams, { prompt: 'select_account' });
+
+    simulatedPopupError = Object.assign(new Error('Unable to establish a connection with the popup.'), {
+      code: 'auth/popup-blocked',
+    });
+    await assert.rejects(
+      async () => authService.signInWithGoogle(),
+      (err) => {
+        assert.equal(err.code, 'auth/popup-blocked');
+        assert.ok(err.message.includes('[auth/popup-blocked]'));
+        return true;
+      }
+    );
+
+    // 3. Successful Google login creates `users/{user.uid}` in Firestore when missing
+    simulatedPopupError = null;
+    capturedCustomParams = null;
+    const loginResult = await authService.signInWithGoogle();
+
+    assert.deepEqual(capturedCustomParams, { prompt: 'select_account' });
+    assert.equal(loginResult.user.uid, 'uid_google_101');
+    assert.equal(loginResult.user.displayName, 'Maureen Google');
+    assert.equal(loginResult.user.email, 'maureen.google@gmail.com');
+    assert.equal(loginResult.user.photoURL, 'https://lh3.googleusercontent.com/a/maureen');
+
+    const savedDoc = firestoreDocs.get('users/uid_google_101');
+    assert.ok(savedDoc);
+    assert.equal(savedDoc.uid, 'uid_google_101');
+    assert.equal(savedDoc.displayName, 'Maureen Google');
+    assert.equal(savedDoc.email, 'maureen.google@gmail.com');
+    assert.equal(savedDoc.photoURL, 'https://lh3.googleusercontent.com/a/maureen');
+    assert.ok(savedDoc.createdAt);
+    assert.equal(savedDoc.workspaceId, 'uid_google_101');
+
+    // 4. If `users/{user.uid}` exists in Firestore but is missing fields (e.g. photoURL or workspaceId), it updates them while preserving existing shared workspaceId
+    firestoreDocs.set('users/uid_google_101', {
+      uid: 'uid_google_101',
+      email: 'maureen.google@gmail.com',
+      workspaceId: 'ws_shared_family_99',
+    });
+    const reloginResult = await authService.signInWithGoogle();
+    const updatedDoc = firestoreDocs.get('users/uid_google_101');
+    assert.equal(updatedDoc.displayName, 'Maureen Google');
+    assert.equal(updatedDoc.photoURL, 'https://lh3.googleusercontent.com/a/maureen');
+    assert.ok(updatedDoc.createdAt);
+    assert.equal(updatedDoc.workspaceId, 'ws_shared_family_99');
+    assert.equal(reloginResult.profile.workspaceId, 'ws_shared_family_99');
+  });
 });
+
 
 

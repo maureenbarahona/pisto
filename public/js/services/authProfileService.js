@@ -74,6 +74,37 @@ export const SUPPORTED_COUNTRIES = Object.freeze([
 ]);
 
 /**
+ * Formats a detailed diagnostic error message containing both `error.code` and `error.message`
+ * plus actionable remediation advice for common Firebase Auth issues.
+ * @param {string} errorCode
+ * @param {string} errorMessage
+ */
+export function formatFirebaseAuthDiagnosticMessage(errorCode, errorMessage) {
+  const code = String(errorCode || 'auth/unknown-error').trim();
+  const msg = String(errorMessage || 'Error desconocido de Firebase Auth.').trim();
+
+  const hints = {
+    'auth/unauthorized-domain':
+      'El dominio actual no está autorizado en Firebase. Agrégalo en Firebase Console > Authentication > Settings > Authorized domains.',
+    'auth/popup-blocked':
+      'El navegador bloqueó la ventana emergente de Google. Permite popups para este sitio e intenta de nuevo.',
+    'auth/popup-closed-by-user':
+      'La ventana emergente de Google fue cerrada antes de completar el inicio de sesión.',
+    'auth/cancelled-popup-request':
+      'Ya hay una solicitud de ventana emergente en curso.',
+    'auth/configuration-not-found':
+      'El proveedor de Google o la configuración de Firebase Auth no está habilitada. Revisa Firebase Console > Authentication > Sign-in method o tus credenciales Firebase.',
+    'auth/operation-not-allowed':
+      'El inicio de sesión con Google no está habilitado en tu proyecto de Firebase Console > Authentication > Sign-in method.',
+    'auth/invalid-api-key':
+      'La API Key de Firebase configurada no es válida. Verifica tus credenciales en la pestaña Perfil.',
+  };
+
+  const hint = hints[code] ? ` (${hints[code]})` : '';
+  return `[${code}] ${msg}${hint}`;
+}
+
+/**
  * Pure factory that builds and validates a UserProfile entity for `users/{uid}`.
  * @param {object} input
  */
@@ -84,15 +115,29 @@ export function createUserProfile(input) {
   }
 
   const nowIso = new Date().toISOString();
-  const cleanName = String(input.name || 'Usuario Catracho').trim().slice(0, 80) || 'Usuario Catracho';
+  const cleanDisplayName =
+    String(input.displayName || input.name || 'Usuario Catracho').trim().slice(0, 80) ||
+    'Usuario Catracho';
+  const cleanName =
+    String(input.name || input.displayName || cleanDisplayName).trim().slice(0, 80) ||
+    cleanDisplayName;
   const cleanEmail = String(input.email || '').trim().toLowerCase().slice(0, 120);
+  const cleanPhotoURL = String(input.photoURL || '').trim().slice(0, 500);
   const validCountry = SUPPORTED_COUNTRIES.some((c) => c.code === input.country)
     ? String(input.country)
     : 'HN';
   const validCurrency = input.defaultCurrency && CURRENCIES[input.defaultCurrency]
     ? String(input.defaultCurrency)
     : 'HNL';
-  const cleanWorkspaceId = String(input.workspaceId || 'ws_default').trim().slice(0, 80) || 'ws_default';
+  const defaultWorkspaceId = `ws_${uid}`;
+  const cleanWorkspaceId =
+    String(
+      input.workspaceId && input.workspaceId !== 'ws_default'
+        ? input.workspaceId
+        : defaultWorkspaceId
+    )
+      .trim()
+      .slice(0, 80) || defaultWorkspaceId;
   const cleanSharedEmails = Array.isArray(input.sharedWithEmails)
     ? Array.from(
         new Set(
@@ -107,6 +152,8 @@ export function createUserProfile(input) {
     uid,
     email: cleanEmail,
     name: cleanName,
+    displayName: cleanDisplayName,
+    photoURL: cleanPhotoURL,
     country: validCountry,
     defaultCurrency: validCurrency,
     personalViewMode: Boolean(input.personalViewMode ?? false),
@@ -427,48 +474,238 @@ export class FirebaseAuthProfileService {
     };
   }
 
-  async signInWithGoogle(customGoogleAccount) {
+  /**
+   * Allows injecting Firebase Auth & Firestore runtime adapters in unit tests.
+   */
+  setFirebaseRuntimeForTesting(runtime) {
+    if (runtime.firebaseAuth !== undefined) this.firebaseAuth = runtime.firebaseAuth;
+    if (runtime.authModule !== undefined) this.authModule = runtime.authModule;
+    if (runtime.firestoreDb !== undefined) this.firestoreDb = runtime.firestoreDb;
+    if (runtime.firestoreModule !== undefined) this.firestoreModule = runtime.firestoreModule;
+  }
+
+  /**
+   * Ensures Firebase Auth & Firestore SDKs are initialized when running in the browser with live credentials.
+   * Throws an explicit `auth/configuration-not-found` error if Firebase credentials are not configured.
+   */
+  async ensureFirebaseAuthSdkLoaded() {
     if (this.firebaseAuth && this.authModule) {
-      const provider = new this.authModule.GoogleAuthProvider();
-      const result = await this.authModule.signInWithPopup(this.firebaseAuth, provider);
-      const fbUser = result.user;
+      return;
+    }
+
+    const config = this.getFirebaseConfig();
+    if (!isLiveFirebaseCredentials(config)) {
+      const cfgError = new Error(
+        'No se encontró una configuración activa de Firebase Auth (credenciales por defecto de demostración activas). Configura las credenciales de tu proyecto Firebase en la pestaña Perfil o usa "🚀 Probar Modo Demo".'
+      );
+      cfgError.code = 'auth/configuration-not-found';
+      throw cfgError;
+    }
+
+    if (typeof window !== 'undefined') {
+      const [appMod, authMod, firestoreMod] = await Promise.all([
+        import('https://www.gstatic.com/firebasejs/11.4.0/firebase-app.js'),
+        import('https://www.gstatic.com/firebasejs/11.4.0/firebase-auth.js'),
+        import('https://www.gstatic.com/firebasejs/11.4.0/firebase-firestore.js'),
+      ]);
+
+      registerFirebaseSdkAdapter(appMod);
+      const liveInit = await initializeFirebaseApp({
+        storage: this.getStorageAdapter(),
+        sdk: appMod,
+      });
+      this.firebaseApp = liveInit.app;
+      this.firebaseAuth = authMod.getAuth(this.firebaseApp);
+      this.firestoreDb = firestoreMod.getFirestore(this.firebaseApp);
+      this.authModule = authMod;
+      this.firestoreModule = firestoreMod;
+    }
+  }
+
+  /**
+   * Synchronizes the authenticated Google user with Firestore `users/{user.uid}`:
+   * - Checks if `users/{user.uid}` exists via `getDoc`.
+   * - If it does not exist or is missing required fields (`uid`, `displayName`, `email`, `photoURL`, `createdAt`, `workspaceId`),
+   *   creates/updates the document with those fields and assigns an initial `workspaceId` (user's own `uid` or `email`).
+   */
+  async syncGoogleUserWithFirestore(user) {
+    const uid = String(user.uid || '').trim();
+    const nowIso = new Date().toISOString();
+    const initialWorkspaceId = uid || user.email || `ws_${uid}`;
+    const docKey = `${FIRESTORE_USERS_CACHE_PREFIX}${uid}`;
+
+    if (this.firestoreDb && this.firestoreModule) {
+      try {
+        const userDocRef = this.firestoreModule.doc(this.firestoreDb, 'users', uid);
+        const snap = await this.firestoreModule.getDoc(userDocRef);
+
+        if (snap.exists()) {
+          const existingData = snap.data() || {};
+          const hasMissingFields =
+            !existingData.uid ||
+            !existingData.displayName ||
+            !existingData.email ||
+            typeof existingData.photoURL !== 'string' ||
+            !existingData.createdAt ||
+            !existingData.workspaceId ||
+            existingData.workspaceId === 'ws_default';
+
+          let profile = createUserProfile({
+            ...existingData,
+            uid,
+            displayName:
+              existingData.displayName || existingData.name || user.displayName || 'Usuario Google',
+            name:
+              existingData.name || existingData.displayName || user.displayName || 'Usuario Google',
+            email: existingData.email || user.email || '',
+            photoURL: existingData.photoURL || user.photoURL || '',
+            createdAt: existingData.createdAt || nowIso,
+            updatedAt: nowIso,
+            workspaceId:
+              existingData.workspaceId && existingData.workspaceId !== 'ws_default'
+                ? existingData.workspaceId
+                : initialWorkspaceId,
+          });
+
+          profile = await this.resolveSharedWorkspaceForProfile(profile);
+
+          if (hasMissingFields || profile.workspaceId !== existingData.workspaceId) {
+            await this.firestoreModule.setDoc(userDocRef, profile, { merge: true });
+          }
+
+          this.setItem(docKey, JSON.stringify(profile));
+          this.currentProfile = profile;
+          return profile;
+        }
+
+        let newProfile = createUserProfile({
+          uid,
+          displayName: user.displayName || 'Usuario Google',
+          name: user.displayName || 'Usuario Google',
+          email: user.email || '',
+          photoURL: user.photoURL || '',
+          country: 'HN',
+          defaultCurrency: 'HNL',
+          personalViewMode: false,
+          filterByDefaultCurrency: true,
+          workspaceId: initialWorkspaceId,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        });
+
+        newProfile = await this.resolveSharedWorkspaceForProfile(newProfile);
+        await this.firestoreModule.setDoc(userDocRef, newProfile, { merge: true });
+        this.setItem(docKey, JSON.stringify(newProfile));
+        this.currentProfile = newProfile;
+        return newProfile;
+      } catch (err) {
+        console.warn('[Firestore users/{uid} post-login sync] Fallback a caché local:', err);
+      }
+    }
+
+    return await this.loadUserProfile(uid, {
+      email: user.email,
+      name: user.displayName,
+      displayName: user.displayName,
+      photoURL: user.photoURL || '',
+      workspaceId: initialWorkspaceId,
+      createdAt: nowIso,
+    });
+  }
+
+  /**
+   * Executes Google Sign-In using `GoogleAuthProvider` (`prompt: 'select_account'`) and `signInWithPopup(auth, provider)`.
+   * Wrapped in a detailed `try/catch` that logs and surfaces `error.code` and `error.message`.
+   * Post-login, verifies and synchronizes `users/{user.uid}` in Firestore.
+   */
+  async signInWithGoogle(customGoogleAccount) {
+    if (!this.firebaseAuth && !this.authModule && customGoogleAccount && typeof window === 'undefined') {
+      const email = String(customGoogleAccount.email || 'usuario.google@gmail.com')
+        .trim()
+        .toLowerCase();
+      const displayName = String(customGoogleAccount.name || 'Usuario Google').trim();
+      const photoURL = String(customGoogleAccount.photoURL || '').trim();
+      const uid = `uid_google_${email.replace(/[^a-z0-9]/g, '_').slice(0, 24)}`;
+
       const user = {
-        uid: fbUser.uid,
-        email: fbUser.email || '',
-        displayName: fbUser.displayName || 'Usuario Google',
-        photoURL: fbUser.photoURL || '',
+        uid,
+        email,
+        displayName,
+        photoURL,
         provider: 'google',
         emailVerified: true,
       };
+
+      this.setItem(LOCAL_AUTH_SESSION_KEY, JSON.stringify(user));
       this.currentUser = user;
-      this.currentProfile = await this.loadUserProfile(user.uid, {
-        email: user.email,
-        name: user.displayName,
-      });
+      this.currentProfile = await this.syncGoogleUserWithFirestore(user);
       this.notifyListeners();
       return { user, profile: this.currentProfile };
     }
 
-    const email = String(customGoogleAccount?.email || 'catracho.google@gmail.com').trim().toLowerCase();
-    const displayName = String(customGoogleAccount?.name || 'Usuario Google Catracho').trim();
-    const uid = `uid_google_${email.replace(/[^a-z0-9]/g, '_').slice(0, 24)}`;
+    try {
+      const initialAuthMod = this.authModule || this.firebaseAuthModule;
+      if (!this.firebaseAuth || !initialAuthMod) {
+        await this.ensureFirebaseAuthSdkLoaded();
+      }
 
-    const user = {
-      uid,
-      email,
-      displayName,
-      provider: 'google',
-      emailVerified: true,
-    };
+      const activeAuthModule = this.authModule || this.firebaseAuthModule;
+      const GoogleAuthProvider = activeAuthModule?.GoogleAuthProvider;
+      const signInWithPopup = activeAuthModule?.signInWithPopup;
+      if (typeof GoogleAuthProvider !== 'function' || typeof signInWithPopup !== 'function') {
+        const sdkErr = new Error(
+          'GoogleAuthProvider o signInWithPopup no están disponibles en la configuración actual de Firebase Auth.'
+        );
+        sdkErr.code = 'auth/configuration-not-found';
+        throw sdkErr;
+      }
 
-    this.setItem(LOCAL_AUTH_SESSION_KEY, JSON.stringify(user));
-    this.currentUser = user;
-    this.currentProfile = await this.loadUserProfile(uid, {
-      email,
-      name: displayName,
-    });
-    this.notifyListeners();
-    return { user, profile: this.currentProfile };
+      const provider = new GoogleAuthProvider();
+      if (typeof provider.setCustomParameters === 'function') {
+        provider.setCustomParameters({ prompt: 'select_account' });
+      }
+
+      const result = await signInWithPopup(this.firebaseAuth, provider);
+      const fbUser = result?.user;
+      if (!fbUser || !fbUser.uid) {
+        const missingUserErr = new Error(
+          'No se recibieron los datos del usuario tras completar signInWithPopup con Google.'
+        );
+        missingUserErr.code = 'auth/internal-error';
+        throw missingUserErr;
+      }
+
+      const user = {
+        uid: fbUser.uid,
+        email: fbUser.email || '',
+        displayName: fbUser.displayName || fbUser.email?.split('@')[0] || 'Usuario Google',
+        photoURL: fbUser.photoURL || '',
+        provider: 'google',
+        emailVerified: Boolean(fbUser.emailVerified ?? true),
+      };
+
+      this.currentUser = user;
+      this.setItem(LOCAL_AUTH_SESSION_KEY, JSON.stringify(user));
+      this.currentProfile = await this.syncGoogleUserWithFirestore(user);
+      this.notifyListeners();
+      return { user, profile: this.currentProfile };
+    } catch (error) {
+      const errorCode = String(error?.code || 'auth/unknown-error');
+      const errorMessage = String(
+        error?.originalMessage || error?.message || 'Error desconocido al iniciar sesión con Google.'
+      );
+      console.error(
+        `[Firebase Auth - Google Sign-In Error] code=${errorCode} | message=${errorMessage}`,
+        error
+      );
+      const formattedError = new Error(
+        formatFirebaseAuthDiagnosticMessage(errorCode, errorMessage)
+      );
+      formattedError.code = errorCode;
+      formattedError.originalMessage = errorMessage;
+      formattedError.cause = error;
+      throw formattedError;
+    }
   }
 
   /**
@@ -673,6 +910,14 @@ export class FirebaseAuthProfileService {
     this.notifyListeners();
   }
 
+  isPersonalInitialWorkspace(wsId, uid, email) {
+    if (!wsId || wsId === 'ws_default') return true;
+    if (uid && (wsId === uid || wsId === `ws_${uid}`)) return true;
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (cleanEmail && String(wsId).toLowerCase() === cleanEmail) return true;
+    return false;
+  }
+
   async resolveSharedWorkspaceForProfile(profile) {
     const cleanEmail = String(profile.email || this.currentUser?.email || '')
       .trim()
@@ -691,7 +936,7 @@ export class FirebaseAuthProfileService {
         if (
           parsedIdx.workspaceId &&
           parsedIdx.workspaceId !== 'ws_default' &&
-          (!resolvedWorkspaceId || resolvedWorkspaceId === 'ws_default')
+          this.isPersonalInitialWorkspace(resolvedWorkspaceId, profile.uid, cleanEmail)
         ) {
           resolvedWorkspaceId = parsedIdx.workspaceId;
         }
@@ -711,7 +956,8 @@ export class FirebaseAuthProfileService {
     if (
       this.firestoreDb &&
       this.firestoreModule &&
-      (!resolvedWorkspaceId || resolvedWorkspaceId === 'ws_default')
+      typeof this.firestoreModule.collection === 'function' &&
+      this.isPersonalInitialWorkspace(resolvedWorkspaceId, profile.uid, cleanEmail)
     ) {
       try {
         const wsCol = this.firestoreModule.collection(this.firestoreDb, 'workspaces');
@@ -776,11 +1022,15 @@ export class FirebaseAuthProfileService {
         let initialProfile = createUserProfile({
           uid,
           email: defaults.email || this.currentUser?.email || '',
-          name: defaults.name || this.currentUser?.displayName || 'Usuario Catracho',
+          name: defaults.name || defaults.displayName || this.currentUser?.displayName || 'Usuario Catracho',
+          displayName: defaults.displayName || defaults.name || this.currentUser?.displayName || 'Usuario Catracho',
+          photoURL: defaults.photoURL || this.currentUser?.photoURL || '',
           country: defaults.country || 'HN',
           defaultCurrency: defaults.defaultCurrency || 'HNL',
           personalViewMode: defaults.personalViewMode ?? false,
           filterByDefaultCurrency: defaults.filterByDefaultCurrency ?? true,
+          workspaceId: defaults.workspaceId,
+          createdAt: defaults.createdAt,
         });
         initialProfile = await this.resolveSharedWorkspaceForProfile(initialProfile);
         await this.firestoreModule.setDoc(userDocRef, initialProfile, { merge: true });
@@ -809,11 +1059,15 @@ export class FirebaseAuthProfileService {
     let freshProfile = createUserProfile({
       uid,
       email: defaults.email || this.currentUser?.email || '',
-      name: defaults.name || this.currentUser?.displayName || 'Usuario Catracho',
+      name: defaults.name || defaults.displayName || this.currentUser?.displayName || 'Usuario Catracho',
+      displayName: defaults.displayName || defaults.name || this.currentUser?.displayName || 'Usuario Catracho',
+      photoURL: defaults.photoURL || this.currentUser?.photoURL || '',
       country: defaults.country || 'HN',
       defaultCurrency: defaults.defaultCurrency || 'HNL',
       personalViewMode: defaults.personalViewMode ?? false,
       filterByDefaultCurrency: defaults.filterByDefaultCurrency ?? true,
+      workspaceId: defaults.workspaceId,
+      createdAt: defaults.createdAt,
     });
     freshProfile = await this.resolveSharedWorkspaceForProfile(freshProfile);
     this.setItem(docKey, JSON.stringify(freshProfile));
@@ -915,8 +1169,15 @@ export class FirebaseAuthProfileService {
 
     // 2. Determine shared workspaceId
     let sharedWorkspaceId = myProfile.workspaceId;
-    if (!sharedWorkspaceId || sharedWorkspaceId === 'ws_default') {
-      if (targetExistingProfile?.workspaceId && targetExistingProfile.workspaceId !== 'ws_default') {
+    if (this.isPersonalInitialWorkspace(sharedWorkspaceId, currentUid, myProfile.email)) {
+      if (
+        targetExistingProfile?.workspaceId &&
+        !this.isPersonalInitialWorkspace(
+          targetExistingProfile.workspaceId,
+          targetUid,
+          cleanTargetEmail
+        )
+      ) {
         sharedWorkspaceId = targetExistingProfile.workspaceId;
       } else {
         const cleanSlug = currentUid.replace(/^uid_/, '').replace(/[^a-z0-9]/g, '').slice(0, 12) || 'hogar';

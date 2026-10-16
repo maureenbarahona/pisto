@@ -45,6 +45,7 @@ export class ProfileViewController {
     googleBtn?.addEventListener('click', async () => {
       try {
         googleBtn.disabled = true;
+        this.hideAuthModalError();
         const { user, profile } = await this.authService.signInWithGoogle();
         authDialog.close();
         this.callbacks.showToast(
@@ -53,7 +54,19 @@ export class ProfileViewController {
         this.renderProfileTab();
         this.callbacks.onAuthAndProfileUpdated(user, profile, 'login');
       } catch (err) {
-        this.showAuthModalError(err?.message || 'Error al iniciar sesión con Google.');
+        const errorCode = String(err?.code || 'auth/unknown-error');
+        const rawMessage = String(err?.originalMessage || err?.message || 'Error al iniciar sesión con Google.');
+        const formattedMessage =
+          typeof err?.message === 'string' && err.message.includes(errorCode)
+            ? err.message
+            : `[${errorCode}] ${rawMessage}`;
+        console.error('[AuthModal - Google Sign-In Error]', {
+          code: errorCode,
+          message: rawMessage,
+          error: err,
+        });
+        this.showAuthModalError(formattedMessage);
+        this.callbacks.showToast(`⚠️ Error Google Auth (${errorCode}): ${rawMessage}`);
       } finally {
         googleBtn.disabled = false;
       }
