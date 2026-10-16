@@ -81,6 +81,9 @@ export function renderPistoDonutChart(analytics) {
           stroke-width="20"
           stroke-dasharray="${dashArray}"
           stroke-dashoffset="${dashOffset}"
+          tabindex="0"
+          role="button"
+          aria-label="Registrar movimiento en ${cat.name}: ${Money.format(cat.amount, baseCurrency)} (${cat.sharePct}%)"
           data-action="open-category-keypad"
           data-category-id="${cat.id}"
         >

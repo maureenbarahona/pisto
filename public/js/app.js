@@ -98,6 +98,7 @@ class FinanceAppController {
     this.setupVoucherScannerModal();
     this.setupStatementImportModal();
     this.setupValidationAriaSync();
+    this.setupPrivacyConsentBanner();
     this.bindGlobalEvents();
     this.applyTheme(this.state.settings?.theme || 'system');
     this.profileView.init();
@@ -894,6 +895,7 @@ class FinanceAppController {
             data-action="edit-transaction"
             data-tx-id="${tx.id}"
             title="Haz clic para ver el detalle y modificar esta transacción"
+            aria-label="Ver detalle y modificar ${conceptText} por ${Money.format(tx.amount, tx.currency)}"
           >
             <td style="white-space: nowrap; font-variant-numeric: tabular-nums;">${tx.date}</td>
             <td>
@@ -1691,7 +1693,57 @@ class FinanceAppController {
     });
   }
 
+  /**
+   * Configures the non-invasive Privacy & LocalStorage Notice Banner (#privacy-consent-banner)
+   * and footer privacy controls for inspecting or clearing sensitive API keys/configs.
+   */
+  setupPrivacyConsentBanner() {
+    const bannerEl = document.getElementById('privacy-consent-banner');
+    const acceptBtn = document.getElementById('btn-accept-privacy-banner');
+    const clearBannerBtn = document.getElementById('btn-privacy-clear-sensitive');
+    const openFooterBtn = document.getElementById('btn-open-privacy-banner');
+    const clearFooterBtn = document.getElementById('btn-footer-clear-sensitive');
+
+    const consent = this.authService.getPrivacyConsent();
+    if (bannerEl && !consent.accepted) {
+      bannerEl.classList.remove('is-hidden');
+    }
+
+    acceptBtn?.addEventListener('click', () => {
+      this.authService.savePrivacyConsent(true);
+      bannerEl?.classList.add('is-hidden');
+      this.showToast('🛡️ Preferencia de almacenamiento Local-First confirmada.');
+    });
+
+    const handleClearSensitive = () => {
+      this.authService.clearSensitiveLocalStorage();
+      this.profileView.renderProfileTab();
+      this.renderTelemetryBadge();
+      bannerEl?.classList.add('is-hidden');
+      this.showToast('🧹 Claves sensibles de Gemini IA y Firebase eliminadas de LocalStorage.');
+    };
+
+    clearBannerBtn?.addEventListener('click', handleClearSensitive);
+    clearFooterBtn?.addEventListener('click', handleClearSensitive);
+
+    openFooterBtn?.addEventListener('click', () => {
+      if (bannerEl) {
+        bannerEl.classList.remove('is-hidden');
+        acceptBtn?.focus();
+      }
+    });
+  }
+
   bindGlobalEvents() {
+    // Mobile Filter Drawer Toggle (#btn-toggle-mobile-filters)
+    const mobileFiltersBtn = document.getElementById('btn-toggle-mobile-filters');
+    const filtersDrawer = document.getElementById('header-filters-drawer');
+    mobileFiltersBtn?.addEventListener('click', () => {
+      if (!filtersDrawer) return;
+      const isOpen = filtersDrawer.classList.toggle('is-mobile-open');
+      mobileFiltersBtn.setAttribute('aria-expanded', String(isOpen));
+    });
+
     // Navigation Tabs with View Transitions API
     document.addEventListener('click', (e) => {
       const tabBtn = e.target.closest('[data-tab-target]');
@@ -1791,16 +1843,48 @@ class FinanceAppController {
       this.handleHeaderAuthButtonClick();
     });
 
-    // Keyboard accessibility for clickable account cards and transaction rows
+    // Keyboard accessibility (WCAG 2.1 AA) for Navigation Tabs (ArrowLeft/ArrowRight/Home/End)
+    // and clickable cards, category rings, donut segments, and transaction rows (Enter / Space)
     document.addEventListener('keydown', (e) => {
+      const tabEl = e.target.closest?.('[role="tab"][data-tab-target]');
+      if (tabEl && ['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(e.key)) {
+        const tabs = Array.from(document.querySelectorAll('.nav-tabs [role="tab"][data-tab-target]'));
+        const idx = tabs.indexOf(tabEl);
+        if (idx !== -1 && tabs.length > 0) {
+          e.preventDefault();
+          let nextIdx = idx;
+          if (e.key === 'ArrowRight') nextIdx = (idx + 1) % tabs.length;
+          else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + tabs.length) % tabs.length;
+          else if (e.key === 'Home') nextIdx = 0;
+          else if (e.key === 'End') nextIdx = tabs.length - 1;
+          const nextTab = tabs[nextIdx];
+          nextTab?.focus();
+          if (nextTab?.dataset?.tabTarget) {
+            this.switchTab(nextTab.dataset.tabTarget);
+          }
+          return;
+        }
+      }
+
       if (e.key !== 'Enter' && e.key !== ' ') return;
-      const cardEl = e.target.closest('.account-card-clickable[data-action="open-account-detail"]');
+      const cardEl = e.target.closest?.('.account-card-clickable[data-action="open-account-detail"]');
       if (cardEl && e.target === cardEl) {
         e.preventDefault();
         this.openAccountDetailModal(cardEl.dataset.accountId);
         return;
       }
-      const txEl = e.target.closest('[data-action="edit-transaction"]');
+      const catEl = e.target.closest?.('[data-action="open-category-keypad"]');
+      if (catEl && e.target === catEl) {
+        e.preventDefault();
+        const catId = catEl.dataset.categoryId;
+        const cat = this.state.categories.find((c) => c.id === catId);
+        this.keypadModal.open(this.state, {
+          type: cat?.type || TRANSACTION_TYPES.EXPENSE,
+          categoryId: catId,
+        });
+        return;
+      }
+      const txEl = e.target.closest?.('[data-action="edit-transaction"]');
       if (txEl && e.target === txEl) {
         e.preventDefault();
         this.openTransactionDetail(txEl.dataset.txId);
@@ -2010,10 +2094,10 @@ class FinanceAppController {
       <div style="display: flex; gap: 0.45rem; flex-wrap: wrap;">
         ${
           hasCurrencyFilter
-            ? `<button type="button" class="btn-secondary btn-sm" data-action="clear-currency-filter">Ver Todas las Monedas</button>`
+            ? `<button type="button" class="btn-secondary btn-sm" data-action="clear-currency-filter" aria-label="Quitar filtro de moneda y ver todas las monedas">Ver Todas las Monedas</button>`
             : ''
         }
-        <button type="button" class="btn-secondary btn-sm" data-tab-target="profile">Ajustar en Perfil →</button>
+        <button type="button" class="btn-secondary btn-sm" data-tab-target="profile" aria-label="Ir a la pestaña de Perfil para ajustar preferencias">Ajustar en Perfil →</button>
       </div>
     `;
   }
@@ -2156,6 +2240,7 @@ class FinanceAppController {
                   tabindex="0"
                   data-action="open-category-keypad"
                   data-category-id="${cat.id}"
+                  aria-label="${cat.name}: ingreso ${Money.format(cat.amount, analytics.baseCurrency)}, pulsar para añadir ingreso"
                 >
                   <div class="cat-ring-avatar" style="--cat-color: ${cat.color}; --ring-deg: 360deg;">
                     <div class="cat-ring-inner" style="color: ${cat.color}">
@@ -2267,6 +2352,8 @@ class FinanceAppController {
                   class="btn-include-toggle ${acc.includeInTotal ? 'is-included' : ''}"
                   data-action="toggle-account-include"
                   data-account-id="${acc.id}"
+                  aria-pressed="${acc.includeInTotal ? 'true' : 'false'}"
+                  aria-label="${acc.includeInTotal ? `Excluir ${acc.name} del Patrimonio Total` : `Incluir ${acc.name} en el Patrimonio Total`}"
                   title="${acc.includeInTotal ? 'Incluida en el Patrimonio Total' : 'Excluida del Patrimonio Total'}"
                 >
                   ${acc.includeInTotal ? 'En Total ✓' : 'Oculta'}
