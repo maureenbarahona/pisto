@@ -190,6 +190,36 @@ export function computeAccountsSummary(state, options = {}) {
 }
 
 /**
+ * Checks whether a transaction belongs to the active `workspaceId` and satisfies `personalViewMode`.
+ * - When `personalViewMode === false`: includes ALL transactions belonging to `workspaceId`, regardless of `createdByUid`.
+ * - When `personalViewMode === true`: includes only transactions in `workspaceId` where `createdByUid === currentUid`.
+ *
+ * @param {object} tx
+ * @param {{ workspaceId?: string, personalViewMode?: boolean, currentUid?: string | null }} context
+ * @returns {boolean}
+ */
+export function isTransactionVisibleInWorkspace(
+  tx,
+  { workspaceId = 'ws_default', personalViewMode = false, currentUid = null } = {}
+) {
+  if (workspaceId && workspaceId !== 'all') {
+    const txWorkspace = tx.workspaceId || 'ws_default';
+    if (txWorkspace !== workspaceId) {
+      return false;
+    }
+  }
+
+  if (personalViewMode && currentUid) {
+    const txCreator = tx.createdByUid || tx.ownerUid || currentUid;
+    if (txCreator !== currentUid) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
  * Computes period totals and Pisto category ring analytics.
  * @param {object} state
  * @param {object} [options]
@@ -219,12 +249,8 @@ export function computePeriodAnalytics(state, options = {}) {
     if (currencyFilter !== 'all' && tx.currency !== currencyFilter) {
       return false;
     }
-    if (personalViewMode && currentUid) {
-      const txCreator = tx.createdByUid || tx.ownerUid || currentUid;
-      if (txCreator !== currentUid) return false;
-    } else if (workspaceId && workspaceId !== 'all') {
-      const txWorkspace = tx.workspaceId || 'ws_default';
-      if (txWorkspace !== workspaceId) return false;
+    if (!isTransactionVisibleInWorkspace(tx, { workspaceId, personalViewMode, currentUid })) {
+      return false;
     }
     return true;
   });
@@ -357,12 +383,8 @@ export function groupTransactionsByDay(state, filters = {}) {
       if (currencyFilter !== 'all' && tx.currency !== currencyFilter) {
         return false;
       }
-      if (personalViewMode && currentUid) {
-        const txCreator = tx.createdByUid || tx.ownerUid || currentUid;
-        if (txCreator !== currentUid) return false;
-      } else if (workspaceId && workspaceId !== 'all') {
-        const txWorkspace = tx.workspaceId || 'ws_default';
-        if (txWorkspace !== workspaceId) return false;
+      if (!isTransactionVisibleInWorkspace(tx, { workspaceId, personalViewMode, currentUid })) {
+        return false;
       }
       if (query) {
         const catName = categoryMap.get(tx.categoryId)?.name || '';

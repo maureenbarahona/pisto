@@ -53,6 +53,13 @@ import {
   buildWorkspaceTransactionIndex,
   filterTransactionsForUserView,
 } from '../public/js/services/authProfileService.ts';
+import {
+  prepareTransactionForWorkspace,
+  buildWorkspaceTransactionsQuery,
+  fetchWorkspaceTransactions,
+  subscribeWorkspaceTransactions,
+  saveTransactionToWorkspace,
+} from '../src/services/transactions.ts';
 import { handleRequest } from '../server/index.js';
 import http from 'node:http';
 
@@ -860,6 +867,167 @@ describe('Shared Family Finances (Finanzas Familiares Compartidas)', () => {
     assert.equal(personalGroups[0].items.length, 1);
     assert.equal(personalGroups[0].items[0].createdByUid, 'uid_maureen');
     assert.equal(personalGroups[0].items[0].createdByEmail.split('@')[0], 'maureen');
+  });
+
+  it('queries Firestore transactions by workspaceId (all members when personalViewMode is false) and attaches workspaceId/createdByUid/createdByEmail on creation', async () => {
+    const capturedWhereConstraints = [];
+    const mockFirestoreDocs = [];
+
+    const mockFirestoreModule = {
+      collection: (_db, name) => ({ type: 'collection', name }),
+      where: (field, op, value) => {
+        const constraint = { field, op, value };
+        capturedWhereConstraints.push(constraint);
+        return constraint;
+      },
+      query: (col, ...constraints) => ({ col, constraints }),
+      getDocs: async (q) => {
+        const matched = mockFirestoreDocs.filter((docData) =>
+          q.constraints.every((c) => docData[c.field] === c.value)
+        );
+        return {
+          empty: matched.length === 0,
+          docs: matched.map((d) => ({ id: d.id, data: () => d })),
+        };
+      },
+      onSnapshot: (q, onNext) => {
+        const matched = mockFirestoreDocs.filter((docData) =>
+          q.constraints.every((c) => docData[c.field] === c.value)
+        );
+        onNext({
+          empty: matched.length === 0,
+          docs: matched.map((d) => ({ id: d.id, data: () => d })),
+        });
+        return () => {};
+      },
+      doc: (_db, col, id) => ({ col, id }),
+      setDoc: async (ref, data) => {
+        const idx = mockFirestoreDocs.findIndex((d) => d.id === ref.id);
+        if (idx >= 0) {
+          mockFirestoreDocs[idx] = { ...mockFirestoreDocs[idx], ...data };
+        } else {
+          mockFirestoreDocs.push({ ...data, id: ref.id });
+        }
+      },
+      deleteDoc: async () => {},
+    };
+
+    const mockDb = { name: 'mock_firestore_db' };
+
+    // 1. User A creates a transaction in shared workspace `ws_fam_hogar123`
+    const userA = { uid: 'uid_ana', email: 'ana@familia.hn', displayName: 'Ana' };
+    const profileA = createUserProfile({
+      uid: 'uid_ana',
+      email: 'ana@familia.hn',
+      workspaceId: 'ws_fam_hogar123',
+      personalViewMode: false,
+    });
+
+    const txA = await saveTransactionToWorkspace(
+      {
+        id: 'tx_shared_ana',
+        type: 'expense',
+        amount: 850,
+        currency: 'HNL',
+        categoryId: 'groceries',
+        accountId: 'acc_bank',
+        date: '2026-10-16',
+        note: 'Supermercado La Colonia',
+      },
+      userA,
+      profileA,
+      { firestoreDb: mockDb, firestoreModule: mockFirestoreModule, storage: null }
+    );
+
+    assert.equal(txA.workspaceId, 'ws_fam_hogar123');
+    assert.equal(txA.createdByUid, 'uid_ana');
+    assert.equal(txA.createdByEmail, 'ana@familia.hn');
+
+    // 2. User B creates a transaction in the same shared workspace `ws_fam_hogar123`
+    const userB = { uid: 'uid_luis', email: 'luis@familia.hn', displayName: 'Luis' };
+    const profileB = createUserProfile({
+      uid: 'uid_luis',
+      email: 'luis@familia.hn',
+      workspaceId: 'ws_fam_hogar123',
+      personalViewMode: false,
+    });
+
+    const txB = await saveTransactionToWorkspace(
+      {
+        id: 'tx_shared_luis',
+        type: 'expense',
+        amount: 420,
+        currency: 'HNL',
+        categoryId: 'utilities',
+        accountId: 'acc_bank',
+        date: '2026-10-16',
+        note: 'Recibo de internet',
+      },
+      userB,
+      profileB,
+      { firestoreDb: mockDb, firestoreModule: mockFirestoreModule, storage: null }
+    );
+
+    assert.equal(txB.workspaceId, 'ws_fam_hogar123');
+    assert.equal(txB.createdByUid, 'uid_luis');
+    assert.equal(txB.createdByEmail, 'luis@familia.hn');
+
+    // 3. Verify `buildWorkspaceTransactionsQuery` when personalViewMode is FALSE:
+    // Must ONLY filter by `where("workspaceId", "==", currentUserProfile.workspaceId)` (no createdByUid constraint!)
+    capturedWhereConstraints.length = 0;
+    const sharedQuery = buildWorkspaceTransactionsQuery(mockDb, mockFirestoreModule, {
+      workspaceId: profileB.workspaceId,
+      personalViewMode: false,
+      currentUid: userB.uid,
+    });
+    assert.equal(sharedQuery.constraints.length, 1);
+    assert.deepEqual(sharedQuery.constraints[0], {
+      field: 'workspaceId',
+      op: '==',
+      value: 'ws_fam_hogar123',
+    });
+
+    // 4. Verify `fetchWorkspaceTransactions` (`getDocs`) and `subscribeWorkspaceTransactions` (`onSnapshot`) for User B
+    // when personalViewMode is FALSE -> returns BOTH Ana's and Luis's transactions!
+    const fetchedShared = await fetchWorkspaceTransactions({
+      workspaceId: profileB.workspaceId,
+      personalViewMode: false,
+      currentUid: userB.uid,
+      firestoreDb: mockDb,
+      firestoreModule: mockFirestoreModule,
+      storage: null,
+    });
+    assert.equal(fetchedShared.length, 2);
+
+    let snapshotShared = [];
+    const unsubscribe = subscribeWorkspaceTransactions(
+      {
+        workspaceId: profileB.workspaceId,
+        personalViewMode: false,
+        currentUid: userB.uid,
+        firestoreDb: mockDb,
+        firestoreModule: mockFirestoreModule,
+        storage: null,
+      },
+      (txs) => {
+        snapshotShared = txs;
+      }
+    );
+    assert.equal(snapshotShared.length, 2);
+    unsubscribe();
+
+    // 5. Verify when personalViewMode is TRUE -> queries by workspaceId AND createdByUid === currentUser.uid
+    const fetchedPersonalB = await fetchWorkspaceTransactions({
+      workspaceId: profileB.workspaceId,
+      personalViewMode: true,
+      currentUid: userB.uid,
+      firestoreDb: mockDb,
+      firestoreModule: mockFirestoreModule,
+      storage: null,
+    });
+    assert.equal(fetchedPersonalB.length, 1);
+    assert.equal(fetchedPersonalB[0].id, 'tx_shared_luis');
+    assert.equal(fetchedPersonalB[0].createdByUid, 'uid_luis');
   });
 });
 

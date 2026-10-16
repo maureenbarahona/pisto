@@ -40,12 +40,20 @@ import {
   attachDialogLightDismissFallback,
 } from './ui/keypadModal.js?v=9';
 import { FirebaseAuthProfileService } from './services/authProfileService.js?v=11';
+import {
+  prepareTransactionForWorkspace,
+  subscribeWorkspaceTransactions,
+  saveTransactionToWorkspace,
+  deleteTransactionFromWorkspace,
+  migrateTransactionsToSharedWorkspace,
+} from './services/transactions.js?v=11';
 import { ProfileViewController } from './ui/profileView.js?v=11';
 
 class FinanceAppController {
   constructor() {
     this.repo = new StorageRepository();
     this.authService = new FirebaseAuthProfileService();
+    this.workspaceTransactionsUnsubscribe = null;
     this.state = this.repo.loadState();
     if (this.state.settings.periodFilter !== 'custom') {
       this.state.settings.startDate = '';
@@ -106,7 +114,7 @@ class FinanceAppController {
 
   /**
    * Synchronizes Dashboard baseCurrency, automatic transaction currency filtering, Personal View Mode,
-   * and Shared Family Workspace (`workspaceId`) whenever the user logs in or updates their `users/{uid}` profile.
+   * and Shared Family Workspace (`workspaceId`) realtime listener whenever the user logs in or updates their `users/{uid}` profile.
    */
   handleAuthAndProfileUpdated(user, profile, reason = '') {
     if (profile) {
@@ -142,7 +150,25 @@ class FinanceAppController {
         }
       }
       this.repo.saveState(this.state);
+
+      // Ensure member transactions are migrated & subscribed via workspaceId query
+      const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
+      if (nextWorkspaceId && nextWorkspaceId !== 'ws_default') {
+        migrateTransactionsToSharedWorkspace(
+          nextWorkspaceId,
+          [nextUid],
+          [nextEmail, ...(profile.sharedWithEmails || [])],
+          storage,
+          firestoreDb,
+          firestoreModule
+        ).catch(() => {});
+      }
+      this.syncWorkspaceSubscription(user, profile);
     } else if (reason === 'logout') {
+      if (typeof this.workspaceTransactionsUnsubscribe === 'function') {
+        this.workspaceTransactionsUnsubscribe();
+        this.workspaceTransactionsUnsubscribe = null;
+      }
       this.state.settings.currentUid = 'local_default_user';
       this.state.settings.personalViewMode = false;
       this.state.settings.workspaceId = 'ws_default';
@@ -151,6 +177,67 @@ class FinanceAppController {
       this.repo.saveState(this.state);
     }
     this.renderAll();
+  }
+
+  /**
+   * Subscribes to Firestore / Local-First workspace transactions using:
+   * - `where("workspaceId", "==", currentUserProfile.workspaceId)` when `personalViewMode === false`
+   * - `where("workspaceId", "==", currentUserProfile.workspaceId)` + `where("createdByUid", "==", currentUser.uid)` when `personalViewMode === true`
+   */
+  syncWorkspaceSubscription(user, profile) {
+    if (typeof this.workspaceTransactionsUnsubscribe === 'function') {
+      this.workspaceTransactionsUnsubscribe();
+      this.workspaceTransactionsUnsubscribe = null;
+    }
+    if (!profile) return;
+
+    const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
+    const workspaceId = profile.workspaceId || 'ws_default';
+    const personalViewMode = Boolean(profile.personalViewMode);
+    const currentUid = user?.uid || profile.uid || this.state.settings.currentUid;
+
+    this.workspaceTransactionsUnsubscribe = subscribeWorkspaceTransactions(
+      {
+        workspaceId,
+        personalViewMode,
+        currentUid,
+        firestoreDb,
+        firestoreModule,
+        storage,
+      },
+      (workspaceTransactions) => {
+        if (!Array.isArray(workspaceTransactions) || workspaceTransactions.length === 0) {
+          return;
+        }
+        const mergedById = new Map();
+        for (const tx of this.state.transactions || []) {
+          if (tx && tx.id) mergedById.set(tx.id, tx);
+        }
+        let hasChanges = false;
+        for (const incomingTx of workspaceTransactions) {
+          if (!incomingTx || !incomingTx.id) continue;
+          const prev = mergedById.get(incomingTx.id);
+          if (
+            !prev ||
+            prev.workspaceId !== incomingTx.workspaceId ||
+            prev.amount !== incomingTx.amount ||
+            prev.note !== incomingTx.note ||
+            prev.createdByEmail !== incomingTx.createdByEmail
+          ) {
+            hasChanges = true;
+          }
+          mergedById.set(incomingTx.id, createTransaction({ ...prev, ...incomingTx }));
+        }
+        if (hasChanges || mergedById.size !== (this.state.transactions || []).length) {
+          this.state.transactions = Array.from(mergedById.values()).sort((a, b) => {
+            if (b.date !== a.date) return String(b.date).localeCompare(String(a.date));
+            return String(b.createdAt).localeCompare(String(a.createdAt));
+          });
+          this.repo.saveState(this.state);
+          this.renderAll();
+        }
+      }
+    );
   }
 
   /**
@@ -185,6 +272,49 @@ class FinanceAppController {
     };
   }
 
+  /**
+   * Creates or updates a transaction with mandatory workspace & author metadata
+   * (`workspaceId`, `createdByUid`, `createdByEmail`) and syncs it to the shared workspace store & Firestore.
+   */
+  recordWorkspaceTransaction(txInput, existingTx = null) {
+    const user = this.authService.getCurrentUser();
+    const profile = this.authService.getCurrentProfile();
+    const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
+
+    let preparedTx;
+    if (existingTx) {
+      preparedTx = createTransaction({
+        ...existingTx,
+        ...txInput,
+        id: existingTx.id,
+        createdAt: existingTx.createdAt,
+        workspaceId:
+          existingTx.workspaceId && existingTx.workspaceId !== 'ws_default'
+            ? existingTx.workspaceId
+            : (profile?.workspaceId || this.state.settings?.workspaceId || 'ws_default'),
+        createdByUid: existingTx.createdByUid || user?.uid || profile?.uid || 'local_default_user',
+        createdByEmail: existingTx.createdByEmail || user?.email || profile?.email || 'personal@pisto.hn',
+      });
+    } else {
+      preparedTx = prepareTransactionForWorkspace(
+        {
+          ...txInput,
+          ...this.getActiveOwnerMetadata(),
+        },
+        user,
+        profile
+      );
+    }
+
+    saveTransactionToWorkspace(preparedTx, user, profile, {
+      firestoreDb,
+      firestoreModule,
+      storage,
+    }).catch(() => {});
+
+    return preparedTx;
+  }
+
   setupKeypadModal() {
     const dialogEl = document.getElementById('tx-dialog');
     this.keypadModal = new KeypadModalController({
@@ -196,23 +326,14 @@ class FinanceAppController {
 
         if (existingIdx !== -1) {
           const prevTx = this.state.transactions[existingIdx];
-          const updatedTx = createTransaction({
-            ...prevTx,
-            ...txInput,
-            id: prevTx.id,
-            createdAt: prevTx.createdAt,
-          });
+          const updatedTx = this.recordWorkspaceTransaction(txInput, prevTx);
           this.state.transactions[existingIdx] = updatedTx;
           this.repo.saveState(this.state);
           this.showToast(
             `Transacción actualizada: ${Money.format(updatedTx.amount, updatedTx.currency)}`
           );
         } else {
-          const ownerMeta = this.getActiveOwnerMetadata();
-          const newTx = createTransaction({
-            ...txInput,
-            ...ownerMeta,
-          });
+          const newTx = this.recordWorkspaceTransaction(txInput, null);
           this.state.transactions.unshift(newTx);
           this.repo.saveState(this.state);
           this.showToast(`Transacción registrada: ${Money.format(newTx.amount, newTx.currency)}`);
@@ -234,8 +355,17 @@ class FinanceAppController {
 
   deleteTransaction(txId) {
     if (!txId) return;
+    const targetTx = this.state.transactions.find((t) => t.id === txId);
+    const wsId =
+      targetTx?.workspaceId ||
+      this.authService.getCurrentProfile()?.workspaceId ||
+      this.state.settings?.workspaceId ||
+      'ws_default';
     this.state.transactions = this.state.transactions.filter((t) => t.id !== txId);
     this.repo.saveState(this.state);
+    deleteTransactionFromWorkspace(txId, wsId, this.authService.getFirestoreContext()).catch(
+      () => {}
+    );
     this.showToast('Transacción eliminada.');
     this.renderAll();
   }
@@ -1001,7 +1131,7 @@ class FinanceAppController {
       const noteParts = [merchant];
       if (cardLast4) noteParts.push(`Tarjeta *${cardLast4}`);
 
-      const newTx = createTransaction({
+      const newTx = this.recordWorkspaceTransaction({
         type: TRANSACTION_TYPES.EXPENSE,
         amount,
         currency,
@@ -1009,7 +1139,6 @@ class FinanceAppController {
         accountId,
         date,
         note: noteParts.join(' · '),
-        ...this.getActiveOwnerMetadata(),
       });
 
       this.state.transactions.unshift(newTx);
@@ -1278,7 +1407,7 @@ class FinanceAppController {
           ? `${item.concept} · Ref ${item.reference}`
           : item.concept;
 
-        const newTx = createTransaction({
+        const newTx = this.recordWorkspaceTransaction({
           type: TRANSACTION_TYPES.EXPENSE,
           amount: item.amount,
           currency: item.currency,
@@ -1286,7 +1415,6 @@ class FinanceAppController {
           accountId: targetAccountId,
           date: item.date,
           note: noteText,
-          ...this.getActiveOwnerMetadata(),
         });
         this.state.transactions.unshift(newTx);
       }
@@ -2494,10 +2622,7 @@ class FinanceAppController {
       return;
     }
 
-    const tx = createTransaction({
-      ...result.transaction,
-      ...this.getActiveOwnerMetadata(),
-    });
+    const tx = this.recordWorkspaceTransaction(result.transaction);
     this.state.transactions.unshift(tx);
     this.state.aiTelemetry.localParsesSaved = (this.state.aiTelemetry.localParsesSaved || 0) + 1;
     this.repo.saveState(this.state);
@@ -2543,16 +2668,14 @@ class FinanceAppController {
         throw new Error(data.error || 'No se pudieron extraer transacciones del texto.');
       }
 
-      const ownerMeta = this.getActiveOwnerMetadata();
       for (const item of data.items) {
-        const tx = createTransaction({
+        const tx = this.recordWorkspaceTransaction({
           type: item.type || TRANSACTION_TYPES.EXPENSE,
           amount: item.amount,
           currency: this.state.settings.baseCurrency || 'USD',
           categoryId: item.categoryId || 'food',
           accountId: this.state.accounts[0]?.id || 'acc_bank',
           note: item.note || 'Genkit Smart Parse',
-          ...ownerMeta,
         });
         this.state.transactions.unshift(tx);
       }

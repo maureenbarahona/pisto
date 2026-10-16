@@ -28,6 +28,7 @@ import {
   onFirebaseConfigUpdated,
   updateFirebaseConfig,
 } from './firebase.js';
+import { migrateTransactionsToSharedWorkspace } from './transactions.js';
 
 export {
   CUSTOM_FIREBASE_CONFIG_STORAGE_KEY,
@@ -45,6 +46,7 @@ export {
   initializeFirebaseApp,
   onFirebaseConfigUpdated,
   updateFirebaseConfig,
+  migrateTransactionsToSharedWorkspace,
 };
 
 export const GEMINI_API_KEY_STORAGE_KEY = 'pisto_user_gemini_api_key_v1';
@@ -53,6 +55,7 @@ export const LOCAL_AUTH_SESSION_KEY = 'pisto_auth_session_v1';
 export const LOCAL_USERS_DB_KEY = 'pisto_local_users_auth_v1';
 export const FIRESTORE_USERS_CACHE_PREFIX = 'pisto_firestore_users_doc_';
 export const FIRESTORE_WORKSPACES_CACHE_PREFIX = 'pisto_firestore_workspaces_doc_';
+export const FIRESTORE_EMAIL_WORKSPACE_PREFIX = 'pisto_workspace_by_email_';
 
 export const SUPPORTED_COUNTRIES = Object.freeze([
   { code: 'HN', name: 'Honduras', flag: '🇭🇳', defaultCurrency: 'HNL' },
@@ -415,6 +418,14 @@ export class FirebaseAuthProfileService {
     return this.currentProfile;
   }
 
+  getFirestoreContext() {
+    return {
+      firestoreDb: this.firestoreDb,
+      firestoreModule: this.firestoreModule,
+      storage: this.getStorageAdapter(),
+    };
+  }
+
   async signInWithGoogle(customGoogleAccount) {
     if (this.firebaseAuth && this.authModule) {
       const provider = new this.authModule.GoogleAuthProvider();
@@ -575,6 +586,88 @@ export class FirebaseAuthProfileService {
     this.notifyListeners();
   }
 
+  async resolveSharedWorkspaceForProfile(profile) {
+    const cleanEmail = String(profile.email || this.currentUser?.email || '')
+      .trim()
+      .toLowerCase();
+    if (!cleanEmail) return profile;
+
+    let resolvedWorkspaceId = profile.workspaceId;
+    let resolvedSharedEmails = Array.isArray(profile.sharedWithEmails)
+      ? [...profile.sharedWithEmails]
+      : [];
+
+    const emailIdxRaw = this.getItem(`${FIRESTORE_EMAIL_WORKSPACE_PREFIX}${cleanEmail}`);
+    if (emailIdxRaw) {
+      try {
+        const parsedIdx = JSON.parse(emailIdxRaw);
+        if (
+          parsedIdx.workspaceId &&
+          parsedIdx.workspaceId !== 'ws_default' &&
+          (!resolvedWorkspaceId || resolvedWorkspaceId === 'ws_default')
+        ) {
+          resolvedWorkspaceId = parsedIdx.workspaceId;
+        }
+        if (Array.isArray(parsedIdx.memberEmails)) {
+          resolvedSharedEmails = Array.from(
+            new Set([
+              ...resolvedSharedEmails,
+              ...parsedIdx.memberEmails.filter((e) => e && e !== cleanEmail),
+            ])
+          );
+        }
+      } catch {
+        // Ignore malformed cache
+      }
+    }
+
+    if (
+      this.firestoreDb &&
+      this.firestoreModule &&
+      (!resolvedWorkspaceId || resolvedWorkspaceId === 'ws_default')
+    ) {
+      try {
+        const wsCol = this.firestoreModule.collection(this.firestoreDb, 'workspaces');
+        const wsQuery = this.firestoreModule.query(
+          wsCol,
+          this.firestoreModule.where('memberEmails', 'array-contains', cleanEmail)
+        );
+        const wsSnap = await this.firestoreModule.getDocs(wsQuery);
+        if (!wsSnap.empty) {
+          const wsData = wsSnap.docs[0].data();
+          const foundWsId = wsData.workspaceId || wsSnap.docs[0].id;
+          if (foundWsId && foundWsId !== 'ws_default') {
+            resolvedWorkspaceId = foundWsId;
+            if (Array.isArray(wsData.memberEmails)) {
+              resolvedSharedEmails = Array.from(
+                new Set([
+                  ...resolvedSharedEmails,
+                  ...wsData.memberEmails.filter((e) => e && e !== cleanEmail),
+                ])
+              );
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[Firestore workspaces lookup] Fallback local:', err);
+      }
+    }
+
+    if (
+      resolvedWorkspaceId !== profile.workspaceId ||
+      resolvedSharedEmails.length !== (profile.sharedWithEmails || []).length
+    ) {
+      return createUserProfile({
+        ...profile,
+        workspaceId: resolvedWorkspaceId,
+        sharedWithEmails: resolvedSharedEmails,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    return profile;
+  }
+
   async loadUserProfile(uid, defaults = {}) {
     const docKey = `${FIRESTORE_USERS_CACHE_PREFIX}${uid}`;
 
@@ -584,12 +677,16 @@ export class FirebaseAuthProfileService {
         const snap = await this.firestoreModule.getDoc(userDocRef);
         if (snap.exists()) {
           const data = snap.data();
-          const profile = createUserProfile({ ...defaults, ...data, uid });
+          let profile = createUserProfile({ ...defaults, ...data, uid });
+          profile = await this.resolveSharedWorkspaceForProfile(profile);
+          if (profile.workspaceId !== data.workspaceId) {
+            await this.firestoreModule.setDoc(userDocRef, profile, { merge: true });
+          }
           this.setItem(docKey, JSON.stringify(profile));
           this.currentProfile = profile;
           return profile;
         }
-        const initialProfile = createUserProfile({
+        let initialProfile = createUserProfile({
           uid,
           email: defaults.email || this.currentUser?.email || '',
           name: defaults.name || this.currentUser?.displayName || 'Usuario Catracho',
@@ -598,6 +695,7 @@ export class FirebaseAuthProfileService {
           personalViewMode: defaults.personalViewMode ?? false,
           filterByDefaultCurrency: defaults.filterByDefaultCurrency ?? true,
         });
+        initialProfile = await this.resolveSharedWorkspaceForProfile(initialProfile);
         await this.firestoreModule.setDoc(userDocRef, initialProfile, { merge: true });
         this.setItem(docKey, JSON.stringify(initialProfile));
         this.currentProfile = initialProfile;
@@ -611,7 +709,9 @@ export class FirebaseAuthProfileService {
     if (cachedRaw) {
       try {
         const parsed = JSON.parse(cachedRaw);
-        const profile = createUserProfile({ ...defaults, ...parsed, uid });
+        let profile = createUserProfile({ ...defaults, ...parsed, uid });
+        profile = await this.resolveSharedWorkspaceForProfile(profile);
+        this.setItem(docKey, JSON.stringify(profile));
         this.currentProfile = profile;
         return profile;
       } catch {
@@ -619,7 +719,7 @@ export class FirebaseAuthProfileService {
       }
     }
 
-    const freshProfile = createUserProfile({
+    let freshProfile = createUserProfile({
       uid,
       email: defaults.email || this.currentUser?.email || '',
       name: defaults.name || this.currentUser?.displayName || 'Usuario Catracho',
@@ -628,6 +728,7 @@ export class FirebaseAuthProfileService {
       personalViewMode: defaults.personalViewMode ?? false,
       filterByDefaultCurrency: defaults.filterByDefaultCurrency ?? true,
     });
+    freshProfile = await this.resolveSharedWorkspaceForProfile(freshProfile);
     this.setItem(docKey, JSON.stringify(freshProfile));
     this.currentProfile = freshProfile;
     return freshProfile;
@@ -672,7 +773,8 @@ export class FirebaseAuthProfileService {
 
   /**
    * Links the active user's financial workspace (`workspaceId`) with another registered user by email
-   * ("Compartir Finanzas"), updating both `users/{uid}` profiles and `workspaces/{workspaceId}`.
+   * ("Compartir Finanzas"), updating both `users/{uid}` profiles, `workspaces/{workspaceId}`,
+   * and migrating existing member transactions to `sharedWorkspaceId`.
    * @param {string} targetEmail
    */
   async shareWorkspaceWithEmail(targetEmail) {
@@ -763,6 +865,19 @@ export class FirebaseAuthProfileService {
     });
     this.setItem(`${FIRESTORE_USERS_CACHE_PREFIX}${targetUid}`, JSON.stringify(updatedTargetProfile));
 
+    for (const memberEmail of combinedEmails) {
+      const normalizedEmail = String(memberEmail || '').trim().toLowerCase();
+      if (!normalizedEmail) continue;
+      this.setItem(
+        `${FIRESTORE_EMAIL_WORKSPACE_PREFIX}${normalizedEmail}`,
+        JSON.stringify({
+          workspaceId: sharedWorkspaceId,
+          memberEmails: combinedEmails,
+          updatedAt: nowIso,
+        })
+      );
+    }
+
     if (this.firestoreDb && this.firestoreModule) {
       try {
         const targetRef = this.firestoreModule.doc(this.firestoreDb, 'users', targetUid);
@@ -800,7 +915,17 @@ export class FirebaseAuthProfileService {
       }
     }
 
-    // 5. Save current user's profile with the shared workspaceId
+    // 5. Migrate existing member transactions to the shared workspaceId
+    await migrateTransactionsToSharedWorkspace(
+      sharedWorkspaceId,
+      [currentUid, targetUid],
+      combinedEmails,
+      this.storage,
+      this.firestoreDb,
+      this.firestoreModule
+    );
+
+    // 6. Save current user's profile with the shared workspaceId
     const updatedMyProfile = await this.saveUserProfile(currentUid, {
       workspaceId: sharedWorkspaceId,
       sharedWithEmails: mySharedList,

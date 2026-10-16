@@ -152,6 +152,28 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId;
     }
 
+    // Check if the authenticated user is an authorized member of the target workspace
+    function isAuthorizedWorkspaceMember(wsId) {
+      return isAuthenticated() &&
+        wsId is string &&
+        (
+          wsId == 'ws_default' ||
+          wsId == ('ws_' + request.auth.uid) ||
+          (
+            exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId == wsId
+          ) ||
+          (
+            exists(/databases/$(database)/documents/workspaces/$(wsId)) &&
+            (
+              request.auth.uid in get(/databases/$(database)/documents/workspaces/$(wsId)).data.memberUids ||
+              request.auth.token.email in get(/databases/$(database)/documents/workspaces/$(wsId)).data.memberEmails ||
+              get(/databases/$(database)/documents/workspaces/$(wsId)).data.ownerUid == request.auth.uid
+            )
+          )
+        );
+    }
+
     // ===============================================================
     // Domain Validators (Used in BOTH create and update)
     // ===============================================================
@@ -338,14 +360,13 @@ service cloud.firestore {
 
       // Subcollection for workspace-scoped transactions (`/workspaces/{workspaceId}/transactions/{txId}`)
       match /transactions/{txId} {
-        allow read: if request.auth != null &&
+        allow read: if isAuthenticated() &&
           (
             resource.data.createdByUid == request.auth.uid ||
-            resource.data.workspaceId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId ||
-            resource.data.workspaceId == ('ws_' + request.auth.uid)
+            isAuthorizedWorkspaceMember(resource.data.workspaceId)
           );
 
-        allow create: if request.auth != null &&
+        allow create: if isAuthenticated() &&
           isValidTransaction(request.resource.data) &&
           request.resource.data.createdByUid == request.auth.uid &&
           request.resource.data.createdByEmail is string &&
@@ -353,68 +374,57 @@ service cloud.firestore {
           request.resource.data.workspaceId == workspaceId &&
           request.resource.data.amount is number &&
           request.resource.data.amount > 0 &&
-          (
-            request.resource.data.workspaceId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId ||
-            request.resource.data.workspaceId == ('ws_' + request.auth.uid)
-          );
+          isAuthorizedWorkspaceMember(request.resource.data.workspaceId);
 
-        allow update: if request.auth != null &&
+        allow update: if isAuthenticated() &&
           isValidTransaction(request.resource.data) &&
           (
             resource.data.createdByUid == request.auth.uid ||
-            resource.data.workspaceId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId ||
-            resource.data.workspaceId == ('ws_' + request.auth.uid)
+            isAuthorizedWorkspaceMember(resource.data.workspaceId)
           ) &&
+          isAuthorizedWorkspaceMember(request.resource.data.workspaceId) &&
           request.resource.data.createdByUid == resource.data.createdByUid &&
-          request.resource.data.workspaceId == resource.data.workspaceId &&
           request.resource.data.amount > 0;
 
-        allow delete: if request.auth != null &&
+        allow delete: if isAuthenticated() &&
           (
             resource.data.createdByUid == request.auth.uid ||
-            resource.data.workspaceId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId ||
-            resource.data.workspaceId == ('ws_' + request.auth.uid)
+            isAuthorizedWorkspaceMember(resource.data.workspaceId)
           );
       }
     }
 
     // 3. Top-Level Transactions (`transactions/{txId}`)
     match /transactions/{txId} {
-      allow read: if request.auth != null &&
+      allow read: if isAuthenticated() &&
         (
           resource.data.createdByUid == request.auth.uid ||
-          resource.data.workspaceId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId ||
-          resource.data.workspaceId == ('ws_' + request.auth.uid)
+          isAuthorizedWorkspaceMember(resource.data.workspaceId)
         );
 
-      allow create: if request.auth != null &&
+      allow create: if isAuthenticated() &&
         isValidTransaction(request.resource.data) &&
         request.resource.data.createdByUid == request.auth.uid &&
         request.resource.data.createdByEmail is string &&
         request.resource.data.workspaceId is string &&
         request.resource.data.amount is number &&
         request.resource.data.amount > 0 &&
-        (
-          request.resource.data.workspaceId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId ||
-          request.resource.data.workspaceId == ('ws_' + request.auth.uid)
-        );
+        isAuthorizedWorkspaceMember(request.resource.data.workspaceId);
 
-      allow update: if request.auth != null &&
+      allow update: if isAuthenticated() &&
         isValidTransaction(request.resource.data) &&
         (
           resource.data.createdByUid == request.auth.uid ||
-          resource.data.workspaceId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId ||
-          resource.data.workspaceId == ('ws_' + request.auth.uid)
+          isAuthorizedWorkspaceMember(resource.data.workspaceId)
         ) &&
+        isAuthorizedWorkspaceMember(request.resource.data.workspaceId) &&
         request.resource.data.createdByUid == resource.data.createdByUid &&
-        request.resource.data.workspaceId == resource.data.workspaceId &&
         request.resource.data.amount > 0;
 
-      allow delete: if request.auth != null &&
+      allow delete: if isAuthenticated() &&
         (
           resource.data.createdByUid == request.auth.uid ||
-          resource.data.workspaceId == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId ||
-          resource.data.workspaceId == ('ws_' + request.auth.uid)
+          isAuthorizedWorkspaceMember(resource.data.workspaceId)
         );
     }
 
