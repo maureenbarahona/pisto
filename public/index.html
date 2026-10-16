@@ -3,44 +3,123 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Pisto — Open-Finance & Control Financiero Personal</title>
-  <!-- Open Graph para cuando compartas el enlace en redes/WhatsApp -->
-<meta property="og:title" content="Pisto — Tu pisto, bien contado" />
-<meta property="og:description" content="Controlá tus cuentas, tarjetas y presupuesto de forma privada, rápida y con asistencia de IA." />
+  <meta name="color-scheme" content="light dark" />
+  <title>Pisto — Open-Finance &amp; Control Financiero Personal, Familiar y Multidivisa con IA</title>
   <meta
     name="description"
+    content="Controlá tus cuentas, tarjetas, finanzas familiares compartidas y presupuesto de forma privada, rápida y con asistencia de IA en arquitectura Local-First."
+  />
+  <meta name="theme-color" content="#0b111e" />
+
+  <!-- Open Graph / Social Sharing -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Pisto" />
+  <meta property="og:locale" content="es_HN" />
+  <meta property="og:title" content="Pisto — Tu pisto, bien contado | Finanzas Personales y Familiares con IA" />
+  <meta
+    property="og:description"
+    content="Controlá tus cuentas, tarjetas, finanzas familiares compartidas y presupuesto de forma privada, rápida y con asistencia de IA."
+  />
+  <meta property="og:image" content="/og-pisto-preview.svg" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="Dashboard financiero Pisto con tema oscuro y acentos esmeralda" />
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Pisto — Tu pisto, bien contado" />
+  <meta
+    name="twitter:description"
     content="Controlá tus cuentas, tarjetas y presupuesto de forma privada, rápida y con asistencia de IA."
   />
-  <meta name="theme-color" content="#10b981" />
+  <meta name="twitter:image" content="/og-pisto-preview.svg" />
+
+  <!-- Prevent Flash of Unstyled Content (FOUC) on pinned theme -->
+  <script>
+    try {
+      const raw = localStorage.getItem('pisto_1money_state_v1');
+      const theme = raw ? (JSON.parse(raw).theme || 'dark') : 'dark';
+      if (theme === 'dark' || theme === 'light') {
+        document.documentElement.style.colorScheme = theme;
+        document.documentElement.dataset.theme = theme;
+      }
+    } catch {}
+  </script>
+
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
     href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
     rel="stylesheet"
   />
-  <link rel="stylesheet" href="/css/index.css?v=11" />
+  <link rel="stylesheet" href="/css/index.css?v=12" />
 </head>
 <body>
+  <a href="#main-workspace" class="skip-to-content-link">Saltar al contenido principal</a>
+
   <div class="app-shell">
     <!-- Top Header & Global Controls -->
-    <header class="top-header">
-      <div class="brand-identity">
-        <div class="brand-logo" aria-hidden="true">1M</div>
-        <div>
-          <h1 class="brand-title">Pisto — Open-Finance & Control Financiero Personal</h1>
-          <p class="brand-subtitle">Controlá tus cuentas, tarjetas y presupuesto de forma privada, rápida y con asistencia de IA.</p>
+    <header class="top-header" role="banner">
+      <div class="header-top-row">
+        <div class="brand-identity">
+          <div class="brand-logo" aria-hidden="true">1M</div>
+          <div>
+            <h1 class="brand-title">Pisto — Open-Finance &amp; Control Financiero Personal</h1>
+            <p class="brand-subtitle">Controlá tus cuentas, tarjetas y presupuesto de forma privada, rápida y con asistencia de IA.</p>
+          </div>
+        </div>
+
+        <div class="header-primary-actions">
+          <button
+            type="button"
+            id="btn-toggle-mobile-filters"
+            class="btn-secondary header-filter-toggle-btn"
+            aria-expanded="false"
+            aria-controls="header-filters-drawer"
+            aria-label="Mostrar u ocultar filtros de período, moneda y tema"
+          >
+            <span aria-hidden="true">⚙️</span>
+            <span>Filtros</span>
+          </button>
+
+          <button
+            type="button"
+            id="header-quick-add-btn"
+            class="btn-primary header-register-btn"
+            data-action="open-keypad"
+            aria-label="Registrar nuevo movimiento financiero"
+            title="Registrar gasto, ingreso o transferencia"
+          >
+            <span aria-hidden="true">＋</span>
+            <span>Registrar</span>
+          </button>
+
+          <button
+            type="button"
+            id="header-auth-btn"
+            class="btn-primary header-user-pill"
+            data-action="open-profile-or-auth"
+            aria-haspopup="dialog"
+            aria-controls="auth-dialog"
+            aria-label="Iniciar sesión o abrir perfil de usuario"
+            title="Autenticación Firebase y Perfil de Usuario"
+          >
+            <span aria-hidden="true">🔐</span>
+            <span>Iniciar Sesión</span>
+          </button>
         </div>
       </div>
 
-      <div class="header-controls">
+      <div id="header-filters-drawer" class="header-controls" role="region" aria-label="Filtros globales del Dashboard">
         <button
           type="button"
           id="header-token-telemetry"
           class="token-telemetry-pill"
           popovertarget="telemetry-popover"
+          aria-label="Ver auditoría de ahorro de tokens Genkit"
           title="Ver auditoría de optimización de tokens Genkit"
         >
-          <span class="telemetry-dot"></span>
+          <span class="telemetry-dot" aria-hidden="true"></span>
           <span>Modo 0-Tokens: <strong>0 tok</strong></span>
         </button>
 
@@ -76,6 +155,7 @@
             type="button"
             id="btn-clear-global-dates"
             class="btn-secondary btn-sm is-hidden"
+            aria-label="Limpiar filtro de fechas y ver todo el historial"
             title="Limpiar filtro de fechas y ver todo"
           >
             ✕ Todo
@@ -85,7 +165,7 @@
         <label for="base-currency-select" class="sr-only">Moneda base</label>
         <select id="base-currency-select" class="control-select" aria-label="Moneda base">
           <option value="HNL">HNL (L)</option>
-          <option value="USD">USD ($)</option>          
+          <option value="USD">USD ($)</option>
           <option value="EUR">EUR (€)</option>
           <option value="CRC">CRC (₡)</option>
           <option value="MXN">MXN ($)</option>
@@ -100,55 +180,43 @@
           <option value="dark">Tema: Oscuro</option>
           <option value="light">Tema: Claro</option>
         </select>
-
-        <button
-          type="button"
-          id="header-auth-btn"
-          class="btn-primary header-user-pill"
-          data-action="open-profile-or-auth"
-          aria-haspopup="dialog"
-          aria-controls="auth-dialog"
-          title="Autenticación Firebase y Perfil de Usuario"
-        >
-          <span>🔐 Iniciar Sesión</span>
-        </button>
       </div>
     </header>
 
     <!-- Native HTML5 Popover for Token Optimization Explanation -->
-    <div id="telemetry-popover" popover class="modal-dialog">
+    <div id="telemetry-popover" popover class="modal-dialog" role="dialog" aria-label="Política de Ahorro Extremo de Tokens">
       <div class="modal-header">
         <h2>Política de Ahorro Extremo de Tokens</h2>
       </div>
-      <p style="font-size: 0.86rem; color: var(--text-secondary); margin-bottom: 0.75rem;">
+      <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 0.75rem;">
         Esta aplicación ejecuta el <strong>100% de la contabilidad, gráficas y categorización común de forma determinista en tu navegador (0 tokens)</strong>.
         Firebase Genkit (<code>gemini-2.5-flash</code>) solo se invoca cuando lo solicitas explícitamente, enviando un <em>micro-payload</em> comprimido con caché SHA-256.
       </p>
       <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-        <button type="button" class="btn-secondary btn-sm" data-action="export-csv" id="btn-export-csv">Exportar CSV</button>
-        <button type="button" class="btn-secondary btn-sm" data-action="export-json" id="btn-export-json">Backup JSON</button>
-        <button type="button" class="btn-secondary btn-sm" data-action="reset-demo" id="btn-reset-demo">Restaurar Demo</button>
+        <button type="button" class="btn-secondary btn-sm" data-action="export-csv" id="btn-export-csv" aria-label="Exportar transacciones en formato CSV">Exportar CSV</button>
+        <button type="button" class="btn-secondary btn-sm" data-action="export-json" id="btn-export-json" aria-label="Descargar copia de respaldo en JSON">Backup JSON</button>
+        <button type="button" class="btn-secondary btn-sm" data-action="reset-demo" id="btn-reset-demo" aria-label="Restaurar datos de demostración">Restaurar Demo</button>
       </div>
     </div>
 
     <!-- Global Financial KPI Strip -->
     <section class="kpi-strip" aria-label="Resumen financiero general">
-      <div class="kpi-card">
+      <article class="kpi-card">
         <span class="kpi-label">Patrimonio en Cuentas</span>
         <strong class="kpi-value" id="kpi-total-balance">$0.00</strong>
-      </div>
-      <div class="kpi-card">
+      </article>
+      <article class="kpi-card">
         <span class="kpi-label">Ingresos del Período</span>
         <strong class="kpi-value text-income" id="kpi-period-income">+$0.00</strong>
-      </div>
-      <div class="kpi-card">
+      </article>
+      <article class="kpi-card">
         <span class="kpi-label">Gastos del Período</span>
         <strong class="kpi-value text-expense" id="kpi-period-expense">-$0.00</strong>
-      </div>
-      <div class="kpi-card">
+      </article>
+      <article class="kpi-card">
         <span class="kpi-label">Tasa de Ahorro</span>
         <strong class="kpi-value" id="kpi-savings-rate">0%</strong>
-      </div>
+      </article>
     </section>
 
     <!-- Active Profile / Currency / Personal View Mode Filter Banner -->
@@ -163,6 +231,7 @@
         class="nav-tab-btn is-active"
         data-tab-target="categories"
         aria-selected="true"
+        aria-controls="panel-categories"
       >
         Categorías
       </button>
@@ -173,6 +242,7 @@
         class="nav-tab-btn"
         data-tab-target="accounts"
         aria-selected="false"
+        aria-controls="panel-accounts"
       >
         Cuentas y Metas
       </button>
@@ -183,6 +253,7 @@
         class="nav-tab-btn"
         data-tab-target="transactions"
         aria-selected="false"
+        aria-controls="panel-transactions"
       >
         Transacciones
       </button>
@@ -193,6 +264,7 @@
         class="nav-tab-btn"
         data-tab-target="budgets"
         aria-selected="false"
+        aria-controls="panel-budgets"
       >
         Presupuestos y Genkit IA
       </button>
@@ -203,77 +275,82 @@
         class="nav-tab-btn"
         data-tab-target="profile"
         aria-selected="false"
+        aria-controls="panel-profile"
       >
         👤 Perfil
       </button>
     </nav>
 
-    <!-- ================================================================== -->
-    <!-- TAB 1: CATEGORÍAS (Pisto Signature Donut + Category Grid)         -->
-    <!-- ================================================================== -->
-    <main id="panel-categories" data-tab-panel="categories" role="tabpanel">
-      <div class="categories-workspace">
-        <aside class="donut-panel">
-          <div id="donut-chart-mount"></div>
-          <p style="font-size: 0.8rem; color: var(--text-secondary);">
-            Pulsa cualquier categoría o anillo para registrar un gasto o ingreso al instante con la calculadora de Pisto.
-          </p>
-        </aside>
+    <main id="main-workspace" class="app-main-workspace">
+      <!-- ================================================================== -->
+      <!-- TAB 1: CATEGORÍAS (Pisto Signature Donut + Category Grid)         -->
+      <!-- ================================================================== -->
+      <section id="panel-categories" data-tab-panel="categories" role="tabpanel" aria-labelledby="tab-btn-categories">
+        <div class="categories-workspace">
+          <aside class="donut-panel" aria-label="Gráfico circular de gastos por categoría">
+            <div id="donut-chart-mount"></div>
+            <p style="font-size: 0.875rem; color: var(--text-secondary);">
+              Pulsa cualquier categoría o anillo para registrar un gasto o ingreso al instante con la calculadora de Pisto.
+            </p>
+          </aside>
 
-        <div class="categories-grid-section">
-          <div class="section-toolbar" style="margin-bottom: 0.85rem;">
-            <h2 style="margin: 0;">Categorías de Gastos (1 Clic para Registrar)</h2>
+          <div class="categories-grid-section">
+            <div class="section-toolbar" style="margin-bottom: 0.85rem;">
+              <h2 style="margin: 0;">Categorías de Gastos (1 Clic para Registrar)</h2>
+              <button
+                type="button"
+                id="btn-new-category"
+                class="btn-primary btn-sm"
+                data-action="open-category-modal"
+                aria-label="Crear nueva categoría"
+              >
+                + Nueva Categoría
+              </button>
+            </div>
+            <div id="expense-categories-grid" class="categories-grid"></div>
+
+            <h2>Categorías de Ingresos</h2>
+            <div id="income-categories-grid" class="categories-grid"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================================== -->
+      <!-- TAB 2: CUENTAS, METAS DE AHORRO Y DEUDAS                           -->
+      <!-- ================================================================== -->
+      <section id="panel-accounts" data-tab-panel="accounts" role="tabpanel" aria-labelledby="tab-btn-accounts" class="is-hidden">
+        <div class="section-toolbar">
+          <div>
+            <h2>Cuentas, Billeteras, Ahorros y Deudas</h2>
+            <p style="font-size: 0.875rem; color: var(--text-secondary);">
+              Gestiona múltiples divisas, transfiere fondos entre cuentas y monitorea metas de ahorro.
+            </p>
+          </div>
+          <div class="toolbar-action-group">
             <button
               type="button"
-              id="btn-new-category"
-              class="btn-primary btn-sm"
-              data-action="open-category-modal"
+              id="btn-new-transfer"
+              class="btn-secondary"
+              data-action="open-keypad"
+              data-tx-type="transfer"
+              aria-label="Registrar nueva transferencia entre cuentas"
             >
-              + Nueva Categoría
+              ⇄ Nueva Transferencia
+            </button>
+            <button
+              type="button"
+              id="btn-new-account"
+              class="btn-primary"
+              data-action="open-account-modal"
+              aria-label="Crear nueva cuenta bancaria o meta de ahorro"
+            >
+              + Nueva Cuenta / Meta
             </button>
           </div>
-          <div id="expense-categories-grid" class="categories-grid"></div>
-
-          <h2>Categorías de Ingresos</h2>
-          <div id="income-categories-grid" class="categories-grid"></div>
         </div>
-      </div>
-    </main>
 
-    <!-- ================================================================== -->
-    <!-- TAB 2: CUENTAS, METAS DE AHORRO Y DEUDAS                           -->
-    <!-- ================================================================== -->
-    <section id="panel-accounts" data-tab-panel="accounts" role="tabpanel" class="is-hidden">
-      <div class="section-toolbar">
-        <div>
-          <h2>Cuentas, Billeteras, Ahorros y Deudas</h2>
-          <p style="font-size: 0.85rem; color: var(--text-secondary);">
-            Gestiona múltiples divisas, transfiere fondos entre cuentas y monitorea metas de ahorro.
-          </p>
-        </div>
-        <div style="display: flex; gap: 0.6rem;">
-          <button
-            type="button"
-            id="btn-new-transfer"
-            class="btn-secondary"
-            data-action="open-keypad"
-            data-tx-type="transfer"
-          >
-            ⇄ Nueva Transferencia
-          </button>
-          <button
-            type="button"
-            id="btn-new-account"
-            class="btn-primary"
-            data-action="open-account-modal"
-          >
-            + Nueva Cuenta / Meta
-          </button>
-        </div>
-      </div>
-
-      <div id="accounts-grid" class="accounts-grid"></div>
-    </section>
+        <div id="accounts-grid" class="accounts-grid"></div>
+      </section>
 
     <!-- ================================================================== -->
     <!-- TAB 3: TRANSACCIONES + REGISTRO RÁPIDO NLP + ESCÁNER VOUCHER OCR   -->

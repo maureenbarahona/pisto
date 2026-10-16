@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-label="Pisto — Tu pisto, bien contado">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b111e" />
+      <stop offset="55%" stop-color="#131c2e" />
+      <stop offset="100%" stop-color="#064e3b" />
+    </linearGradient>
+    <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bgGrad)" />
+  <circle cx="1030" cy="140" r="240" fill="#10b981" opacity="0.1" />
+  <circle cx="160" cy="520" r="210" fill="#059669" opacity="0.12" />
+  <rect x="80" y="80" width="1040" height="470" rx="32" fill="#131c2e" stroke="#23324d" stroke-width="2" />
+  <rect x="130" y="135" width="96" height="96" rx="24" fill="url(#brandGrad)" />
+  <text x="178" y="198" font-family="Inter, system-ui, sans-serif" font-size="44" font-weight="800" fill="#ffffff" text-anchor="middle">1M</text>
+  <text x="255" y="182" font-family="Inter, system-ui, sans-serif" font-size="48" font-weight="800" fill="#f1f5f9">Pisto — Tu pisto, bien contado</text>
+  <text x="255" y="224" font-family="Inter, system-ui, sans-serif" font-size="24" font-weight="500" fill="#b0bfd0">Open-Finance · Local-First · Finanzas Personales y Familiares</text>
+  <text x="130" y="320" font-family="Inter, system-ui, sans-serif" font-size="30" font-weight="600" fill="#e2e8f0">Controlá tus cuentas, tarjetas, vouchers POS y presupuesto con IA.</text>
+  <rect x="130" y="385" width="280" height="64" rx="16" fill="#1c2942" stroke="#10b981" stroke-width="1.5" />
+  <text x="270" y="425" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="700" fill="#34d399" text-anchor="middle">🔒 100% Local-First</text>
+  <rect x="435" y="385" width="310" height="64" rx="16" fill="#1c2942" stroke="#23324d" stroke-width="1.5" />
+  <text x="590" y="425" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="700" fill="#f1f5f9" text-anchor="middle">⚡ Modo 0-Tokens + Genkit</text>
+  <rect x="770" y="385" width="290" height="64" rx="16" fill="#1c2942" stroke="#23324d" stroke-width="1.5" />
+  <text x="915" y="425" font-family="Inter, system-ui, sans-serif" font-size="22" font-weight="700" fill="#f1f5f9" text-anchor="middle">👨‍👩‍👧‍👦 Espacio Familiar</text>
+</svg>

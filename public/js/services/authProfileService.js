@@ -51,6 +51,7 @@ export {
 
 export const GEMINI_API_KEY_STORAGE_KEY = 'pisto_user_gemini_api_key_v1';
 export const FIREBASE_CONFIG_STORAGE_KEY = LEGACY_FIREBASE_CONFIG_STORAGE_KEY;
+export const PRIVACY_CONSENT_STORAGE_KEY = 'pisto_privacy_consent_v1';
 export const LOCAL_AUTH_SESSION_KEY = 'pisto_auth_session_v1';
 export const LOCAL_USERS_DB_KEY = 'pisto_local_users_auth_v1';
 export const FIRESTORE_USERS_CACHE_PREFIX = 'pisto_firestore_users_doc_';
@@ -576,11 +577,61 @@ export class FirebaseAuthProfileService {
     return { user, profile: this.currentProfile };
   }
 
+  /**
+   * Returns the user's privacy & LocalStorage consent state.
+   */
+  getPrivacyConsent() {
+    const raw = this.getItem(PRIVACY_CONSENT_STORAGE_KEY);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.accepted === 'boolean') {
+        return {
+          accepted: Boolean(parsed.accepted),
+          localStorageEnabled: Boolean(parsed.localStorageEnabled ?? true),
+          timestamp: String(parsed.timestamp || new Date().toISOString()),
+          version: String(parsed.version || '1.0'),
+        };
+      }
+    } catch {
+      // Ignore malformed consent state
+    }
+    return null;
+  }
+
+  /**
+   * Persists the user's privacy & LocalStorage consent decision.
+   * @param {boolean} accepted
+   */
+  savePrivacyConsent(accepted = true) {
+    const state = {
+      accepted: Boolean(accepted),
+      localStorageEnabled: true,
+      timestamp: new Date().toISOString(),
+      version: '1.0',
+    };
+    this.setItem(PRIVACY_CONSENT_STORAGE_KEY, JSON.stringify(state));
+    return state;
+  }
+
+  /**
+   * Purges sensitive credentials (Gemini API Key and custom Firebase configurations)
+   * from `localStorage` and memory to guarantee strict session isolation.
+   */
+  async clearSensitiveLocalStorage() {
+    this.geminiKeyStore.setApiKey('');
+    this.removeItem(GEMINI_API_KEY_STORAGE_KEY);
+    this.removeItem(CUSTOM_FIREBASE_CONFIG_STORAGE_KEY);
+    this.removeItem(LEGACY_FIREBASE_CONFIG_STORAGE_KEY);
+    await this.updateFirebaseConfig(null);
+  }
+
   async signOut() {
     if (this.firebaseAuth && this.authModule) {
       await this.authModule.signOut(this.firebaseAuth);
     }
     this.removeItem(LOCAL_AUTH_SESSION_KEY);
+    await this.clearSensitiveLocalStorage();
     this.currentUser = null;
     this.currentProfile = null;
     this.notifyListeners();

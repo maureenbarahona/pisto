@@ -166,6 +166,7 @@ export class ProfileViewController {
       const isPassword = keyInput.type === 'password';
       keyInput.type = isPassword ? 'text' : 'password';
       toggleKeyBtn.textContent = isPassword ? '🙈 Ocultar' : '👁️ Mostrar';
+      toggleKeyBtn.setAttribute('aria-label', isPassword ? 'Ocultar Gemini API Key' : 'Mostrar Gemini API Key');
     });
 
     clearKeyBtn?.addEventListener('click', () => {
@@ -187,7 +188,15 @@ export class ProfileViewController {
 
     signOutBtn?.addEventListener('click', async () => {
       await this.authService.signOut();
-      this.callbacks.showToast('Sesión cerrada.');
+      const keyInput = document.getElementById('profile-gemini-key-input');
+      const fbApiKeyInput = document.getElementById('profile-fb-apikey-input');
+      const fbProjectIdInput = document.getElementById('profile-fb-projectid-input');
+      const fbAuthDomainInput = document.getElementById('profile-fb-authdomain-input');
+      if (keyInput) keyInput.value = '';
+      if (fbApiKeyInput) fbApiKeyInput.value = '';
+      if (fbProjectIdInput) fbProjectIdInput.value = '';
+      if (fbAuthDomainInput) fbAuthDomainInput.value = '';
+      this.callbacks.showToast('🔒 Sesión cerrada y credenciales sensibles limpiadas de localStorage.');
       this.renderProfileTab();
       this.callbacks.onAuthAndProfileUpdated(null, null, 'logout');
     });
@@ -321,20 +330,24 @@ export class ProfileViewController {
     const headerAuthBtn = document.getElementById('header-auth-btn');
     if (headerAuthBtn) {
       if (user) {
-        const initials = (profile?.name || user.displayName || 'U')
+        const displayName = profile?.name || user.displayName || 'Usuario';
+        const initials = displayName
           .split(/\s+/)
           .map((w) => w[0])
           .join('')
           .slice(0, 2)
           .toUpperCase();
         headerAuthBtn.innerHTML = `
-          <span class="user-avatar-chip">${initials}</span>
-          <span>${profile?.name || user.displayName}</span>
+          <span class="user-avatar-chip" aria-hidden="true">${initials}</span>
+          <span>${displayName}</span>
         `;
+        headerAuthBtn.setAttribute('aria-label', `Ver perfil de ${displayName}`);
       } else {
         headerAuthBtn.innerHTML = `
-          <span>🔐 Iniciar Sesión</span>
+          <span aria-hidden="true">🔐</span>
+          <span>Iniciar Sesión</span>
         `;
+        headerAuthBtn.setAttribute('aria-label', 'Iniciar sesión o crear cuenta');
       }
     }
 
@@ -422,6 +435,7 @@ export class ProfileViewController {
                   type="button"
                   class="btn-secondary btn-sm"
                   data-unlink-email="${email}"
+                  aria-label="Desvincular miembro familiar ${email}"
                   title="Desvincular ${email}"
                 >
                   ✕ Quitar
@@ -433,14 +447,14 @@ export class ProfileViewController {
       }
     }
 
-    const fbCfg = this.authService.getFirebaseConfig();
+    const customFbCfg = typeof this.authService.getCustomFirebaseConfig === 'function'
+      ? this.authService.getCustomFirebaseConfig()
+      : null;
     const fbApiKeyInput = document.getElementById('profile-fb-apikey-input');
     const fbProjectIdInput = document.getElementById('profile-fb-projectid-input');
     const fbAuthDomainInput = document.getElementById('profile-fb-authdomain-input');
-    if (fbCfg) {
-      if (fbApiKeyInput) fbApiKeyInput.value = fbCfg.apiKey || '';
-      if (fbProjectIdInput) fbProjectIdInput.value = fbCfg.projectId || '';
-      if (fbAuthDomainInput) fbAuthDomainInput.value = fbCfg.authDomain || '';
-    }
+    if (fbApiKeyInput) fbApiKeyInput.value = customFbCfg?.apiKey || '';
+    if (fbProjectIdInput) fbProjectIdInput.value = customFbCfg?.projectId || '';
+    if (fbAuthDomainInput) fbAuthDomainInput.value = customFbCfg?.authDomain || '';
   }
 }
