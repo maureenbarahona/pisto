@@ -10,9 +10,45 @@
  */
 
 import { CURRENCIES } from '../domain/models.js';
+import {
+  CUSTOM_FIREBASE_CONFIG_STORAGE_KEY,
+  LEGACY_FIREBASE_CONFIG_STORAGE_KEY,
+  defaultFirebaseConfig,
+  getDefaultFirebaseConfig,
+  isValidFirebaseConfig,
+  normalizeFirebaseConfig,
+  getCustomFirebaseConfig,
+  getFirebaseConfigSource,
+  getFirebaseConfig,
+  isLiveFirebaseCredentials,
+  registerFirebaseSdkAdapter,
+  getApps,
+  getApp,
+  initializeFirebaseApp,
+  onFirebaseConfigUpdated,
+  updateFirebaseConfig,
+} from './firebase.js';
+
+export {
+  CUSTOM_FIREBASE_CONFIG_STORAGE_KEY,
+  defaultFirebaseConfig,
+  getDefaultFirebaseConfig,
+  isValidFirebaseConfig,
+  normalizeFirebaseConfig,
+  getCustomFirebaseConfig,
+  getFirebaseConfigSource,
+  getFirebaseConfig,
+  isLiveFirebaseCredentials,
+  registerFirebaseSdkAdapter,
+  getApps,
+  getApp,
+  initializeFirebaseApp,
+  onFirebaseConfigUpdated,
+  updateFirebaseConfig,
+};
 
 export const GEMINI_API_KEY_STORAGE_KEY = 'pisto_user_gemini_api_key_v1';
-export const FIREBASE_CONFIG_STORAGE_KEY = 'pisto_firebase_web_config_v1';
+export const FIREBASE_CONFIG_STORAGE_KEY = LEGACY_FIREBASE_CONFIG_STORAGE_KEY;
 export const LOCAL_AUTH_SESSION_KEY = 'pisto_auth_session_v1';
 export const LOCAL_USERS_DB_KEY = 'pisto_local_users_auth_v1';
 export const FIRESTORE_USERS_CACHE_PREFIX = 'pisto_firestore_users_doc_';
@@ -222,42 +258,72 @@ export class FirebaseAuthProfileService {
     }
   }
 
+  getStorageAdapter() {
+    return {
+      length: 0,
+      clear: () => {
+        this.memoryStore.clear();
+      },
+      key: () => null,
+      getItem: (k) => this.getItem(k),
+      setItem: (k, v) => this.setItem(k, v),
+      removeItem: (k) => this.removeItem(k),
+    };
+  }
+
   getFirebaseConfig() {
-    try {
-      const globalCfg = globalThis.__PISTO_FIREBASE_CONFIG__;
-      if (globalCfg && globalCfg.apiKey && globalCfg.projectId) {
-        return globalCfg;
+    return getFirebaseConfig(this.getStorageAdapter());
+  }
+
+  getCustomFirebaseConfig() {
+    return getCustomFirebaseConfig(this.getStorageAdapter());
+  }
+
+  getFirebaseConfigSource() {
+    return getFirebaseConfigSource(this.getStorageAdapter());
+  }
+
+  hasCustomFirebaseConfig() {
+    return Boolean(this.getCustomFirebaseConfig());
+  }
+
+  async updateFirebaseConfig(userConfig) {
+    const result = await updateFirebaseConfig(userConfig, {
+      storage: this.getStorageAdapter(),
+    });
+    this.firebaseApp = result.app;
+
+    if (!isLiveFirebaseCredentials(result.config)) {
+      this.firebaseAuth = null;
+      this.firestoreDb = null;
+    } else if (this.authModule && this.firestoreModule) {
+      try {
+        this.firebaseAuth = this.authModule.getAuth(this.firebaseApp);
+        this.firestoreDb = this.firestoreModule.getFirestore(this.firebaseApp);
+      } catch {
+        // Keep Local-First fallback if remote SDK re-binding fails
       }
-      const raw = this.getItem(FIREBASE_CONFIG_STORAGE_KEY);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.apiKey && parsed.projectId) {
-        return parsed;
-      }
-    } catch {
-      // Ignore invalid JSON
     }
-    return null;
+
+    return result;
   }
 
   saveFirebaseConfig(config) {
-    if (!config || !config.apiKey || !config.projectId) {
-      this.removeItem(FIREBASE_CONFIG_STORAGE_KEY);
-      this.firebaseApp = null;
-      this.firebaseAuth = null;
-      this.firestoreDb = null;
-      return;
-    }
-    this.setItem(FIREBASE_CONFIG_STORAGE_KEY, JSON.stringify(config));
+    void this.updateFirebaseConfig(config);
   }
 
   isLiveFirebaseConfigured() {
-    return Boolean(this.getFirebaseConfig() && this.firebaseAuth && this.firestoreDb);
+    const cfg = this.getFirebaseConfig();
+    return Boolean(isLiveFirebaseCredentials(cfg) && this.firebaseAuth && this.firestoreDb);
   }
 
   async init() {
-    const config = this.getFirebaseConfig();
-    if (config && typeof window !== 'undefined') {
+    const { app, config } = await initializeFirebaseApp({
+      storage: this.getStorageAdapter(),
+    });
+    this.firebaseApp = app;
+
+    if (isLiveFirebaseCredentials(config) && typeof window !== 'undefined') {
       try {
         const [appMod, authMod, firestoreMod] = await Promise.all([
           import('https://www.gstatic.com/firebasejs/11.4.0/firebase-app.js'),
@@ -265,7 +331,12 @@ export class FirebaseAuthProfileService {
           import('https://www.gstatic.com/firebasejs/11.4.0/firebase-firestore.js'),
         ]);
 
-        this.firebaseApp = appMod.initializeApp(config);
+        registerFirebaseSdkAdapter(appMod);
+        const liveInit = await initializeFirebaseApp({
+          storage: this.getStorageAdapter(),
+          sdk: appMod,
+        });
+        this.firebaseApp = liveInit.app;
         this.firebaseAuth = authMod.getAuth(this.firebaseApp);
         this.firestoreDb = firestoreMod.getFirestore(this.firebaseApp);
         this.authModule = authMod;
