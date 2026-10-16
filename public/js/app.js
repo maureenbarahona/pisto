@@ -105,13 +105,34 @@ class FinanceAppController {
   }
 
   /**
-   * Synchronizes Dashboard baseCurrency, automatic transaction currency filtering, and Personal View Mode
-   * whenever the user logs in or saves their `users/{uid}` Firestore profile.
+   * Synchronizes Dashboard baseCurrency, automatic transaction currency filtering, Personal View Mode,
+   * and Shared Family Workspace (`workspaceId`) whenever the user logs in or updates their `users/{uid}` profile.
    */
   handleAuthAndProfileUpdated(user, profile, reason = '') {
     if (profile) {
-      this.state.settings.currentUid = user?.uid || profile.uid || 'local_default_user';
+      const nextUid = user?.uid || profile.uid || 'local_default_user';
+      const nextEmail = user?.email || profile.email || 'personal@pisto.hn';
+      const nextWorkspaceId = profile.workspaceId || 'ws_default';
+
+      this.state.settings.currentUid = nextUid;
       this.state.settings.personalViewMode = Boolean(profile.personalViewMode);
+      this.state.settings.workspaceId = nextWorkspaceId;
+
+      // Sync local seed/current-user transactions into the active workspace when linking or signing in
+      if (Array.isArray(this.state.transactions)) {
+        this.state.transactions.forEach((tx) => {
+          if (tx.workspaceId === 'ws_default' || tx.createdByUid === nextUid) {
+            tx.workspaceId = nextWorkspaceId;
+          }
+          if (tx.createdByUid === 'local_default_user' && nextUid !== 'local_default_user') {
+            tx.createdByUid = nextUid;
+            tx.ownerUid = nextUid;
+            if (!tx.createdByEmail || tx.createdByEmail === 'personal@pisto.hn') {
+              tx.createdByEmail = nextEmail;
+            }
+          }
+        });
+      }
 
       if (profile.defaultCurrency) {
         this.state.settings.baseCurrency = profile.defaultCurrency;
@@ -122,8 +143,9 @@ class FinanceAppController {
       }
       this.repo.saveState(this.state);
     } else if (reason === 'logout') {
-      this.state.settings.currentUid = '';
+      this.state.settings.currentUid = 'local_default_user';
       this.state.settings.personalViewMode = false;
+      this.state.settings.workspaceId = 'ws_default';
       this.state.settings.currencyFilter = 'all';
       this.ledgerFilters.currencyFilter = 'all';
       this.repo.saveState(this.state);
@@ -147,9 +169,19 @@ class FinanceAppController {
   getActiveOwnerMetadata() {
     const user = this.authService.getCurrentUser();
     const profile = this.authService.getCurrentProfile();
+    const createdByUid =
+      user?.uid || profile?.uid || this.state.settings?.currentUid || 'local_default_user';
+    const createdByEmail =
+      user?.email || profile?.email || 'personal@pisto.hn';
+    const workspaceId =
+      profile?.workspaceId || this.state.settings?.workspaceId || 'ws_default';
+
     return {
-      ownerUid: user?.uid || profile?.uid || this.state.settings?.currentUid || 'local_default_user',
-      ownerName: profile?.name || user?.displayName || 'Miembro Principal',
+      createdByUid,
+      createdByEmail,
+      workspaceId,
+      ownerUid: createdByUid,
+      ownerName: profile?.name || user?.displayName || createdByEmail.split('@')[0],
     };
   }
 
@@ -743,7 +775,10 @@ class FinanceAppController {
               </span>
             </td>
             <td class="stmt-concept-cell">
-              <strong>${conceptText}</strong>
+              <div class="tx-title-row">
+                <strong>${conceptText}</strong>
+                <span class="tx-author-badge">Por: ${String(tx.createdByEmail || 'personal@pisto.hn').split('@')[0]}</span>
+              </div>
               <small>${typeBadge}</small>
             </td>
             <td class="num-col">
@@ -974,6 +1009,7 @@ class FinanceAppController {
         accountId,
         date,
         note: noteParts.join(' · '),
+        ...this.getActiveOwnerMetadata(),
       });
 
       this.state.transactions.unshift(newTx);
@@ -1250,6 +1286,7 @@ class FinanceAppController {
           accountId: targetAccountId,
           date: item.date,
           note: noteText,
+          ...this.getActiveOwnerMetadata(),
         });
         this.state.transactions.unshift(newTx);
       }
@@ -1781,6 +1818,7 @@ class FinanceAppController {
     const activeCurrencyFilter = this.ledgerFilters.currencyFilter || this.state.settings.currencyFilter || 'all';
     const personalViewMode = Boolean(this.state.settings.personalViewMode);
     const currentUid = this.state.settings.currentUid || null;
+    const workspaceId = this.state.settings.workspaceId || 'ws_default';
 
     const filterOpts = {
       period: currentPeriod,
@@ -1789,6 +1827,7 @@ class FinanceAppController {
       currencyFilter: activeCurrencyFilter,
       personalViewMode,
       currentUid,
+      workspaceId,
     };
     const accountsSummary = computeAccountsSummary(this.state, filterOpts);
     const analytics = computePeriodAnalytics(this.state, filterOpts);
@@ -2183,6 +2222,7 @@ class FinanceAppController {
     const isCustomPeriod = this.state.settings.periodFilter === 'custom';
     const personalViewMode = Boolean(this.state.settings.personalViewMode);
     const currentUid = this.state.settings.currentUid || null;
+    const workspaceId = this.state.settings.workspaceId || 'ws_default';
 
     const groups = groupTransactionsByDay(this.state, {
       ...this.ledgerFilters,
@@ -2191,6 +2231,7 @@ class FinanceAppController {
       endDate: isCustomPeriod ? this.state.settings.endDate : '',
       personalViewMode,
       currentUid,
+      workspaceId,
     });
     const allHistoryGroups = groupTransactionsByDay(this.state, {
       ...this.ledgerFilters,
@@ -2199,6 +2240,7 @@ class FinanceAppController {
       endDate: '',
       personalViewMode,
       currentUid,
+      workspaceId,
     });
 
     const shownCount = groups.reduce((acc, g) => acc + g.items.length, 0);
@@ -2244,10 +2286,12 @@ class FinanceAppController {
               const isTransfer = tx.type === TRANSACTION_TYPES.TRANSFER;
               const sign = isIncome ? '+' : isTransfer ? '⇄' : '-';
               const amountClass = isIncome ? 'text-income' : isTransfer ? 'text-transfer' : 'text-expense';
-              const ownerLabel = tx.ownerName ? ` · 👤 ${tx.ownerName}` : '';
+              const authorHandle = String(tx.createdByEmail || tx.ownerName || 'personal@pisto.hn')
+                .split('@')[0]
+                .trim();
               const subtitle = isTransfer
-                ? `${tx.account.name} → ${tx.toAccount?.name || 'Destino'}${ownerLabel}`
-                : `${tx.account.name}${tx.note ? ` · ${tx.note}` : ''}${ownerLabel}`;
+                ? `${tx.account.name} → ${tx.toAccount?.name || 'Destino'}`
+                : `${tx.account.name}${tx.note ? ` · ${tx.note}` : ''}`;
 
               return `
                 <div
@@ -2263,7 +2307,10 @@ class FinanceAppController {
                     ${renderIcon(tx.category.icon, 18)}
                   </div>
                   <div class="tx-details">
-                    <strong class="tx-cat-title">${isTransfer ? 'Transferencia entre cuentas' : tx.category.name}</strong>
+                    <div class="tx-title-row">
+                      <strong class="tx-cat-title">${isTransfer ? 'Transferencia entre cuentas' : tx.category.name}</strong>
+                      <span class="tx-author-badge" title="Ingresado por ${tx.createdByEmail || authorHandle}">Por: ${authorHandle}</span>
+                    </div>
                     <span class="tx-subtitle">${subtitle}</span>
                   </div>
                   <div class="tx-amount-col">

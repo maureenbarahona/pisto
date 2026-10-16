@@ -205,6 +205,7 @@ export function computePeriodAnalytics(state, options = {}) {
   const currencyFilter = options.currencyFilter || 'all';
   const personalViewMode = Boolean(options.personalViewMode ?? state.settings?.personalViewMode ?? false);
   const currentUid = options.currentUid ?? state.settings?.currentUid ?? null;
+  const workspaceId = options.workspaceId ?? state.settings?.workspaceId ?? 'ws_default';
   const startDate =
     options.startDate !== undefined ? options.startDate : (state.settings?.startDate || '');
   const endDate =
@@ -219,8 +220,11 @@ export function computePeriodAnalytics(state, options = {}) {
       return false;
     }
     if (personalViewMode && currentUid) {
-      const txOwner = tx.ownerUid || currentUid;
-      if (txOwner !== currentUid) return false;
+      const txCreator = tx.createdByUid || tx.ownerUid || currentUid;
+      if (txCreator !== currentUid) return false;
+    } else if (workspaceId && workspaceId !== 'all') {
+      const txWorkspace = tx.workspaceId || 'ws_default';
+      if (txWorkspace !== workspaceId) return false;
     }
     return true;
   });
@@ -302,6 +306,7 @@ export function computePeriodAnalytics(state, options = {}) {
     currencyFilter,
     personalViewMode,
     currentUid,
+    workspaceId,
     totalIncome,
     totalExpense,
     netCashflow,
@@ -332,6 +337,7 @@ export function groupTransactionsByDay(state, filters = {}) {
   const currencyFilter = filters.currencyFilter || 'all';
   const personalViewMode = Boolean(filters.personalViewMode ?? state.settings?.personalViewMode ?? false);
   const currentUid = filters.currentUid ?? state.settings?.currentUid ?? null;
+  const workspaceId = filters.workspaceId ?? state.settings?.workspaceId ?? 'ws_default';
   const period = filters.period || state.settings?.periodFilter || 'month';
   const startDate =
     filters.startDate !== undefined ? filters.startDate : (state.settings?.startDate || '');
@@ -352,13 +358,17 @@ export function groupTransactionsByDay(state, filters = {}) {
         return false;
       }
       if (personalViewMode && currentUid) {
-        const txOwner = tx.ownerUid || currentUid;
-        if (txOwner !== currentUid) return false;
+        const txCreator = tx.createdByUid || tx.ownerUid || currentUid;
+        if (txCreator !== currentUid) return false;
+      } else if (workspaceId && workspaceId !== 'all') {
+        const txWorkspace = tx.workspaceId || 'ws_default';
+        if (txWorkspace !== workspaceId) return false;
       }
       if (query) {
         const catName = categoryMap.get(tx.categoryId)?.name || '';
         const accName = accountMap.get(tx.accountId)?.name || '';
-        const haystack = `${tx.note} ${catName} ${accName} ${tx.amount}`.toLowerCase();
+        const authorTag = (tx.createdByEmail || '').split('@')[0] || '';
+        const haystack = `${tx.note} ${catName} ${accName} ${tx.amount} ${authorTag}`.toLowerCase();
         if (!haystack.includes(query)) return false;
       }
       return true;

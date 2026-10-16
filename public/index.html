@@ -452,6 +452,10 @@
               <code id="profile-firestore-path" class="firestore-path-pill">users/local_default_user</code>
             </div>
             <div class="profile-meta-row">
+              <span>Espacio Familiar:</span>
+              <code id="profile-workspace-id-badge" class="firestore-path-pill">ws_default</code>
+            </div>
+            <div class="profile-meta-row">
               <span>Google AI Studio Key:</span>
               <span id="profile-gemini-key-status" class="voucher-pill">⚪ No configurada</span>
             </div>
@@ -510,7 +514,7 @@
           </details>
         </aside>
 
-        <!-- Right Card: Editable Profile Form persisted to users/{uid} -->
+        <!-- Right Card: Editable Profile Form persisted to users/{uid} & Shared Family Workspace -->
         <div class="profile-form-card">
           <div style="margin-bottom: 1.1rem;">
             <h2>Preferencias de Perfil y Moneda</h2>
@@ -617,7 +621,7 @@
                     Modo Vista Personal (Filtrar solo mis transacciones incluso en un espacio familiar)
                   </label>
                   <p style="font-size: 0.78rem; color: var(--text-secondary); margin-top: 0.2rem;">
-                    Cuando está activo, oculta los gastos e ingresos registrados por otros miembros del espacio familiar y calcula tus KPIs únicamente con tus movimientos.
+                    Cuando está activo, muestra únicamente las transacciones donde <code>createdByUid === currentUser.uid</code>. Cuando está inactivo, muestra todas las transacciones del <code>workspaceId</code> familiar actual.
                   </p>
                 </div>
               </div>
@@ -629,6 +633,38 @@
               </button>
             </div>
           </form>
+
+          <!-- Shared Family Finances Section ("Compartir Finanzas") -->
+          <div class="shared-finances-box">
+            <div style="margin-bottom: 0.75rem;">
+              <h3 style="font-size: 1rem; display: flex; align-items: center; gap: 0.45rem;">
+                <span>👨‍👩‍👧‍👦 Compartir Finanzas (Espacio Familiar)</span>
+              </h3>
+              <p style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.15rem;">
+                Ingresa el correo electrónico de otro usuario registrado para vincular su <code>workspaceId</code> y llevar el presupuesto familiar en conjunto.
+              </p>
+            </div>
+
+            <div class="share-workspace-form-row">
+              <label for="profile-share-email-input" class="sr-only">Correo del miembro familiar a vincular</label>
+              <input
+                type="email"
+                id="profile-share-email-input"
+                placeholder="familiar@ejemplo.hn"
+                autocomplete="email"
+                style="flex: 1;"
+              />
+              <button
+                type="button"
+                id="btn-share-workspace"
+                class="btn-primary btn-sm"
+              >
+                🔗 Vincular Espacio Familiar
+              </button>
+            </div>
+
+            <div id="profile-shared-members-list" class="shared-members-list"></div>
+          </div>
         </div>
       </div>
     </section>

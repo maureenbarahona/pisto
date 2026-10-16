@@ -268,6 +268,63 @@ export class ProfileViewController {
       );
       this.callbacks.onAuthAndProfileUpdated(currentUser, savedProfile, 'profile-saved');
     });
+
+    // Shared Family Finances ("Compartir Finanzas") handlers
+    const shareBtn = document.getElementById('btn-share-workspace') as HTMLButtonElement | null;
+    const shareEmailInput = document.getElementById('profile-share-email-input') as HTMLInputElement | null;
+    const sharedMembersList = document.getElementById('profile-shared-members-list');
+
+    const handleShareSubmit = async () => {
+      const targetEmail = String(shareEmailInput?.value || '').trim();
+      if (!targetEmail) {
+        this.callbacks.showToast('⚠️ Ingresa el correo electrónico del miembro familiar a vincular.');
+        shareEmailInput?.focus();
+        return;
+      }
+
+      try {
+        if (shareBtn) shareBtn.disabled = true;
+        const { workspaceId, profile, linkedEmail } = await this.authService.shareWorkspaceWithEmail(targetEmail);
+        if (shareEmailInput) shareEmailInput.value = '';
+        this.renderProfileTab();
+        this.callbacks.showToast(
+          `👨‍👩‍👧‍👦 Espacio familiar (${workspaceId}) vinculado con ${linkedEmail}`
+        );
+        this.callbacks.onAuthAndProfileUpdated(
+          this.authService.getCurrentUser(),
+          profile,
+          'workspace-shared'
+        );
+      } catch (err: any) {
+        this.callbacks.showToast(`⚠️ ${err?.message || 'Error al vincular el espacio familiar.'}`);
+      } finally {
+        if (shareBtn) shareBtn.disabled = false;
+      }
+    };
+
+    shareBtn?.addEventListener('click', handleShareSubmit);
+    shareEmailInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleShareSubmit();
+      }
+    });
+
+    sharedMembersList?.addEventListener('click', async (e) => {
+      const unlinkBtn = (e.target as HTMLElement).closest('[data-unlink-email]') as HTMLElement | null;
+      if (!unlinkBtn) return;
+      const emailToRemove = unlinkBtn.dataset.unlinkEmail || '';
+      if (!emailToRemove) return;
+
+      const updatedProfile = await this.authService.unlinkSharedMember(emailToRemove);
+      this.renderProfileTab();
+      this.callbacks.showToast(`Vínculo removido: ${emailToRemove}`);
+      this.callbacks.onAuthAndProfileUpdated(
+        this.authService.getCurrentUser(),
+        updatedProfile,
+        'workspace-unlinked'
+      );
+    });
   }
 
   renderProfileTab(): void {
@@ -300,11 +357,14 @@ export class ProfileViewController {
     // Update Profile Tab Card UI
     const statusBadgeEl = document.getElementById('profile-auth-status-badge');
     const uidPathEl = document.getElementById('profile-firestore-path');
+    const workspaceBadgeEl = document.getElementById('profile-workspace-id-badge');
     const emailDisplayEl = document.getElementById('profile-user-email');
     const signOutBtn = document.getElementById('btn-profile-signout');
     const openAuthBtn = document.getElementById('btn-profile-open-auth');
 
     const activeUid = user?.uid || profile?.uid || 'local_default_user';
+    const activeWorkspaceId = profile?.workspaceId || 'ws_default';
+
     if (statusBadgeEl) {
       if (user) {
         const providerLabel = user.provider === 'google' ? 'Google Auth' : 'Correo / Contraseña';
@@ -318,6 +378,10 @@ export class ProfileViewController {
 
     if (uidPathEl) {
       uidPathEl.textContent = `users/${activeUid}`;
+    }
+
+    if (workspaceBadgeEl) {
+      workspaceBadgeEl.textContent = activeWorkspaceId;
     }
 
     if (emailDisplayEl) {
@@ -354,6 +418,37 @@ export class ProfileViewController {
     }
     if (personalViewCheckbox) {
       personalViewCheckbox.checked = Boolean(profile?.personalViewMode);
+    }
+
+    // Render shared family members list
+    const sharedMembersList = document.getElementById('profile-shared-members-list');
+    if (sharedMembersList) {
+      const sharedEmails = profile?.sharedWithEmails || [];
+      if (sharedEmails.length === 0) {
+        sharedMembersList.innerHTML = `
+          <div class="shared-member-empty">
+            Espacio actual: <code>${activeWorkspaceId}</code> · Aún no has vinculado otros correos familiares.
+          </div>
+        `;
+      } else {
+        sharedMembersList.innerHTML = sharedEmails
+          .map(
+            (email) => `
+              <div class="shared-member-pill">
+                <span>👤 <strong>${email.split('@')[0]}</strong> <small>(${email})</small> · <code>${activeWorkspaceId}</code></span>
+                <button
+                  type="button"
+                  class="btn-secondary btn-sm"
+                  data-unlink-email="${email}"
+                  title="Desvincular ${email}"
+                >
+                  ✕ Quitar
+                </button>
+              </div>
+            `
+          )
+          .join('');
+      }
     }
 
     const fbCfg = this.authService.getFirebaseConfig();

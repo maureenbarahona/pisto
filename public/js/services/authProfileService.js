@@ -16,6 +16,7 @@ export const FIREBASE_CONFIG_STORAGE_KEY = 'pisto_firebase_web_config_v1';
 export const LOCAL_AUTH_SESSION_KEY = 'pisto_auth_session_v1';
 export const LOCAL_USERS_DB_KEY = 'pisto_local_users_auth_v1';
 export const FIRESTORE_USERS_CACHE_PREFIX = 'pisto_firestore_users_doc_';
+export const FIRESTORE_WORKSPACES_CACHE_PREFIX = 'pisto_firestore_workspaces_doc_';
 
 export const SUPPORTED_COUNTRIES = Object.freeze([
   { code: 'HN', name: 'Honduras', flag: '🇭🇳', defaultCurrency: 'HNL' },
@@ -51,6 +52,16 @@ export function createUserProfile(input) {
   const validCurrency = input.defaultCurrency && CURRENCIES[input.defaultCurrency]
     ? String(input.defaultCurrency)
     : 'HNL';
+  const cleanWorkspaceId = String(input.workspaceId || 'ws_default').trim().slice(0, 80) || 'ws_default';
+  const cleanSharedEmails = Array.isArray(input.sharedWithEmails)
+    ? Array.from(
+        new Set(
+          input.sharedWithEmails
+            .map((e) => String(e || '').trim().toLowerCase())
+            .filter(Boolean)
+        )
+      )
+    : [];
 
   return {
     uid,
@@ -60,39 +71,79 @@ export function createUserProfile(input) {
     defaultCurrency: validCurrency,
     personalViewMode: Boolean(input.personalViewMode ?? false),
     filterByDefaultCurrency: Boolean(input.filterByDefaultCurrency ?? true),
+    workspaceId: cleanWorkspaceId,
+    sharedWithEmails: cleanSharedEmails,
     createdAt: input.createdAt || nowIso,
     updatedAt: input.updatedAt || nowIso,
   };
 }
 
 /**
- * Filters transactions according to the active user profile settings:
+ * Builds a lightweight Local-First in-memory index by `workspaceId` and `createdByUid`
+ * so Dashboard and Ledger queries avoid repeated full scans when switching views.
+ * @param {Array<object>} transactions
+ */
+export function buildWorkspaceTransactionIndex(transactions) {
+  const byWorkspace = new Map();
+  const byCreator = new Map();
+
+  for (const tx of transactions || []) {
+    const wsId = String(tx.workspaceId || 'ws_default');
+    const creatorUid = String(tx.createdByUid || tx.ownerUid || 'local_default_user');
+
+    let wsList = byWorkspace.get(wsId);
+    if (!wsList) {
+      wsList = [];
+      byWorkspace.set(wsId, wsList);
+    }
+    wsList.push(tx);
+
+    let creatorList = byCreator.get(creatorUid);
+    if (!creatorList) {
+      creatorList = [];
+      byCreator.set(creatorUid, creatorList);
+    }
+    creatorList.push(tx);
+  }
+
+  return { byWorkspace, byCreator };
+}
+
+/**
+ * Filters transactions according to the active user profile & Shared Family Finances settings:
+ * - If `personalViewMode` is `true` (ACTIVO) and `currentUid` is present:
+ *   keeps ONLY transactions where `createdByUid === currentUid`.
+ * - If `personalViewMode` is `false` (INACTIVO):
+ *   keeps ALL transactions belonging to the active `workspaceId`.
  * - If `currencyFilter` is set (and not `'all'`), keeps only transactions matching that currency.
- * - If `personalViewMode` is `true` and `currentUid` is present, keeps only transactions owned by `currentUid`.
  * @param {Array<object>} transactions
  * @param {object} [options]
  */
 export function filterTransactionsForUserView(transactions, options = {}) {
   const {
     currentUid = null,
+    workspaceId = null,
     personalViewMode = false,
     currencyFilter = 'all',
   } = options;
 
-  return (transactions || []).filter((tx) => {
+  const index = buildWorkspaceTransactionIndex(transactions);
+
+  let candidates;
+  if (personalViewMode && currentUid) {
+    candidates = index.byCreator.get(currentUid) || [];
+  } else if (workspaceId && workspaceId !== 'all') {
+    candidates = index.byWorkspace.get(workspaceId) || [];
+  } else {
+    candidates = transactions || [];
+  }
+
+  return candidates.filter((tx) => {
     if (currencyFilter && currencyFilter !== 'all') {
       if (tx.currency !== currencyFilter) {
         return false;
       }
     }
-
-    if (personalViewMode && currentUid) {
-      const txOwner = tx.ownerUid || currentUid;
-      if (txOwner !== currentUid) {
-        return false;
-      }
-    }
-
     return true;
   });
 }
@@ -546,6 +597,163 @@ export class FirebaseAuthProfileService {
 
     this.notifyListeners();
     return updatedProfile;
+  }
+
+  /**
+   * Links the active user's financial workspace (`workspaceId`) with another registered user by email
+   * ("Compartir Finanzas"), updating both `users/{uid}` profiles and `workspaces/{workspaceId}`.
+   * @param {string} targetEmail
+   */
+  async shareWorkspaceWithEmail(targetEmail) {
+    const cleanTargetEmail = String(targetEmail || '').trim().toLowerCase();
+    if (!cleanTargetEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanTargetEmail)) {
+      throw new Error('Ingresa un correo electrónico válido para compartir el espacio financiero.');
+    }
+
+    const currentUid = this.currentUser?.uid || this.currentProfile?.uid || 'local_default_user';
+    const myProfile = await this.loadUserProfile(currentUid);
+
+    if (myProfile.email && myProfile.email.toLowerCase() === cleanTargetEmail) {
+      throw new Error('No puedes compartir el espacio financiero con tu propio correo.');
+    }
+
+    // 1. Resolve target user's UID and existing profile (from Firestore or Local-First user registry)
+    const usersDbRaw = this.getItem(LOCAL_USERS_DB_KEY);
+    const usersDb = usersDbRaw ? JSON.parse(usersDbRaw) : {};
+
+    let targetUid = usersDb[cleanTargetEmail]?.uid || `uid_${cleanTargetEmail.replace(/[^a-z0-9]/g, '_').slice(0, 24)}`;
+    let targetExistingProfile = null;
+
+    if (this.firestoreDb && this.firestoreModule) {
+      try {
+        const usersCol = this.firestoreModule.collection(this.firestoreDb, 'users');
+        const q = this.firestoreModule.query(usersCol, this.firestoreModule.where('email', '==', cleanTargetEmail));
+        const querySnap = await this.firestoreModule.getDocs(q);
+        if (!querySnap.empty) {
+          const docSnap = querySnap.docs[0];
+          targetUid = docSnap.id;
+          targetExistingProfile = createUserProfile({ ...docSnap.data(), uid: targetUid });
+        }
+      } catch (err) {
+        console.warn('[Firestore Compartir Finanzas] Búsqueda local de usuario:', err);
+      }
+    }
+
+    if (!targetExistingProfile) {
+      const targetDocRaw = this.getItem(`${FIRESTORE_USERS_CACHE_PREFIX}${targetUid}`);
+      if (targetDocRaw) {
+        try {
+          targetExistingProfile = createUserProfile({
+            ...JSON.parse(targetDocRaw),
+            uid: targetUid,
+          });
+        } catch {
+          targetExistingProfile = null;
+        }
+      }
+    }
+
+    // 2. Determine shared workspaceId
+    let sharedWorkspaceId = myProfile.workspaceId;
+    if (!sharedWorkspaceId || sharedWorkspaceId === 'ws_default') {
+      if (targetExistingProfile?.workspaceId && targetExistingProfile.workspaceId !== 'ws_default') {
+        sharedWorkspaceId = targetExistingProfile.workspaceId;
+      } else {
+        const cleanSlug = currentUid.replace(/^uid_/, '').replace(/[^a-z0-9]/g, '').slice(0, 12) || 'hogar';
+        sharedWorkspaceId = `ws_fam_${cleanSlug}`;
+      }
+    }
+
+    const combinedEmails = Array.from(
+      new Set([
+        ...(myProfile.sharedWithEmails || []),
+        ...(targetExistingProfile?.sharedWithEmails || []),
+        cleanTargetEmail,
+        ...(myProfile.email ? [myProfile.email.toLowerCase()] : []),
+      ])
+    );
+
+    const mySharedList = combinedEmails.filter((e) => e !== myProfile.email?.toLowerCase());
+    const targetSharedList = combinedEmails.filter((e) => e !== cleanTargetEmail);
+
+    // 3. Persist target user's linked workspace profile
+    const nowIso = new Date().toISOString();
+    const updatedTargetProfile = createUserProfile({
+      ...(targetExistingProfile || {
+        uid: targetUid,
+        email: cleanTargetEmail,
+        name: cleanTargetEmail.split('@')[0],
+      }),
+      uid: targetUid,
+      email: cleanTargetEmail,
+      workspaceId: sharedWorkspaceId,
+      sharedWithEmails: targetSharedList,
+      updatedAt: nowIso,
+    });
+    this.setItem(`${FIRESTORE_USERS_CACHE_PREFIX}${targetUid}`, JSON.stringify(updatedTargetProfile));
+
+    if (this.firestoreDb && this.firestoreModule) {
+      try {
+        const targetRef = this.firestoreModule.doc(this.firestoreDb, 'users', targetUid);
+        await this.firestoreModule.setDoc(
+          targetRef,
+          {
+            workspaceId: sharedWorkspaceId,
+            sharedWithEmails: targetSharedList,
+            updatedAt: nowIso,
+          },
+          { merge: true }
+        );
+      } catch (err) {
+        console.warn('[Firestore users/{targetUid}] Guardado local de vínculo familiar:', err);
+      }
+    }
+
+    // 4. Persist workspace document in `workspaces/{workspaceId}`
+    const workspaceDoc = {
+      workspaceId: sharedWorkspaceId,
+      ownerUid: currentUid,
+      memberUids: Array.from(new Set([currentUid, targetUid])),
+      memberEmails: combinedEmails,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    };
+    this.setItem(`${FIRESTORE_WORKSPACES_CACHE_PREFIX}${sharedWorkspaceId}`, JSON.stringify(workspaceDoc));
+
+    if (this.firestoreDb && this.firestoreModule) {
+      try {
+        const wsRef = this.firestoreModule.doc(this.firestoreDb, 'workspaces', sharedWorkspaceId);
+        await this.firestoreModule.setDoc(wsRef, workspaceDoc, { merge: true });
+      } catch (err) {
+        console.warn('[Firestore workspaces/{workspaceId}] Guardado local de workspace:', err);
+      }
+    }
+
+    // 5. Save current user's profile with the shared workspaceId
+    const updatedMyProfile = await this.saveUserProfile(currentUid, {
+      workspaceId: sharedWorkspaceId,
+      sharedWithEmails: mySharedList,
+    });
+
+    return {
+      workspaceId: sharedWorkspaceId,
+      profile: updatedMyProfile,
+      linkedEmail: cleanTargetEmail,
+    };
+  }
+
+  /**
+   * Removes a shared member email from the current user's shared list.
+   * @param {string} emailToRemove
+   */
+  async unlinkSharedMember(emailToRemove) {
+    const cleanRemove = String(emailToRemove || '').trim().toLowerCase();
+    const currentUid = this.currentUser?.uid || this.currentProfile?.uid || 'local_default_user';
+    const myProfile = await this.loadUserProfile(currentUid);
+    const nextShared = (myProfile.sharedWithEmails || []).filter((e) => e !== cleanRemove);
+    return await this.saveUserProfile(currentUid, {
+      sharedWithEmails: nextShared,
+    });
   }
 
   getFirestoreUserPath(uid) {

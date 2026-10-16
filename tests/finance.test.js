@@ -50,6 +50,7 @@ import {
   FirebaseAuthProfileService,
   GeminiKeyLocalStore,
   createUserProfile,
+  buildWorkspaceTransactionIndex,
   filterTransactionsForUserView,
 } from '../public/js/services/authProfileService.ts';
 import { handleRequest } from '../server/index.js';
@@ -702,7 +703,163 @@ describe('Firebase Auth, Firestore Profile (users/{uid}) & Dashboard Currency/Pe
   });
 });
 
+describe('Shared Family Finances (Finanzas Familiares Compartidas)', () => {
+  it('stores createdByUid, createdByEmail, and workspaceId on Transaction domain model', () => {
+    const tx = createTransaction({
+      type: TRANSACTION_TYPES.EXPENSE,
+      amount: 850,
+      currency: 'HNL',
+      categoryId: 'groceries',
+      accountId: 'acc_bank',
+      date: '2026-10-16',
+      note: 'Compra familiar supermercado',
+      createdByUid: 'uid_maureen_01',
+      createdByEmail: 'maureen@familia.hn',
+      workspaceId: 'ws_familia_barahona',
+    });
 
+    assert.equal(tx.createdByUid, 'uid_maureen_01');
+    assert.equal(tx.createdByEmail, 'maureen@familia.hn');
+    assert.equal(tx.workspaceId, 'ws_familia_barahona');
+    assert.equal(`Por: ${tx.createdByEmail.split('@')[0]}`, 'Por: maureen');
+  });
 
+  it('links two registered family users to the same workspaceId via shareWorkspaceWithEmail', async () => {
+    const mockStorage = {
+      map: new Map(),
+      getItem(k) {
+        return this.map.has(k) ? this.map.get(k) : null;
+      },
+      setItem(k, v) {
+        this.map.set(k, String(v));
+      },
+      removeItem(k) {
+        this.map.delete(k);
+      },
+    };
 
+    const authService = new FirebaseAuthProfileService(mockStorage);
+
+    // 1. Register Family Member B (Carlos)
+    const carlosReg = await authService.signInOrRegisterWithEmail({
+      email: 'carlos@familia.hn',
+      password: 'password123',
+      name: 'Carlos',
+      isRegister: true,
+    });
+    assert.ok(carlosReg.profile.workspaceId.startsWith('ws_'));
+
+    // 2. Register Family Member A (Maureen)
+    await authService.signOut();
+    const maureenReg = await authService.signInOrRegisterWithEmail({
+      email: 'maureen@familia.hn',
+      password: 'password123',
+      name: 'Maureen',
+      isRegister: true,
+    });
+
+    // 3. Maureen shares her financial workspace with Carlos by email
+    const shareRes = await authService.shareWorkspaceWithEmail('carlos@familia.hn');
+    assert.equal(shareRes.linkedEmail, 'carlos@familia.hn');
+    assert.ok(shareRes.profile.sharedWithEmails.includes('carlos@familia.hn'));
+    assert.equal(shareRes.profile.workspaceId, shareRes.workspaceId);
+
+    // 4. Verify Carlos now shares the exact same workspaceId when he signs in
+    await authService.signOut();
+    const carlosLogin = await authService.signInOrRegisterWithEmail({
+      email: 'carlos@familia.hn',
+      password: 'password123',
+      isRegister: false,
+    });
+    assert.equal(carlosLogin.profile.workspaceId, shareRes.workspaceId);
+    assert.ok(carlosLogin.profile.sharedWithEmails.includes('maureen@familia.hn'));
+  });
+
+  it('filters Dashboard and Ledger by workspaceId when personalViewMode is INACTIVE and by createdByUid when ACTIVE', () => {
+    const state = createSeedState();
+    state.settings.baseCurrency = 'HNL';
+    state.transactions = [
+      createTransaction({
+        id: 'tx_fam_maureen',
+        type: TRANSACTION_TYPES.EXPENSE,
+        amount: 600,
+        currency: 'HNL',
+        categoryId: 'food',
+        accountId: 'acc_cash',
+        date: '2026-10-16',
+        note: 'Almuerzo familiar',
+        createdByUid: 'uid_maureen',
+        createdByEmail: 'maureen@familia.hn',
+        workspaceId: 'ws_shared_home',
+      }),
+      createTransaction({
+        id: 'tx_fam_carlos',
+        type: TRANSACTION_TYPES.EXPENSE,
+        amount: 1400,
+        currency: 'HNL',
+        categoryId: 'groceries',
+        accountId: 'acc_bank',
+        date: '2026-10-16',
+        note: 'Despensa mensual',
+        createdByUid: 'uid_carlos',
+        createdByEmail: 'carlos@familia.hn',
+        workspaceId: 'ws_shared_home',
+      }),
+      createTransaction({
+        id: 'tx_other_workspace',
+        type: TRANSACTION_TYPES.EXPENSE,
+        amount: 5000,
+        currency: 'HNL',
+        categoryId: 'housing',
+        accountId: 'acc_bank',
+        date: '2026-10-16',
+        note: 'Otro grupo familiar ajeno',
+        createdByUid: 'uid_externo',
+        createdByEmail: 'externo@otro.hn',
+        workspaceId: 'ws_other_family',
+      }),
+    ];
+
+    // 1. Lightweight O(1) index check
+    const idx = buildWorkspaceTransactionIndex(state.transactions);
+    assert.equal(idx.byWorkspace.get('ws_shared_home')?.length, 2);
+    assert.equal(idx.byCreator.get('uid_maureen')?.length, 1);
+
+    // 2. personalViewMode INACTIVE (false): shows ALL transactions in `ws_shared_home` (600 + 1400 = 2000), excluding `ws_other_family`
+    const sharedAnalytics = computePeriodAnalytics(state, {
+      period: 'all',
+      personalViewMode: false,
+      currentUid: 'uid_maureen',
+      workspaceId: 'ws_shared_home',
+    });
+    assert.equal(sharedAnalytics.totalExpense, 2000);
+
+    const sharedGroups = groupTransactionsByDay(state, {
+      period: 'all',
+      personalViewMode: false,
+      currentUid: 'uid_maureen',
+      workspaceId: 'ws_shared_home',
+    });
+    assert.equal(sharedGroups[0].items.length, 2);
+
+    // 3. personalViewMode ACTIVE (true): shows ONLY transactions where `createdByUid === 'uid_maureen'` (600)
+    const personalAnalytics = computePeriodAnalytics(state, {
+      period: 'all',
+      personalViewMode: true,
+      currentUid: 'uid_maureen',
+      workspaceId: 'ws_shared_home',
+    });
+    assert.equal(personalAnalytics.totalExpense, 600);
+
+    const personalGroups = groupTransactionsByDay(state, {
+      period: 'all',
+      personalViewMode: true,
+      currentUid: 'uid_maureen',
+      workspaceId: 'ws_shared_home',
+    });
+    assert.equal(personalGroups[0].items.length, 1);
+    assert.equal(personalGroups[0].items[0].createdByUid, 'uid_maureen');
+    assert.equal(personalGroups[0].items[0].createdByEmail.split('@')[0], 'maureen');
+  });
+});
 

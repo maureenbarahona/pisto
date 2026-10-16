@@ -167,6 +167,9 @@ export function createTransaction({
   note = '',
   date = new Date().toISOString().slice(0, 10),
   createdAt = new Date().toISOString(),
+  createdByUid = '',
+  createdByEmail = '',
+  workspaceId = '',
   ownerUid = '',
   ownerName = '',
 }) {
@@ -181,6 +184,17 @@ export function createTransaction({
     throw new Error('Una transferencia requiere una cuenta de destino distinta a la cuenta de origen.');
   }
 
+  const resolvedUid = String(createdByUid || ownerUid || 'local_default_user').trim();
+  const fallbackHandle = String(ownerName || 'personal')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, '') || 'personal';
+  const resolvedEmail = String(createdByEmail || `${fallbackHandle}@pisto.hn`)
+    .trim()
+    .toLowerCase()
+    .slice(0, 120);
+  const resolvedWorkspaceId = String(workspaceId || 'ws_default').trim().slice(0, 80);
+
   return {
     id,
     type,
@@ -192,8 +206,11 @@ export function createTransaction({
     note: String(note || '').trim().slice(0, 160),
     date: String(date).slice(0, 10),
     createdAt,
-    ownerUid: String(ownerUid || '').trim(),
-    ownerName: String(ownerName || '').trim().slice(0, 80),
+    createdByUid: resolvedUid,
+    createdByEmail: resolvedEmail,
+    workspaceId: resolvedWorkspaceId,
+    ownerUid: resolvedUid,
+    ownerName: String(ownerName || resolvedEmail.split('@')[0] || '').trim().slice(0, 80),
   };
 }
 
