@@ -1,0 +1,37 @@
+{
+  "name": "pisto-personal-finance",
+  "version": "1.0.0",
+  "description": "Pisto — Open-Finance & Control Financiero Personal",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test tests/*.test.js",
+    "deploy:cloudrun": "bash ./deploy-cloud-run.sh"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "personal-finance",
+    "pisto",
+    "expense-tracker",
+    "budget-manager",
+    "genkit",
+    "cloud-run",
+    "clean-code",
+    "open-source"
+  ],
+  "author": "Open Source Community",
+  "license": "MIT",
+  "dependencies": {
+    "@genkit-ai/google-genai": "^1.8.0",
+    "compression": "^1.8.0",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2",
+    "genkit": "^1.8.0",
+    "helmet": "^8.1.0",
+    "zod": "^3.24.2"
+  }
+}
