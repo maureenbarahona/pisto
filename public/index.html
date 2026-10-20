@@ -343,6 +343,15 @@
             </label>
             <button
               type="button"
+              id="btn-scan-account-screenshot"
+              class="btn-secondary"
+              data-action="open-scan-account-modal"
+              aria-label="Importar detalle de cuenta bancaria con captura de pantalla"
+            >
+              📷 Importar con Captura de Pantalla
+            </button>
+            <button
+              type="button"
               id="btn-new-transfer"
               class="btn-secondary"
               data-action="open-keypad"
@@ -1784,6 +1793,200 @@
           aria-label="Probar modo de demostración sin autenticarse"
         >
           🚀 Probar Modo Demo
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL ESCANEO INTELIGENTE DE DETALLE DE CUENTA (OCR + GENKIT VISION) -->
+  <!-- ==================================================================== -->
+  <dialog id="scan-account-dialog" class="modal-dialog modal-lg" closedby="any" aria-labelledby="scan-account-dialog-title">
+    <div class="modal-surface">
+      <div class="modal-header">
+        <div>
+          <h3 id="scan-account-dialog-title">📷 Escaneo Inteligente de Detalle de Cuenta (Gemini Vision)</h3>
+          <p class="panel-subtitle" style="margin-top: 0.25rem;">
+            Sube una captura de pantalla de tu banca móvil (Atlántida, BAC, Ficohsa, Banpaís, etc.) para detectar automáticamente la cuenta, saldo actual y movimientos visibles.
+          </p>
+        </div>
+        <button
+          type="button"
+          id="btn-close-scan-account"
+          class="btn-close"
+          commandfor="scan-account-dialog"
+          command="close"
+          aria-label="Cerrar modal de escaneo de cuenta"
+        >
+          ✕
+        </button>
+      </div>
+
+      <input
+        type="file"
+        id="scan-account-file-input"
+        accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
+        class="is-hidden"
+        aria-label="Seleccionar captura de pantalla de cuenta bancaria"
+      />
+
+      <!-- Zona de arrastrar o subir imagen -->
+      <div
+        id="scan-account-dropzone"
+        class="voucher-dropzone"
+        role="button"
+        tabindex="0"
+        aria-label="Subir o arrastrar captura de pantalla de detalle de cuenta (PNG, JPG o WEBP)"
+        style="margin-bottom: 1rem; padding: 1.5rem; text-align: center; cursor: pointer;"
+      >
+        <div style="font-size: 2rem; margin-bottom: 0.4rem;">📱📷</div>
+        <strong style="display: block; font-size: 0.98rem;">
+          Haz clic o arrastra aquí la captura de pantalla de tu Estado o Detalle de Cuenta
+        </strong>
+        <p style="font-size: 0.82rem; color: var(--text-secondary); margin: 0.35rem 0 0.75rem;">
+          Formatos soportados: PNG, JPG, WEBP • Extrae Banco, Tipo de Cuenta, Número, Moneda (L / $), Saldo y Movimientos
+        </p>
+        <button type="button" id="btn-trigger-scan-account-file" class="btn-secondary btn-sm">
+          Seleccionar Imagen
+        </button>
+      </div>
+
+      <!-- Estado de carga con animación ligera -->
+      <div
+        id="scan-account-loading-box"
+        class="is-hidden"
+        role="status"
+        aria-live="polite"
+        style="padding: 1.5rem; text-align: center; border-radius: var(--radius-md); background: var(--surface-elevated); border: 1px solid var(--border-subtle); margin-bottom: 1rem;"
+      >
+        <div
+          class="scan-spinner"
+          aria-hidden="true"
+          style="width: 2.25rem; height: 2.25rem; margin: 0 auto 0.75rem; border: 3px solid var(--border-subtle); border-top-color: var(--color-brand); border-radius: 50%; animation: spin 0.9s linear infinite;"
+        ></div>
+        <strong id="scan-account-loading-text" style="display: block; font-size: 0.95rem;">
+          🤖 Analizando estado de cuenta con Gemini...
+        </strong>
+        <small style="color: var(--text-secondary);">
+          Extrayendo estructura financiera con Gemini 1.5 Flash Vision
+        </small>
+      </div>
+
+      <!-- Alerta de error -->
+      <div
+        id="scan-account-error-box"
+        class="is-hidden"
+        role="alert"
+        style="padding: 0.85rem 1rem; border-radius: var(--radius-md); background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.4); color: #ef4444; font-size: 0.86rem; margin-bottom: 1rem;"
+      ></div>
+
+      <!-- Vista previa de confirmación antes de guardar -->
+      <div id="scan-account-preview-box" class="is-hidden">
+        <div
+          class="voucher-detected-banner"
+          style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; margin-bottom: 1rem; padding: 0.9rem 1rem; border-radius: var(--radius-md); background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.35);"
+        >
+          <div style="display: flex; align-items: center; gap: 0.75rem;">
+            <img
+              id="scan-account-image-preview"
+              alt="Miniatura de captura escaneada"
+              class="is-hidden"
+              style="width: 48px; height: 48px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border-subtle);"
+            />
+            <div>
+              <strong id="scan-account-summary-title" style="display: block; font-size: 1rem; color: var(--text-primary);">
+                Cuenta detectada: —
+              </strong>
+              <span id="scan-account-tx-count-badge" class="badge-pill" style="display: inline-block; margin-top: 0.25rem;">
+                0 Transacciones encontradas
+              </span>
+            </div>
+          </div>
+          <span
+            id="scan-account-source-badge"
+            class="badge-pill"
+            style="font-size: 0.75rem; background: var(--surface-elevated);"
+          >
+            🤖 Gemini 1.5 Flash Vision
+          </span>
+        </div>
+
+        <div class="form-row-2" style="margin-bottom: 0.75rem;">
+          <div class="form-field">
+            <label for="scan-acc-bank-input">Banco Detectado</label>
+            <input type="text" id="scan-acc-bank-input" placeholder="Ej. Atlántida, BAC, Ficohsa" required />
+          </div>
+          <div class="form-field">
+            <label for="scan-acc-type-input">Tipo de Cuenta</label>
+            <input type="text" id="scan-acc-type-input" placeholder="Ej. Cuenta de Ahorro" required />
+          </div>
+        </div>
+
+        <div class="form-row-2" style="margin-bottom: 0.75rem;">
+          <div class="form-field">
+            <label for="scan-acc-number-input">Número de Cuenta / Últimos 4 dígitos</label>
+            <input type="text" id="scan-acc-number-input" placeholder="Ej. 213130058771" />
+          </div>
+          <div class="form-field">
+            <label for="scan-acc-currency-select">Moneda</label>
+            <select id="scan-acc-currency-select">
+              <option value="HNL">Lempiras (HNL - L)</option>
+              <option value="USD">Dólares (USD - $)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-row-2" style="margin-bottom: 1rem;">
+          <div class="form-field">
+            <label for="scan-acc-balance-input">Saldo Actual Detectado</label>
+            <input type="number" id="scan-acc-balance-input" step="0.01" required />
+          </div>
+          <div class="form-field">
+            <label for="scan-acc-status-select">Estado</label>
+            <select id="scan-acc-status-select">
+              <option value="Activa">Activa</option>
+              <option value="Inactiva">Inactiva</option>
+            </select>
+          </div>
+        </div>
+
+        <div style="margin-bottom: 1rem;">
+          <h4 style="font-size: 0.9rem; margin-bottom: 0.5rem;">
+            Movimientos Detectados en la Captura
+          </h4>
+          <div class="statement-table-wrap" style="max-height: 220px; overflow-y: auto;">
+            <table class="statement-table">
+              <thead>
+                <tr>
+                  <th>Fecha</th>
+                  <th>Concepto / Descripción</th>
+                  <th>Tipo</th>
+                  <th class="num-col">Monto</th>
+                </tr>
+              </thead>
+              <tbody id="scan-account-tx-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-actions" style="display: flex; justify-content: flex-end; gap: 0.65rem; margin-top: 1rem;">
+        <button
+          type="button"
+          id="btn-cancel-scan-account"
+          class="btn-secondary"
+          commandfor="scan-account-dialog"
+          command="close"
+        >
+          Cancelar
+        </button>
+        <button
+          type="button"
+          id="btn-confirm-scan-account"
+          class="btn-primary"
+          disabled
+        >
+          ✨ Confirmar y Crear Cuenta + Transacciones
         </button>
       </div>
     </div>
