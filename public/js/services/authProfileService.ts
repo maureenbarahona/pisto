@@ -1417,6 +1417,278 @@ export class FirebaseAuthProfileService {
     });
   }
 
+  private generateAlphanumericInviteCode(length: number = 7): string {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let token = '';
+    for (let i = 0; i < length; i += 1) {
+      const randIdx = Math.floor(Math.random() * alphabet.length);
+      token += alphabet[randIdx];
+    }
+    return token;
+  }
+
+  /**
+   * Generates or retrieves the unique 6-8 character alphanumeric invite token for the active Family Workspace (`workspaces/{workspaceId}`).
+   */
+  async ensureOrGenerateWorkspaceToken(
+    options: { regenerate?: boolean } = {}
+  ): Promise<{
+    workspaceId: string;
+    inviteCode: string;
+    ownerUid: string;
+    members: string[];
+    createdAt?: string;
+    updatedAt?: string;
+  }> {
+    const regenerate = Boolean(options.regenerate);
+    const currentUid = this.currentUser?.uid || this.currentProfile?.uid || 'local_default_user';
+    const myProfile = await this.loadUserProfile(currentUid);
+    const cleanEmail = String(myProfile.email || this.currentUser?.email || '')
+      .trim()
+      .toLowerCase();
+    const workspaceId =
+      myProfile.workspaceId && myProfile.workspaceId !== 'ws_default'
+        ? myProfile.workspaceId
+        : currentUid;
+
+    const nowIso = new Date().toISOString();
+    let existingDoc: any = null;
+
+    if (
+      this.firestoreDb &&
+      this.firestoreModule &&
+      typeof this.firestoreModule.doc === 'function' &&
+      typeof this.firestoreModule.getDoc === 'function'
+    ) {
+      try {
+        const wsRef = this.firestoreModule.doc(this.firestoreDb, 'workspaces', workspaceId);
+        const snap = await this.firestoreModule.getDoc(wsRef);
+        if (snap.exists()) {
+          existingDoc = snap.data();
+        }
+      } catch (err) {
+        console.warn('[Firestore workspaces/{workspaceId}] Lectura local:', err);
+      }
+    }
+
+    if (!existingDoc) {
+      const cachedRaw = this.getItem(`${FIRESTORE_WORKSPACES_CACHE_PREFIX}${workspaceId}`);
+      if (cachedRaw) {
+        try {
+          existingDoc = JSON.parse(cachedRaw);
+        } catch {
+          existingDoc = null;
+        }
+      }
+    }
+
+    const baseMembers = Array.isArray(existingDoc?.members) ? [...existingDoc.members] : [];
+    if (currentUid && !baseMembers.includes(currentUid)) {
+      baseMembers.push(currentUid);
+    }
+    if (cleanEmail && !baseMembers.includes(cleanEmail)) {
+      baseMembers.push(cleanEmail);
+    }
+
+    let inviteCode = String(existingDoc?.inviteCode || '').trim().toUpperCase();
+    if (!inviteCode || regenerate) {
+      let nextCode = this.generateAlphanumericInviteCode(7);
+      while (nextCode === inviteCode) {
+        nextCode = this.generateAlphanumericInviteCode(7);
+      }
+      inviteCode = nextCode;
+    }
+
+    const workspaceDoc = {
+      workspaceId,
+      inviteCode,
+      ownerUid: existingDoc?.ownerUid || currentUid,
+      members: baseMembers,
+      createdAt: existingDoc?.createdAt || nowIso,
+      updatedAt: nowIso,
+    };
+
+    this.setItem(
+      `${FIRESTORE_WORKSPACES_CACHE_PREFIX}${workspaceId}`,
+      JSON.stringify(workspaceDoc)
+    );
+
+    if (
+      this.firestoreDb &&
+      this.firestoreModule &&
+      typeof this.firestoreModule.doc === 'function' &&
+      typeof this.firestoreModule.setDoc === 'function'
+    ) {
+      try {
+        const wsRef = this.firestoreModule.doc(this.firestoreDb, 'workspaces', workspaceId);
+        await this.firestoreModule.setDoc(wsRef, workspaceDoc, { merge: true });
+      } catch (err) {
+        console.warn('[Firestore workspaces/{workspaceId}] Guardado local de token:', err);
+      }
+    }
+
+    if (myProfile.workspaceId !== workspaceId) {
+      await this.saveUserProfile(currentUid, { workspaceId });
+    }
+
+    return workspaceDoc;
+  }
+
+  /**
+   * Joins a shared Family Workspace using a 6-8 character alphanumeric `inviteCode`.
+   */
+  async joinWorkspaceByInviteCode(rawInviteCode: string): Promise<{
+    workspace: {
+      workspaceId: string;
+      inviteCode: string;
+      ownerUid: string;
+      members: string[];
+    };
+    profile: UserProfile;
+    message: string;
+  }> {
+    const cleanCode = String(rawInviteCode || '').trim().toUpperCase();
+    if (!cleanCode) {
+      throw new Error('Código de invitación no válido o expirado');
+    }
+
+    const currentUid = this.currentUser?.uid || this.currentProfile?.uid || 'local_default_user';
+    const myProfile = await this.loadUserProfile(currentUid);
+    const cleanEmail = String(myProfile.email || this.currentUser?.email || '')
+      .trim()
+      .toLowerCase();
+
+    let foundWorkspace: any = null;
+
+    if (
+      this.firestoreDb &&
+      this.firestoreModule &&
+      typeof this.firestoreModule.collection === 'function' &&
+      typeof this.firestoreModule.query === 'function' &&
+      typeof this.firestoreModule.where === 'function' &&
+      typeof this.firestoreModule.getDocs === 'function'
+    ) {
+      const wsCol = this.firestoreModule.collection(this.firestoreDb, 'workspaces');
+      const q = this.firestoreModule.query(
+        wsCol,
+        this.firestoreModule.where('inviteCode', '==', cleanCode)
+      );
+      const snap = await this.firestoreModule.getDocs(q);
+      if (!snap.empty) {
+        const firstDoc = snap.docs[0];
+        const data = firstDoc.data() || {};
+        foundWorkspace = {
+          ...data,
+          workspaceId: data.workspaceId || firstDoc.id,
+        };
+      }
+    }
+
+    if (!foundWorkspace) {
+      throw new Error('Código de invitación no válido o expirado');
+    }
+
+    const targetWorkspaceId = String(foundWorkspace.workspaceId);
+    const updatedMembers = Array.from(
+      new Set([
+        ...(Array.isArray(foundWorkspace.members) ? foundWorkspace.members : []),
+        currentUid,
+        ...(cleanEmail ? [cleanEmail] : []),
+      ])
+    );
+
+    const nowIso = new Date().toISOString();
+    const updatedWorkspace = {
+      ...foundWorkspace,
+      workspaceId: targetWorkspaceId,
+      inviteCode: cleanCode,
+      ownerUid: foundWorkspace.ownerUid || targetWorkspaceId,
+      members: updatedMembers,
+      updatedAt: nowIso,
+    };
+
+    this.setItem(
+      `${FIRESTORE_WORKSPACES_CACHE_PREFIX}${targetWorkspaceId}`,
+      JSON.stringify(updatedWorkspace)
+    );
+
+    if (
+      this.firestoreDb &&
+      this.firestoreModule &&
+      typeof this.firestoreModule.doc === 'function' &&
+      typeof this.firestoreModule.setDoc === 'function'
+    ) {
+      const wsRef = this.firestoreModule.doc(this.firestoreDb, 'workspaces', targetWorkspaceId);
+      await this.firestoreModule.setDoc(wsRef, updatedWorkspace, { merge: true });
+    }
+
+    const updatedProfile = await this.saveUserProfile(currentUid, {
+      workspaceId: targetWorkspaceId,
+    });
+
+    return {
+      workspace: updatedWorkspace,
+      profile: updatedProfile,
+      message: '¡Te has unido exitosamente al Espacio Familiar!',
+    };
+  }
+
+  /**
+   * Leaves the current shared Family Workspace and resets the user's `workspaceId` to their own UID.
+   */
+  async leaveSharedWorkspace(): Promise<{
+    workspaceId: string;
+    profile: UserProfile;
+  }> {
+    const currentUid = this.currentUser?.uid || this.currentProfile?.uid || 'local_default_user';
+    const myProfile = await this.loadUserProfile(currentUid);
+    const cleanEmail = String(myProfile.email || this.currentUser?.email || '')
+      .trim()
+      .toLowerCase();
+    const oldWorkspaceId = myProfile.workspaceId;
+
+    if (
+      oldWorkspaceId &&
+      this.firestoreDb &&
+      this.firestoreModule &&
+      typeof this.firestoreModule.doc === 'function' &&
+      typeof this.firestoreModule.getDoc === 'function' &&
+      typeof this.firestoreModule.setDoc === 'function'
+    ) {
+      try {
+        const wsRef = this.firestoreModule.doc(this.firestoreDb, 'workspaces', oldWorkspaceId);
+        const snap = await this.firestoreModule.getDoc(wsRef);
+        if (snap.exists()) {
+          const data = snap.data() || {};
+          const filteredMembers = (Array.isArray(data.members) ? data.members : []).filter(
+            (m: string) => m !== currentUid && m !== cleanEmail
+          );
+          await this.firestoreModule.setDoc(
+            wsRef,
+            {
+              ...data,
+              members: filteredMembers,
+              updatedAt: new Date().toISOString(),
+            },
+            { merge: true }
+          );
+        }
+      } catch (err) {
+        console.warn('[Firestore leaveSharedWorkspace] Fallback local:', err);
+      }
+    }
+
+    const updatedProfile = await this.saveUserProfile(currentUid, {
+      workspaceId: currentUid,
+      sharedWithEmails: [],
+    });
+
+    return {
+      workspaceId: currentUid,
+      profile: updatedProfile,
+    };
+  }
+
   getFirestoreUserPath(uid: string): string {
     return `users/${uid}`;
   }

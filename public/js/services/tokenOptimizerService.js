@@ -8,7 +8,7 @@
  * 3. Client-side fingerprint cache avoids redundant network & LLM requests.
  */
 
-import { TRANSACTION_TYPES, ACCOUNT_TYPES } from '../domain/models.js';
+import { TRANSACTION_TYPES, ACCOUNT_TYPES, getActiveAccounts } from '../domain/models.js';
 
 const LOCAL_KEYWORD_RULES = Object.freeze([
   { regex: /\b(super|supermercado|mercado|abarrotes|walmart|feria|verduras| carne)\b/i, categoryId: 'groceries', type: TRANSACTION_TYPES.EXPENSE },
@@ -106,8 +106,8 @@ export function parseNaturalLanguageLocal(rawText, state) {
     }
   }
 
-  // Match account hint (efectivo, tarjeta, banco, ahorro)
-  const accounts = state?.accounts || [];
+  // Match account hint (efectivo, tarjeta, banco, ahorro) from active (!isArchived) accounts only
+  const accounts = getActiveAccounts(state?.accounts || []);
   let matchedAccount = accounts[0]?.id || 'acc_bank';
 
   if (/\b(efectivo|cash|billetera)\b/i.test(text)) {

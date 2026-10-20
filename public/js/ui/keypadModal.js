@@ -7,7 +7,7 @@
  * - Full keyboard and touch/click support.
  */
 
-import { Money, TRANSACTION_TYPES } from '../domain/models.js';
+import { Money, TRANSACTION_TYPES, getActiveAccounts } from '../domain/models.js';
 
 /**
  * Safely evaluates a simple arithmetic expression (e.g., "25.50+12*2") without eval().
@@ -218,21 +218,28 @@ export class KeypadModalController {
     const toAccountSelect = this.dialogEl.querySelector('#tx-to-account-select');
     const currencySelect = this.dialogEl.querySelector('#tx-currency-select');
 
-    if (fromAccountSelect && this.state?.accounts) {
-      fromAccountSelect.innerHTML = this.state.accounts
+    const activeAccounts = getActiveAccounts(this.state?.accounts || []);
+
+    if (fromAccountSelect) {
+      fromAccountSelect.innerHTML = activeAccounts
         .map((acc) => `<option value="${acc.id}">${acc.name} (${acc.currency})</option>`)
         .join('');
-      if (preset.accountId && this.state.accounts.some((a) => a.id === preset.accountId)) {
+      if (preset.accountId && activeAccounts.some((a) => a.id === preset.accountId)) {
         fromAccountSelect.value = preset.accountId;
+      } else if (activeAccounts[0]) {
+        fromAccountSelect.value = activeAccounts[0].id;
       }
     }
 
-    if (toAccountSelect && this.state?.accounts) {
-      toAccountSelect.innerHTML = this.state.accounts
+    if (toAccountSelect) {
+      toAccountSelect.innerHTML = activeAccounts
         .map((acc) => `<option value="${acc.id}">${acc.name} (${acc.currency})</option>`)
         .join('');
-      const fallbackSecond = this.state.accounts[1]?.id || this.state.accounts[0]?.id;
-      toAccountSelect.value = preset.toAccountId || fallbackSecond;
+      const fallbackSecond = activeAccounts[1]?.id || activeAccounts[0]?.id || '';
+      toAccountSelect.value =
+        preset.toAccountId && activeAccounts.some((a) => a.id === preset.toAccountId)
+          ? preset.toAccountId
+          : fallbackSecond;
     }
 
     if (currencySelect) {

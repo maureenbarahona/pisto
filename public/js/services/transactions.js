@@ -463,3 +463,127 @@ export async function migrateTransactionsToSharedWorkspace(
 
   return mergeWorkspaceTransactions(updatedLocal, allShared);
 }
+
+/**
+ * Returns all transactions associated with `accountId` (either as origin `accountId` or transfer destination `toAccountId`).
+ */
+export function getTransactionsByAccountId(transactions, accountId) {
+  const cleanId = String(accountId || '').trim();
+  if (!cleanId || !Array.isArray(transactions)) return [];
+  return transactions.filter((tx) => tx.accountId === cleanId || tx.toAccountId === cleanId);
+}
+
+/**
+ * Executes an atomic Firestore `writeBatch` to delete the account document from `accounts/{accountId}`
+ * AND cascade-delete all documents in `transactions` where `accountId === idDeLaCuenta` (plus local state/cache cleanup).
+ */
+export async function deleteAccountAndTransactionsWriteBatch(accountId, options = {}) {
+  const cleanAccountId = String(accountId || '').trim();
+  if (!cleanAccountId) {
+    throw new Error('Se requiere un ID de cuenta válido para eliminar en cascada.');
+  }
+
+  const storage = resolveStorage(options.storage);
+  const workspaceId = String(options.workspaceId || 'ws_default').trim() || 'ws_default';
+  const localTxs = Array.isArray(options.transactions) ? [...options.transactions] : [];
+  const cachedWsTxs = readLocalWorkspaceTransactions(workspaceId, storage);
+
+  const deletedTxIdSet = new Set();
+  for (const tx of [...localTxs, ...cachedWsTxs]) {
+    if (tx && tx.id && (tx.accountId === cleanAccountId || tx.toAccountId === cleanAccountId)) {
+      deletedTxIdSet.add(tx.id);
+    }
+  }
+
+  let batchCommitted = false;
+
+  if (
+    options.firestoreDb &&
+    options.firestoreModule &&
+    typeof options.firestoreModule.writeBatch === 'function' &&
+    typeof options.firestoreModule.doc === 'function'
+  ) {
+    try {
+      const { firestoreDb, firestoreModule } = options;
+      const batch = firestoreModule.writeBatch(firestoreDb);
+
+      // 1. Delete account document from `accounts/{accountId}`
+      const accountRef = firestoreModule.doc(firestoreDb, 'accounts', cleanAccountId);
+      batch.delete(accountRef);
+
+      // 2. Query Firestore `transactions` where `accountId === idDeLaCuenta`
+      if (
+        typeof firestoreModule.collection === 'function' &&
+        typeof firestoreModule.query === 'function' &&
+        typeof firestoreModule.where === 'function' &&
+        typeof firestoreModule.getDocs === 'function'
+      ) {
+        const txCol = firestoreModule.collection(firestoreDb, 'transactions');
+        const q = firestoreModule.query(
+          txCol,
+          firestoreModule.where('accountId', '==', cleanAccountId)
+        );
+        const snap = await firestoreModule.getDocs(q);
+        if (snap) {
+          if (typeof snap.forEach === 'function') {
+            snap.forEach((docSnap) => {
+              const txId = docSnap?.id || docSnap?.data?.()?.id;
+              if (txId) deletedTxIdSet.add(txId);
+              const ref =
+                docSnap?.ref || firestoreModule.doc(firestoreDb, 'transactions', txId);
+              if (ref) batch.delete(ref);
+            });
+          } else if (Array.isArray(snap.docs)) {
+            for (const docSnap of snap.docs) {
+              const txId = docSnap?.id || docSnap?.data?.()?.id;
+              if (txId) deletedTxIdSet.add(txId);
+              const ref =
+                docSnap?.ref || firestoreModule.doc(firestoreDb, 'transactions', txId);
+              if (ref) batch.delete(ref);
+            }
+          }
+        }
+      }
+
+      // Ensure any known local transaction IDs for this account are also queued in the batch
+      for (const txId of deletedTxIdSet) {
+        const txRef = firestoreModule.doc(firestoreDb, 'transactions', txId);
+        batch.delete(txRef);
+      }
+
+      await batch.commit();
+      batchCommitted = true;
+    } catch (err) {
+      console.warn(
+        '[TransactionsService] Fallback Local-First en writeBatch de eliminación en cascada:',
+        err
+      );
+    }
+  }
+
+  // 3. Clean up Local-First workspace cache
+  const remainingCached = cachedWsTxs.filter(
+    (tx) =>
+      tx.accountId !== cleanAccountId &&
+      tx.toAccountId !== cleanAccountId &&
+      !deletedTxIdSet.has(tx.id)
+  );
+  writeLocalWorkspaceTransactions(workspaceId, remainingCached, storage);
+
+  const remainingTransactions = localTxs.filter(
+    (tx) =>
+      tx.accountId !== cleanAccountId &&
+      tx.toAccountId !== cleanAccountId &&
+      !deletedTxIdSet.has(tx.id)
+  );
+
+  const deletedTransactionIds = Array.from(deletedTxIdSet);
+
+  return {
+    deletedAccountId: cleanAccountId,
+    deletedTransactionIds,
+    deletedCount: deletedTransactionIds.length,
+    remainingTransactions,
+    batchCommitted,
+  };
+}

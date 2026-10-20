@@ -14,6 +14,7 @@
 
 export {
   type WorkspaceTransactionQueryOptions,
+  type CascadeDeleteAccountResult,
   WORKSPACE_TRANSACTIONS_CACHE_PREFIX,
   prepareTransactionForWorkspace,
   buildWorkspaceTransactionsQuery,
@@ -26,4 +27,6 @@ export {
   saveTransactionToWorkspace,
   deleteTransactionFromWorkspace,
   migrateTransactionsToSharedWorkspace,
+  getTransactionsByAccountId,
+  deleteAccountAndTransactionsWriteBatch,
 } from '../../public/js/services/transactions.ts';

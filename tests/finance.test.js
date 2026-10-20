@@ -59,7 +59,18 @@ import {
   fetchWorkspaceTransactions,
   subscribeWorkspaceTransactions,
   saveTransactionToWorkspace,
+  getTransactionsByAccountId,
+  deleteAccountAndTransactionsWriteBatch,
 } from '../src/services/transactions.ts';
+import {
+  filterActiveAccounts,
+  filterArchivedAccounts,
+  filterAccountsForView,
+  archiveAccount,
+  unarchiveAccount,
+  deleteAccountWithCascade,
+} from '../src/services/accounts.ts';
+import { DeleteAccountModal } from '../public/js/ui/deleteAccountModal.js';
 import { handleRequest } from '../server/index.js';
 import http from 'node:http';
 
@@ -1201,7 +1212,259 @@ describe('Shared Family Finances (Finanzas Familiares Compartidas)', () => {
     assert.equal(updatedDoc.workspaceId, 'ws_shared_family_99');
     assert.equal(reloginResult.profile.workspaceId, 'ws_shared_family_99');
   });
+
+  it('supports Family Workspace Invite Code / Token system: Host token generation/regeneration, Guest joining by inviteCode, and leaving shared workspace', async () => {
+    const map = new Map();
+    const storage = {
+      getItem: (key) => (map.has(key) ? map.get(key) : null),
+      setItem: (key, val) => map.set(key, String(val)),
+      removeItem: (key) => map.delete(key),
+    };
+
+    const firestoreWorkspaces = new Map();
+    const firestoreUsers = new Map();
+    const mockFirestoreModule = {
+      doc: (_db, col, id) => ({ col, id, path: `${col}/${id}` }),
+      getDoc: async (ref) => {
+        const store = ref.col === 'workspaces' ? firestoreWorkspaces : firestoreUsers;
+        return {
+          exists: () => store.has(ref.id),
+          data: () => store.get(ref.id),
+        };
+      },
+      setDoc: async (ref, data, options) => {
+        const store = ref.col === 'workspaces' ? firestoreWorkspaces : firestoreUsers;
+        const prev = store.get(ref.id) || {};
+        store.set(ref.id, options?.merge ? { ...prev, ...data } : { ...data });
+      },
+      collection: (_db, name) => ({ name }),
+      where: (field, op, value) => ({ field, op, value }),
+      query: (colRef, ...constraints) => ({ colRef, constraints }),
+      getDocs: async (q) => {
+        const matched = [];
+        for (const [id, docData] of firestoreWorkspaces.entries()) {
+          if (q.constraints.every((c) => docData[c.field] === c.value)) {
+            matched.push({ id, data: () => docData });
+          }
+        }
+        return {
+          empty: matched.length === 0,
+          docs: matched,
+        };
+      },
+    };
+    const mockDb = { name: 'mock_firestore_db' };
+
+    // 1. Host user signs in and generates a Family Workspace Invite Code (6-8 alphanumeric chars)
+    const hostAuth = new FirebaseAuthProfileService(storage);
+    await hostAuth.init();
+    hostAuth.setFirebaseRuntimeForTesting({
+      firestoreDb: mockDb,
+      firestoreModule: mockFirestoreModule,
+    });
+    const { user: hostUser } = await hostAuth.signInWithGoogle({
+      email: 'host@familia.hn',
+      name: 'Host Familiar',
+    });
+
+    const hostWs = await hostAuth.ensureOrGenerateWorkspaceToken({ regenerate: false });
+    assert.equal(hostWs.workspaceId, hostUser.uid);
+    assert.equal(hostWs.ownerUid, hostUser.uid);
+    assert.match(hostWs.inviteCode, /^[A-Z0-9]{6,8}$/);
+    assert.ok(hostWs.members.includes(hostUser.uid));
+    assert.ok(hostWs.members.includes('host@familia.hn'));
+    assert.ok(firestoreWorkspaces.has(hostUser.uid));
+
+    // Regenerating the token produces a new valid 6-8 char alphanumeric inviteCode
+    const regeneratedWs = await hostAuth.ensureOrGenerateWorkspaceToken({ regenerate: true });
+    assert.match(regeneratedWs.inviteCode, /^[A-Z0-9]{6,8}$/);
+    assert.equal(firestoreWorkspaces.get(hostUser.uid).inviteCode, regeneratedWs.inviteCode);
+
+    // 2. Guest user signs in and attempts to join with an invalid token -> throws error
+    const guestAuth = new FirebaseAuthProfileService(storage);
+    await guestAuth.init();
+    guestAuth.setFirebaseRuntimeForTesting({
+      firestoreDb: mockDb,
+      firestoreModule: mockFirestoreModule,
+    });
+    const { user: guestUser } = await guestAuth.signInWithGoogle({
+      email: 'invitado@familia.hn',
+      name: 'Invitado Familiar',
+    });
+
+    await assert.rejects(
+      async () => guestAuth.joinWorkspaceByInviteCode('INVALID99'),
+      (err) => {
+        assert.equal(err.message, 'Código de invitación no válido o expirado');
+        return true;
+      }
+    );
+
+    // 3. Guest joins using the Host's valid inviteCode
+    const joinResult = await guestAuth.joinWorkspaceByInviteCode(regeneratedWs.inviteCode);
+    assert.equal(joinResult.message, '¡Te has unido exitosamente al Espacio Familiar!');
+    assert.equal(joinResult.profile.workspaceId, hostUser.uid);
+    assert.ok(joinResult.workspace.members.includes(guestUser.uid));
+    assert.ok(joinResult.workspace.members.includes('invitado@familia.hn'));
+    assert.equal(firestoreUsers.get(guestUser.uid).workspaceId, hostUser.uid);
+
+    // 4. Guest leaves the shared workspace -> resets workspaceId to guestUser.uid
+    const leaveResult = await guestAuth.leaveSharedWorkspace();
+    assert.equal(leaveResult.workspaceId, guestUser.uid);
+    assert.equal(leaveResult.profile.workspaceId, guestUser.uid);
+    assert.equal(firestoreUsers.get(guestUser.uid).workspaceId, guestUser.uid);
+    assert.equal(firestoreWorkspaces.get(hostUser.uid).members.includes(guestUser.uid), false);
+  });
 });
 
+describe('Account Archiving, Cascade Deletion (writeBatch) & Relational Integrity', () => {
+  it('Option A (Archive Account): sets isArchived=true / status="archived", hides from active selectors, preserves historical transactions/reports, and supports unarchiving', async () => {
+    const state = createSeedState();
+    const initialAnalytics = computePeriodAnalytics(state, { period: 'all' });
+    const cardTxBefore = getTransactionsByAccountId(state.transactions, 'acc_card');
+    assert.ok(cardTxBefore.length > 0);
 
+    const firestoreAccounts = new Map();
+    const mockFirestoreModule = {
+      doc: (_db, col, id) => ({ col, id, path: `${col}/${id}` }),
+      setDoc: async (ref, data, options) => {
+        const prev = firestoreAccounts.get(ref.id) || {};
+        firestoreAccounts.set(ref.id, options?.merge ? { ...prev, ...data } : { ...data });
+      },
+    };
+    const mockDb = { name: 'mock_firestore_db' };
 
+    // 1. Archive 'acc_card'
+    const archiveRes = await archiveAccount('acc_card', state, {
+      workspaceId: 'ws_default',
+      currentUid: 'local_default_user',
+      firestoreDb: mockDb,
+      firestoreModule: mockFirestoreModule,
+      storage: null,
+    });
+
+    assert.ok(archiveRes.account);
+    assert.equal(archiveRes.account.isArchived, true);
+    assert.equal(archiveRes.account.status, 'archived');
+    assert.equal(archiveRes.preservedTxCount, cardTxBefore.length);
+    assert.equal(firestoreAccounts.get('acc_card')?.isArchived, true);
+    assert.equal(firestoreAccounts.get('acc_card')?.status, 'archived');
+
+    // 2. Active account selectors exclude the archived account
+    const activeAccounts = filterActiveAccounts(state.accounts);
+    const archivedAccounts = filterArchivedAccounts(state.accounts);
+    assert.equal(activeAccounts.some((a) => a.id === 'acc_card'), false);
+    assert.equal(archivedAccounts.some((a) => a.id === 'acc_card'), true);
+
+    // 3. View filter hides archived accounts by default and shows them when showArchived=true
+    assert.equal(
+      filterAccountsForView(state.accounts, false).some((a) => a.id === 'acc_card'),
+      false
+    );
+    assert.equal(
+      filterAccountsForView(state.accounts, true).some((a) => a.id === 'acc_card'),
+      true
+    );
+
+    // 4. All historical transactions, budgets, and Dashboard analytics remain 100% intact
+    const cardTxAfter = getTransactionsByAccountId(state.transactions, 'acc_card');
+    assert.equal(cardTxAfter.length, cardTxBefore.length);
+    const postArchiveAnalytics = computePeriodAnalytics(state, { period: 'all' });
+    assert.equal(postArchiveAnalytics.totalIncome, initialAnalytics.totalIncome);
+    assert.equal(postArchiveAnalytics.totalExpense, initialAnalytics.totalExpense);
+
+    // 5. Unarchive / reactivate 'acc_card'
+    const reactivatedRes = await unarchiveAccount('acc_card', state, {
+      workspaceId: 'ws_default',
+      currentUid: 'local_default_user',
+      firestoreDb: mockDb,
+      firestoreModule: mockFirestoreModule,
+      storage: null,
+    });
+    assert.ok(reactivatedRes.account);
+    assert.equal(reactivatedRes.account.isArchived, false);
+    assert.equal(reactivatedRes.account.status, 'active');
+    assert.equal(filterActiveAccounts(state.accounts).some((a) => a.id === 'acc_card'), true);
+  });
+
+  it('Option B (Cascade Delete with Firestore writeBatch): deletes account from accounts collection and all transactions where accountId === idDeLaCuenta', async () => {
+    const state = createSeedState();
+    const targetAccountId = 'acc_card';
+    const associatedTxs = state.transactions.filter((tx) => tx.accountId === targetAccountId);
+    assert.ok(associatedTxs.length > 0);
+
+    const firestoreAccounts = new Map([
+      ['acc_card', { id: 'acc_card', name: 'Tarjeta de Crédito', workspaceId: 'ws_default' }],
+      ['acc_bank', { id: 'acc_bank', name: 'Cuenta Principal', workspaceId: 'ws_default' }],
+    ]);
+    const firestoreTransactions = new Map(
+      state.transactions.map((tx) => [tx.id, { ...tx, workspaceId: 'ws_default' }])
+    );
+
+    const batchDeletedRefs = [];
+    let batchCommitted = false;
+
+    const mockFirestoreModule = {
+      collection: (_db, name) => ({ name }),
+      doc: (_db, col, id) => ({ col, id, path: `${col}/${id}` }),
+      where: (field, op, value) => ({ field, op, value }),
+      query: (colRef, ...constraints) => ({ colRef, constraints }),
+      getDocs: async (q) => {
+        const docs = [];
+        for (const [id, data] of firestoreTransactions.entries()) {
+          if (q.constraints.every((c) => data[c.field] === c.value)) {
+            docs.push({
+              id,
+              ref: { col: 'transactions', id, path: `transactions/${id}` },
+              data: () => data,
+            });
+          }
+        }
+        return {
+          empty: docs.length === 0,
+          docs,
+        };
+      },
+      writeBatch: () => ({
+        delete: (ref) => {
+          batchDeletedRefs.push(ref);
+          if (ref.col === 'accounts') {
+            firestoreAccounts.delete(ref.id);
+          } else if (ref.col === 'transactions') {
+            firestoreTransactions.delete(ref.id);
+          }
+        },
+        commit: async () => {
+          batchCommitted = true;
+        },
+      }),
+    };
+    const mockDb = { name: 'mock_firestore_db' };
+
+    const result = await deleteAccountWithCascade(targetAccountId, state, {
+      workspaceId: 'ws_default',
+      currentUid: 'local_default_user',
+      firestoreDb: mockDb,
+      firestoreModule: mockFirestoreModule,
+      storage: null,
+    });
+
+    assert.equal(batchCommitted, true);
+    assert.equal(result.deletedAccount?.id, 'acc_card');
+    assert.equal(result.deletedTransactionsCount, associatedTxs.length);
+
+    // Verify Firestore writeBatch deleted `accounts/acc_card` AND all `transactions` where `accountId === 'acc_card'`
+    assert.equal(firestoreAccounts.has('acc_card'), false);
+    assert.equal(firestoreAccounts.has('acc_bank'), true);
+    assert.ok(batchDeletedRefs.some((r) => r.path === 'accounts/acc_card'));
+    for (const tx of associatedTxs) {
+      assert.equal(firestoreTransactions.has(tx.id), false);
+      assert.ok(batchDeletedRefs.some((r) => r.path === `transactions/${tx.id}`));
+    }
+
+    // Verify local state also removed the account and its transactions
+    assert.equal(state.accounts.some((a) => a.id === 'acc_card'), false);
+    assert.equal(state.transactions.some((tx) => tx.accountId === 'acc_card'), false);
+    assert.equal(typeof DeleteAccountModal, 'function');
+  });
+});
