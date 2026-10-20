@@ -16,7 +16,6 @@ import { stripTypeScriptTypes } from 'node:module';
 import {
   executeSmartParse,
   executeFinancialInsights,
-  executeAccountDetailScan,
   getAiTelemetryStatus,
 } from './ai/genkitFlows.js';
 
@@ -92,14 +91,14 @@ function sendJson(res, statusCode, payload) {
  * @param {http.IncomingMessage} req
  * @returns {Promise<Record<string, any>>}
  */
-function readJsonBody(req, maxBytes = 32 * 1024) {
+function readJsonBody(req) {
   return new Promise((resolve, reject) => {
     let raw = '';
-    const MAX_BYTES = maxBytes;
+    const MAX_BYTES = 32 * 1024;
     req.on('data', (chunk) => {
       raw += chunk;
       if (raw.length > MAX_BYTES) {
-        reject(new Error('Payload demasiado grande.'));
+        reject(new Error('Payload demasiado grande (máximo 32KB para optimización de tokens).'));
         req.destroy();
       }
     });
@@ -227,24 +226,6 @@ export async function handleRequest(req, res) {
       const result = await executeFinancialInsights({
         compactPayload: body.compactPayload,
         lang: body.lang || 'es',
-        apiKey,
-      });
-      return sendJson(res, 200, { ok: true, ...result, telemetry: getAiTelemetryStatus() });
-    } catch (error) {
-      return sendJson(res, 400, { ok: false, error: error.message });
-    }
-  }
-
-  // 4b. On-Demand Genkit Vision Account Detail Screenshot Scanner (OCR + Gemini 1.5 Flash)
-  if (req.method === 'POST' && pathname === '/api/ai/scan-account') {
-    try {
-      const body = await readJsonBody(req, 10 * 1024 * 1024); // 10MB cap for Base64 screenshots
-      const headerKey = String(req.headers['x-gemini-api-key'] || '').trim();
-      const apiKey = headerKey || String(body.apiKey || '').trim() || undefined;
-      const result = await executeAccountDetailScan({
-        imageBase64: body.imageBase64,
-        mimeType: body.mimeType || 'image/png',
-        ocrTextFallback: body.ocrTextFallback || '',
         apiKey,
       });
       return sendJson(res, 200, { ok: true, ...result, telemetry: getAiTelemetryStatus() });

@@ -58,7 +58,6 @@ import {
   deleteAccountWithCascade,
 } from './services/accounts.js?v=12';
 import { DeleteAccountModal } from './ui/deleteAccountModal.js?v=12';
-import { ScanAccountModal } from './ui/scanAccountModal.js?v=12';
 import { ProfileViewController } from './ui/profileView.js?v=12';
 
 class FinanceAppController {
@@ -110,7 +109,6 @@ class FinanceAppController {
     this.setupDeleteWarningModal();
     this.setupVoucherScannerModal();
     this.setupStatementImportModal();
-    this.setupScanAccountModal();
     this.setupValidationAriaSync();
     this.setupPrivacyConsentBanner();
     this.bindGlobalEvents();
@@ -1710,46 +1708,6 @@ class FinanceAppController {
   }
 
   /**
-   * Configures the "Escaneo Inteligente de Detalle de Cuenta (OCR + Genkit Vision)" modal (`#scan-account-dialog`).
-   */
-  setupScanAccountModal() {
-    this.scanAccountModal = new ScanAccountModal({
-      getState: () => this.state,
-      getScanContext: () => {
-        const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
-        const currentUser = this.authService.currentUser || null;
-        const currentUserProfile = this.authService.currentProfile || null;
-        const workspaceId =
-          currentUserProfile?.workspaceId || this.state.settings?.workspaceId || 'ws_default';
-        const apiKey = this.authService?.geminiKeyStore?.getApiKey() || '';
-        return {
-          apiKey,
-          workspaceId,
-          currentUser,
-          currentUserProfile,
-          firestoreDb,
-          firestoreModule,
-          storage,
-        };
-      },
-      extractOcrFallbackText: async (file) => {
-        try {
-          const decoded = await decodeVoucherFile(file);
-          return decoded?.rawText || '';
-        } catch {
-          return '';
-        }
-      },
-      onCreated: () => {
-        this.repo.saveState(this.state);
-        this.renderAll();
-      },
-      showToast: (msg) => this.showToast(msg),
-    });
-    this.scanAccountModal.init();
-  }
-
-  /**
    * Synchronizes aria-invalid with native :user-invalid state per modern-web-guidance.
    */
   setupValidationAriaSync() {
@@ -1857,8 +1815,6 @@ class FinanceAppController {
         });
       } else if (action === 'open-account-modal') {
         this.openAccountModal(null);
-      } else if (action === 'open-scan-account-modal') {
-        this.scanAccountModal?.open();
       } else if (action === 'open-account-detail') {
         this.openAccountDetailModal(actionEl.dataset.accountId);
       } else if (action === 'edit-account') {

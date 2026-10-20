@@ -11,13 +11,8 @@
  */
 
 import crypto from 'node:crypto';
-import {
-  AccountScanSchema,
-  validateAndNormalizeAccountScan,
-} from '../../src/schemas/accountScan.ts';
 
 const DEFAULT_MODEL = process.env.GENKIT_MODEL || 'gemini-2.5-flash';
-const VISION_SCAN_MODEL = process.env.GENKIT_VISION_MODEL || 'gemini-1.5-flash';
 const MAX_OUTPUT_TOKENS = Number.parseInt(process.env.GENKIT_MAX_OUTPUT_TOKENS || '250', 10);
 const CACHE_TTL_MS = 1000 * 60 * 30; // 30 minutes cache TTL
 const MAX_CACHE_ENTRIES = 200;
@@ -165,52 +160,7 @@ function registerGenkitFlows(ai, googleAI, z) {
     }
   );
 
-  const scanAccountDetailFlow = ai.defineFlow(
-    {
-      name: 'scanAccountDetailFlow',
-      inputSchema: z.object({
-        imageBase64: z.string(),
-        mimeType: z.string().default('image/png'),
-      }),
-      outputSchema: AccountScanSchema,
-    },
-    async ({ imageBase64, mimeType }) => {
-      const cleanBase64 = String(imageBase64 || '').replace(/^data:[^;]+;base64,/, '').trim();
-      const dataUrl = `data:${mimeType || 'image/png'};base64,${cleanBase64}`;
-      const visionPrompt = [
-        'Extrae de esta captura de pantalla de banca móvil (detalle/estado de cuenta) los datos estructurados.',
-        'Identifica accountType ("Cuenta de Ahorro", "Cuenta Cheques", "Tarjeta de Crédito"),',
-        'accountNumber (número de cuenta o últimos 4 dígitos),',
-        'bankName ("Atlántida", "BAC", "Ficohsa", "Banpais", etc. o "Banco General"),',
-        'currency ("HNL" si ve "L" o "USD" si ve "$"),',
-        'currentBalance (saldo disponible/actual numérico),',
-        'status ("Activa" o "Inactiva"), y',
-        'detectedTransactions con date en formato YYYY-MM-DD (ej. "15/10/2026" -> "2026-10-15"), concept, type ("income" si Crédito/Depósito, "expense" si Débito/Retiro) y amount.',
-      ].join(' ');
-
-      const response = await ai.generate({
-        model: googleAI.model(VISION_SCAN_MODEL),
-        prompt: [
-          { media: { url: dataUrl, contentType: mimeType || 'image/png' } },
-          { text: visionPrompt },
-        ],
-        output: { schema: AccountScanSchema },
-        config: {
-          temperature: 0.1,
-          maxOutputTokens: 800,
-        },
-      });
-
-      const usage = response.usage || {};
-      telemetry.totalInputTokens += usage.inputTokens || 260;
-      telemetry.totalOutputTokens += usage.outputTokens || estimateTokens(JSON.stringify(response.output));
-      telemetry.totalAiCalls += 1;
-
-      return validateAndNormalizeAccountScan(response.output);
-    }
-  );
-
-  return { parseTransactionsFlow, financialInsightsFlow, scanAccountDetailFlow };
+    return { parseTransactionsFlow, financialInsightsFlow };
 }
 
 /**
@@ -487,132 +437,6 @@ export function buildDeterministicInsights(payload = {}) {
       ? `Recortar un 12% en ${topCat[0]} liberaría ~${cur} ${potentialSave} al mes.`
       : `Establecer presupuestos por categoría puede ahorrarle un 10-15% mensual.`,
   };
-}
-
-/**
- * Executes the Genkit Vision Account Detail Scanner (`gemini-1.5-flash`) with Zod schema validation.
- * @param {{ imageBase64: string, mimeType?: string, ocrTextFallback?: string, apiKey?: string }} input
- */
-export async function executeAccountDetailScan({
-  imageBase64,
-  mimeType = 'image/png',
-  ocrTextFallback = '',
-  apiKey,
-}) {
-  const cleanBase64 = String(imageBase64 || '').replace(/^data:[^;]+;base64,/, '').trim();
-  if (!cleanBase64 && !ocrTextFallback) {
-    throw new Error('Se requiere una imagen en Base64 para analizar el estado de cuenta.');
-  }
-
-  const runtime = await getGenkitRuntime(apiKey);
-  if (runtime && runtime.flows?.scanAccountDetailFlow && cleanBase64) {
-    try {
-      const beforeTokens = telemetry.totalInputTokens + telemetry.totalOutputTokens;
-      const scanResult = await runtime.flows.scanAccountDetailFlow({
-        imageBase64: cleanBase64,
-        mimeType,
-      });
-      const tokensUsed = Math.max(
-        1,
-        telemetry.totalInputTokens + telemetry.totalOutputTokens - beforeTokens
-      );
-      return {
-        data: validateAndNormalizeAccountScan(scanResult),
-        source: `genkit:${VISION_SCAN_MODEL}`,
-        tokensUsed,
-      };
-    } catch (error) {
-      console.warn('[Genkit Vision] scanAccountDetailFlow fallback:', error.message);
-    }
-  }
-
-  telemetry.fallbackCalls += 1;
-  return {
-    data: parseAccountDetailFromRawText(ocrTextFallback),
-    source: 'local-ocr-fallback',
-    tokensUsed: 0,
-  };
-}
-
-/**
- * Deterministic parser for mobile banking account detail text when Gemini API key is not configured.
- * @param {string} rawText
- */
-export function parseAccountDetailFromRawText(rawText = '') {
-  const text = String(rawText || '').trim();
-  const lower = text.toLowerCase();
-
-  let bankName = 'Banco General';
-  if (lower.includes('atlantida') || lower.includes('atlántida')) bankName = 'Atlántida';
-  else if (lower.includes('bac') || lower.includes('credomatic')) bankName = 'BAC';
-  else if (lower.includes('ficohsa')) bankName = 'Ficohsa';
-  else if (lower.includes('banpais') || lower.includes('banpaís')) bankName = 'Banpais';
-  else if (lower.includes('occidente')) bankName = 'Banco de Occidente';
-  else if (lower.includes('davivienda')) bankName = 'Davivienda';
-  else if (lower.includes('lafise')) bankName = 'Lafise';
-  else if (lower.includes('promerica')) bankName = 'Promerica';
-
-  let accountType = 'Cuenta de Ahorro';
-  if (/cheque|corriente/i.test(text)) accountType = 'Cuenta Cheques';
-  else if (/tarjeta|cr[eé]dito|visa|mastercard/i.test(text)) accountType = 'Tarjeta de Crédito';
-
-  const accNumMatch =
-    text.match(/\b(\d{8,16})\b/) ||
-    text.match(/\*{2,}\s*(\d{4})\b/) ||
-    text.match(/(?:cuenta|no\.?|n\.?[oº])\s*[:#-]?\s*([0-9-]{4,18})/i);
-  const accountNumber = accNumMatch ? accNumMatch[1].replace(/[^0-9]/g, '') : '0000';
-
-  const currency = /\bUSD\b|\$/i.test(text) && !/\bL\.?\s*\d|\bHNL\b|\bLempiras\b/i.test(text)
-    ? 'USD'
-    : 'HNL';
-
-  const balanceMatch =
-    text.match(/(?:saldo\s*(?:disponible|actual|total)?|disponible)\s*[:.]?\s*(?:L\.?|HNL|\$|USD)?\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})|[0-9]+\.[0-9]{2})/i) ||
-    text.match(/(?:L\.?|HNL|\$|USD)\s*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2}))/i);
-  const currentBalance = balanceMatch
-    ? Number.parseFloat(balanceMatch[1].replace(/,/g, '')) || 0
-    : 0;
-
-  const status = /inactiv|bloquead|cerrad/i.test(text) ? 'Inactiva' : 'Activa';
-
-  const detectedTransactions = [];
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  for (const line of lines) {
-    const dateMatch = line.match(/(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})/);
-    const amountMatches = [...line.matchAll(/([+-])?\s*(?:L\.?|HNL|\$|USD)?\s*([0-9]{1,3}(?:,[0-9]{3})*\.[0-9]{2}|[0-9]+\.[0-9]{2})/gi)];
-    if (dateMatch && amountMatches.length > 0) {
-      const lastAmt = amountMatches[amountMatches.length - 1];
-      const sign = lastAmt[1] || '';
-      const amtVal = Number.parseFloat(lastAmt[2].replace(/,/g, '')) || 0;
-      if (amtVal <= 0) continue;
-      let concept = line
-        .replace(dateMatch[0], '')
-        .replace(lastAmt[0], '')
-        .replace(/\b(cr[eé]dito|d[eé]bito)\b/gi, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (!concept) concept = 'Movimiento bancario';
-      const isIncome =
-        sign === '+' ||
-        /deposito|dep[oó]sito|cr[eé]dito|abono|transferencia\s+recibida|interes/i.test(line);
-      detectedTransactions.push({
-        date: dateMatch[1],
-        concept,
-        type: isIncome ? 'income' : 'expense',
-        amount: amtVal,
-      });
-    }
-  }
-
-  return validateAndNormalizeAccountScan({
-    accountType,
-    accountNumber,
-    bankName,
-    currency,
-    currentBalance,
-    status,
-    detectedTransactions,
-  });
 }
 
 /**
