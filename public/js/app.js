@@ -196,7 +196,7 @@ export class FinanceAppController {
     this.setupStatementImportModal();
     this.setupValidationAriaSync();
     this.setupPrivacyConsentBanner();
-    this.onboardingWizard.init();
+    this.onboardingWizard.init({ mountDom: false });
     this.bindGlobalEvents();
     this.applyTheme(this.state.settings?.theme || 'system');
     this.profileView.init();
@@ -256,6 +256,7 @@ export class FinanceAppController {
           repo: this.repo,
         });
       } else {
+        this.onboardingWizard?.removeModalFromDom?.();
         // Purge any demo/seed accounts or transactions (`tx_seed_*`, `acc_seed_*`) so authenticated workspaces stay clean
         if (nextWorkspaceId && nextWorkspaceId !== 'ws_default') {
           this.state.accounts = filterCleanUserAccounts(this.state.accounts || [], {
@@ -307,6 +308,7 @@ export class FinanceAppController {
       }
       this.syncWorkspaceSubscription(user, profile);
     } else if (reason === 'logout') {
+      this.onboardingWizard?.resetOnLogout?.();
       if (typeof this.workspaceTransactionsUnsubscribe === 'function') {
         this.workspaceTransactionsUnsubscribe();
         this.workspaceTransactionsUnsubscribe = null;
@@ -1967,15 +1969,6 @@ export class FinanceAppController {
   }
 
   bindGlobalEvents() {
-    // Mobile Filter Drawer Toggle (#btn-toggle-mobile-filters)
-    const mobileFiltersBtn = document.getElementById('btn-toggle-mobile-filters');
-    const filtersDrawer = document.getElementById('header-filters-drawer');
-    mobileFiltersBtn?.addEventListener('click', () => {
-      if (!filtersDrawer) return;
-      const isOpen = filtersDrawer.classList.toggle('is-mobile-open');
-      mobileFiltersBtn.setAttribute('aria-expanded', String(isOpen));
-    });
-
     // Navigation Tabs with View Transitions API
     document.addEventListener('click', (e) => {
       const tabBtn = e.target.closest('[data-tab-target]');
@@ -2070,11 +2063,8 @@ export class FinanceAppController {
         this.handleHeaderAuthButtonClick();
       } else if (action === 'open-auth-modal') {
         this.profileView.openAuthModal(false);
-      } else if (action === 'clear-currency-filter') {
-        this.ledgerFilters.currencyFilter = 'all';
-        this.state.settings.currencyFilter = 'all';
-        this.repo.saveState(this.state);
-        this.renderAll();
+      } else if (action === 'logout') {
+        this.profileView.handleSignOut();
       }
     });
 
@@ -2300,7 +2290,10 @@ export class FinanceAppController {
     this.currentMicroPayload = micro;
 
     this.renderHeaderKpis(accountsSummary, analytics);
-    this.renderProfileFilterBanner(activeCurrencyFilter, personalViewMode);
+    const currencySelectEl = document.getElementById('ledger-currency-select');
+    if (currencySelectEl) {
+      currencySelectEl.value = activeCurrencyFilter || 'all';
+    }
     this.renderCategoriesView(analytics);
     this.renderAccountsView(accountsSummary);
     this.renderLedgerSection();
@@ -2311,45 +2304,6 @@ export class FinanceAppController {
     if (accountDetailDialog?.open && this.activeDetailAccountId) {
       this.renderAccountDetailModal();
     }
-  }
-
-  renderProfileFilterBanner(activeCurrencyFilter, personalViewMode) {
-    const bannerEl = document.getElementById('active-profile-filter-bar');
-    if (!bannerEl) return;
-
-    const currencySelectEl = document.getElementById('ledger-currency-select');
-    if (currencySelectEl) {
-      currencySelectEl.value = activeCurrencyFilter || 'all';
-    }
-
-    const hasCurrencyFilter = activeCurrencyFilter && activeCurrencyFilter !== 'all';
-    if (!hasCurrencyFilter && !personalViewMode) {
-      bannerEl.classList.add('is-hidden');
-      bannerEl.innerHTML = '';
-      return;
-    }
-
-    const badges = [];
-    if (hasCurrencyFilter) {
-      badges.push(`💱 Moneda filtrada: <strong>${activeCurrencyFilter}</strong>`);
-    }
-    if (personalViewMode) {
-      const profileName = this.authService.getCurrentProfile()?.name || 'Mis movimientos';
-      badges.push(`🔒 Modo Vista Personal activo (<strong>${profileName}</strong>)`);
-    }
-
-    bannerEl.classList.remove('is-hidden');
-    bannerEl.innerHTML = `
-      <span>${badges.join(' · ')}</span>
-      <div style="display: flex; gap: 0.45rem; flex-wrap: wrap;">
-        ${
-          hasCurrencyFilter
-            ? `<button type="button" class="btn-secondary btn-sm" data-action="clear-currency-filter" aria-label="Quitar filtro de moneda y ver todas las monedas">Ver Todas las Monedas</button>`
-            : ''
-        }
-        <button type="button" class="btn-secondary btn-sm" data-tab-target="profile" aria-label="Ir a la pestaña de Perfil para ajustar preferencias">Ajustar en Perfil →</button>
-      </div>
-    `;
   }
 
   renderHeaderKpis(accountsSummary, analytics) {

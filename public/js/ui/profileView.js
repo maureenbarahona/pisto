@@ -213,19 +213,10 @@ export class ProfileViewController {
       this.openAuthModal(false);
     });
 
-    signOutBtn?.addEventListener('click', async () => {
-      await this.authService.signOut();
-      const keyInput = document.getElementById('profile-gemini-key-input');
-      const fbApiKeyInput = document.getElementById('profile-fb-apikey-input');
-      const fbProjectIdInput = document.getElementById('profile-fb-projectid-input');
-      const fbAuthDomainInput = document.getElementById('profile-fb-authdomain-input');
-      if (keyInput) keyInput.value = '';
-      if (fbApiKeyInput) fbApiKeyInput.value = '';
-      if (fbProjectIdInput) fbProjectIdInput.value = '';
-      if (fbAuthDomainInput) fbAuthDomainInput.value = '';
-      this.callbacks.showToast('🔒 Sesión cerrada y credenciales sensibles limpiadas de localStorage.');
-      this.renderProfileTab();
-      this.callbacks.onAuthAndProfileUpdated(null, null, 'logout');
+    signOutBtn?.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      await this.handleSignOut();
     });
 
     personalViewCheckbox?.addEventListener('change', async () => {
@@ -348,6 +339,21 @@ export class ProfileViewController {
     });
   }
 
+  async handleSignOut() {
+    await this.authService.signOut();
+    const keyInput = document.getElementById('profile-gemini-key-input');
+    const fbApiKeyInput = document.getElementById('profile-fb-apikey-input');
+    const fbProjectIdInput = document.getElementById('profile-fb-projectid-input');
+    const fbAuthDomainInput = document.getElementById('profile-fb-authdomain-input');
+    if (keyInput) keyInput.value = '';
+    if (fbApiKeyInput) fbApiKeyInput.value = '';
+    if (fbProjectIdInput) fbProjectIdInput.value = '';
+    if (fbAuthDomainInput) fbAuthDomainInput.value = '';
+    this.callbacks.showToast('🔒 Sesión cerrada y credenciales sensibles limpiadas de localStorage.');
+    this.renderProfileTab();
+    this.callbacks.onAuthAndProfileUpdated(null, null, 'logout');
+  }
+
   renderProfileTab() {
     const user = this.authService.getCurrentUser();
     const profile = this.authService.getCurrentProfile();
@@ -410,7 +416,9 @@ export class ProfileViewController {
       emailDisplayEl.textContent = user?.email || profile?.email || 'Modo sin cuenta (Inicia sesión con Google o Correo)';
     }
 
-    signOutBtn?.classList.toggle('is-hidden', !user);
+    if (signOutBtn) {
+      signOutBtn.classList.remove('is-hidden');
+    }
     openAuthBtn?.classList.toggle('is-hidden', Boolean(user));
 
     const nameInput = document.getElementById('profile-name-input');

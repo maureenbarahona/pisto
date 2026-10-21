@@ -301,11 +301,26 @@ export async function completeUserOnboarding(uid, options = {}) {
   if (
     options.firestoreDb &&
     options.firestoreModule &&
-    typeof options.firestoreModule.doc === 'function' &&
-    typeof options.firestoreModule.setDoc === 'function'
+    typeof options.firestoreModule.doc === 'function'
   ) {
     const userDocRef = options.firestoreModule.doc(options.firestoreDb, 'users', cleanUid);
-    await options.firestoreModule.setDoc(userDocRef, payload, { merge: true });
+    let updated = false;
+    if (typeof options.firestoreModule.updateDoc === 'function') {
+      try {
+        await options.firestoreModule.updateDoc(userDocRef, {
+          hasCompletedOnboarding: true,
+          defaultCurrency,
+          country,
+          updatedAt: nowIso,
+        });
+        updated = true;
+      } catch {
+        updated = false;
+      }
+    }
+    if (!updated && typeof options.firestoreModule.setDoc === 'function') {
+      await options.firestoreModule.setDoc(userDocRef, payload, { merge: true });
+    }
   }
 
   const storage = options.storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
@@ -774,6 +789,7 @@ export class FirebaseAuthProfileService {
           defaultCurrency: 'HNL',
           personalViewMode: false,
           filterByDefaultCurrency: true,
+          hasCompletedOnboarding: false,
           workspaceId: initialWorkspaceId,
           createdAt: nowIso,
           updatedAt: nowIso,
@@ -965,6 +981,7 @@ export class FirebaseAuthProfileService {
         name: user.displayName,
         country: params.country,
         defaultCurrency: params.defaultCurrency,
+        ...(params.isRegister ? { hasCompletedOnboarding: false, isRegister: true } : {}),
       });
       if (params.isRegister || shouldTriggerOnboarding(this.currentProfile)) {
         await ensureCleanWorkspaceForFirstTimeUser({
@@ -1031,6 +1048,7 @@ export class FirebaseAuthProfileService {
       name: user.displayName,
       country: params.country,
       defaultCurrency: params.defaultCurrency,
+      ...(params.isRegister ? { hasCompletedOnboarding: false, isRegister: true } : {}),
     });
     if (params.isRegister || shouldTriggerOnboarding(this.currentProfile)) {
       await ensureCleanWorkspaceForFirstTimeUser({
@@ -1107,9 +1125,35 @@ export class FirebaseAuthProfileService {
     }
     this.removeItem(LOCAL_AUTH_SESSION_KEY);
     await this.clearSensitiveLocalStorage();
+
+    // Limpieza segura del Onboarding Wizard en el DOM y reseteo de estados locales
+    globalThis.__PISTO_ONBOARDING_WIZARD_OPEN__ = false;
+    if (
+      globalThis.__PISTO_ONBOARDING_WIZARD_INSTANCE__ &&
+      typeof globalThis.__PISTO_ONBOARDING_WIZARD_INSTANCE__.resetOnLogout === 'function'
+    ) {
+      globalThis.__PISTO_ONBOARDING_WIZARD_INSTANCE__.resetOnLogout();
+    } else if (typeof document !== 'undefined') {
+      const dialogEl = document.getElementById('onboarding-wizard-dialog');
+      if (dialogEl) {
+        if (typeof dialogEl.close === 'function' && dialogEl.open) {
+          try {
+            dialogEl.close();
+          } catch {
+            dialogEl.removeAttribute('open');
+          }
+        }
+        dialogEl.remove();
+      }
+    }
+
     this.currentUser = null;
     this.currentProfile = null;
     this.notifyListeners();
+  }
+
+  async logout() {
+    return this.signOut();
   }
 
   isPersonalInitialWorkspace(wsId, uid, email) {
@@ -1205,34 +1249,77 @@ export class FirebaseAuthProfileService {
 
   async loadUserProfile(uid, defaults = {}) {
     const docKey = `${FIRESTORE_USERS_CACHE_PREFIX}${uid}`;
+    let cachedProfile = null;
+    const cachedRaw = this.getItem(docKey);
+    if (cachedRaw) {
+      try {
+        cachedProfile = JSON.parse(cachedRaw);
+      } catch {
+        cachedProfile = null;
+      }
+    }
 
     if (this.firestoreDb && this.firestoreModule) {
       try {
         const userDocRef = this.firestoreModule.doc(this.firestoreDb, 'users', uid);
         const snap = await this.firestoreModule.getDoc(userDocRef);
         if (snap.exists()) {
-          const data = snap.data();
-          let profile = createUserProfile({ ...defaults, ...data, uid });
+          const data = snap.data() || {};
+          const resolvedCompleted =
+            defaults.isRegister === true
+              ? false
+              : Boolean(
+                  data.hasCompletedOnboarding === true ||
+                    cachedProfile?.hasCompletedOnboarding === true
+                );
+          let profile = createUserProfile({
+            ...defaults,
+            ...data,
+            uid,
+            hasCompletedOnboarding: resolvedCompleted,
+          });
           profile = await this.resolveSharedWorkspaceForProfile(profile);
-          if (profile.workspaceId !== data.workspaceId) {
+          if (
+            profile.workspaceId !== data.workspaceId ||
+            profile.hasCompletedOnboarding !== data.hasCompletedOnboarding
+          ) {
             await this.firestoreModule.setDoc(userDocRef, profile, { merge: true });
           }
           this.setItem(docKey, JSON.stringify(profile));
           this.currentProfile = profile;
           return profile;
         }
+        const initialCompleted =
+          defaults.isRegister === true
+            ? false
+            : Boolean(
+                defaults.hasCompletedOnboarding === true ||
+                  cachedProfile?.hasCompletedOnboarding === true
+              );
         let initialProfile = createUserProfile({
           uid,
-          email: defaults.email || this.currentUser?.email || '',
-          name: defaults.name || defaults.displayName || this.currentUser?.displayName || 'Usuario Catracho',
-          displayName: defaults.displayName || defaults.name || this.currentUser?.displayName || 'Usuario Catracho',
-          photoURL: defaults.photoURL || this.currentUser?.photoURL || '',
-          country: defaults.country || 'HN',
-          defaultCurrency: defaults.defaultCurrency || 'HNL',
-          personalViewMode: defaults.personalViewMode ?? false,
-          filterByDefaultCurrency: defaults.filterByDefaultCurrency ?? true,
-          workspaceId: defaults.workspaceId,
-          createdAt: defaults.createdAt,
+          email: defaults.email || cachedProfile?.email || this.currentUser?.email || '',
+          name:
+            defaults.name ||
+            defaults.displayName ||
+            cachedProfile?.name ||
+            this.currentUser?.displayName ||
+            'Usuario Catracho',
+          displayName:
+            defaults.displayName ||
+            defaults.name ||
+            cachedProfile?.displayName ||
+            this.currentUser?.displayName ||
+            'Usuario Catracho',
+          photoURL: defaults.photoURL || cachedProfile?.photoURL || this.currentUser?.photoURL || '',
+          country: defaults.country || cachedProfile?.country || 'HN',
+          defaultCurrency: defaults.defaultCurrency || cachedProfile?.defaultCurrency || 'HNL',
+          personalViewMode: defaults.personalViewMode ?? cachedProfile?.personalViewMode ?? false,
+          filterByDefaultCurrency:
+            defaults.filterByDefaultCurrency ?? cachedProfile?.filterByDefaultCurrency ?? true,
+          hasCompletedOnboarding: initialCompleted,
+          workspaceId: defaults.workspaceId || cachedProfile?.workspaceId,
+          createdAt: defaults.createdAt || cachedProfile?.createdAt,
         });
         initialProfile = await this.resolveSharedWorkspaceForProfile(initialProfile);
         await this.firestoreModule.setDoc(userDocRef, initialProfile, { merge: true });
@@ -1244,18 +1331,19 @@ export class FirebaseAuthProfileService {
       }
     }
 
-    const cachedRaw = this.getItem(docKey);
-    if (cachedRaw) {
-      try {
-        const parsed = JSON.parse(cachedRaw);
-        let profile = createUserProfile({ ...defaults, ...parsed, uid });
-        profile = await this.resolveSharedWorkspaceForProfile(profile);
-        this.setItem(docKey, JSON.stringify(profile));
-        this.currentProfile = profile;
-        return profile;
-      } catch {
-        // Fallthrough
-      }
+    if (cachedProfile) {
+      const resolvedCompleted =
+        defaults.isRegister === true ? false : Boolean(cachedProfile.hasCompletedOnboarding === true);
+      let profile = createUserProfile({
+        ...defaults,
+        ...cachedProfile,
+        uid,
+        hasCompletedOnboarding: resolvedCompleted,
+      });
+      profile = await this.resolveSharedWorkspaceForProfile(profile);
+      this.setItem(docKey, JSON.stringify(profile));
+      this.currentProfile = profile;
+      return profile;
     }
 
     let freshProfile = createUserProfile({
@@ -1268,6 +1356,7 @@ export class FirebaseAuthProfileService {
       defaultCurrency: defaults.defaultCurrency || 'HNL',
       personalViewMode: defaults.personalViewMode ?? false,
       filterByDefaultCurrency: defaults.filterByDefaultCurrency ?? true,
+      hasCompletedOnboarding: defaults.hasCompletedOnboarding === true ? true : false,
       workspaceId: defaults.workspaceId,
       createdAt: defaults.createdAt,
     });
@@ -1304,7 +1393,25 @@ export class FirebaseAuthProfileService {
     if (this.firestoreDb && this.firestoreModule) {
       try {
         const userDocRef = this.firestoreModule.doc(this.firestoreDb, 'users', uid);
-        await this.firestoreModule.setDoc(userDocRef, updatedProfile, { merge: true });
+        let updatedViaUpdateDoc = false;
+        if (
+          updates?.hasCompletedOnboarding === true &&
+          typeof this.firestoreModule.updateDoc === 'function'
+        ) {
+          try {
+            await this.firestoreModule.updateDoc(userDocRef, {
+              ...updates,
+              hasCompletedOnboarding: true,
+              updatedAt: updatedProfile.updatedAt,
+            });
+            updatedViaUpdateDoc = true;
+          } catch {
+            updatedViaUpdateDoc = false;
+          }
+        }
+        if (!updatedViaUpdateDoc && typeof this.firestoreModule.setDoc === 'function') {
+          await this.firestoreModule.setDoc(userDocRef, updatedProfile, { merge: true });
+        }
       } catch {
         // Guardado en mirror local (Firestore offline)
       }

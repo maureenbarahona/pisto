@@ -26,8 +26,18 @@ import {
   encodeFileToBase64,
   extractAccountFromFile,
   persistImportedAccountAndTransactions,
+  saveBatchAccountsToFirestore,
+  fetchExistingWorkspaceAccountNumbers,
+  formatBatchAccountsToastMessage,
+  BATCH_DEMO_PRODUCTS_SUMMARY,
   ExtractedAccountSchema,
-} from '../../../public/js/services/accountExtractor.js';
+  ExtractedBatchAccountsSchema,
+} from '../services/accountExtractor.js';
+import {
+  BatchAccountsModal,
+  formatBatchAccountRowSummary,
+  renderBatchAccountsRowsMarkup,
+} from './BatchAccountsModal.js';
 import {
   useAccountAgentADK,
   ADK_INIT_LOG_MESSAGE,
@@ -56,6 +66,14 @@ export {
   resolveDuplicateTransactionAction,
   extractAccountFromFile,
   persistImportedAccountAndTransactions,
+  saveBatchAccountsToFirestore,
+  fetchExistingWorkspaceAccountNumbers,
+  formatBatchAccountsToastMessage,
+  BATCH_DEMO_PRODUCTS_SUMMARY,
+  ExtractedBatchAccountsSchema,
+  BatchAccountsModal,
+  formatBatchAccountRowSummary,
+  renderBatchAccountsRowsMarkup,
 };
 
 export const HONDURAS_BANKS_LIST = Object.freeze([
@@ -351,6 +369,24 @@ export class ImportAccountModal {
     this.agentADK = useAccountAgentADK({
       notifyToast: (msg) => this.options.showToast?.(msg),
     });
+    this.batchAccountsModal = new BatchAccountsModal({
+      getState: () => this.options.getState?.() || globalThis.pistoApp?.state || null,
+      showToast: (msg) => this.options.showToast?.(msg),
+      onAccountsBatchSaved: (result) => {
+        this.setIsImportAccountModalOpen(false);
+        this.options.onAccountCreated?.(
+          result?.createdAccounts?.[0] || null,
+          [],
+          result
+        );
+      },
+    });
+  }
+
+  get accounts() {
+    return Array.isArray(this.currentExtracted?.accounts)
+      ? this.currentExtracted.accounts
+      : [];
   }
 
   init() {
@@ -385,6 +421,9 @@ export class ImportAccountModal {
     const confirmBtn = document.getElementById('btn-confirm-import-account');
     const cancelBtn = document.getElementById('btn-cancel-import-account');
     const closeBtn = document.getElementById('btn-close-import-account');
+    const selectAllAccountsCheckbox = document.getElementById('import-account-select-all-accounts');
+    const addAccountRowBtn = document.getElementById('btn-import-account-add-acc');
+    const accountsTbody = document.getElementById('import-account-accounts-tbody');
     const selectAllCheckbox = document.getElementById('import-account-select-all-tx');
     const addTxRowBtn = document.getElementById('btn-import-account-add-tx');
     const tbody = document.getElementById('import-account-tx-tbody');
@@ -462,7 +501,12 @@ export class ImportAccountModal {
         bankInput.value = selectedVal;
       }
       if (this.currentExtracted) {
-        this.currentExtracted.bankName = this.readEditedBankName();
+        const nextBank = this.readEditedBankName();
+        this.currentExtracted.bankName = nextBank;
+        if (this.currentExtracted.accounts?.[0]) {
+          this.currentExtracted.accounts[0].bankName = nextBank;
+          this.renderAccountsListTable();
+        }
       }
       this.syncSummaryBanner();
     });
@@ -476,9 +520,101 @@ export class ImportAccountModal {
         bankSelect.value = matchedOption || 'Otro / Personalizado';
       }
       if (this.currentExtracted) {
-        this.currentExtracted.bankName = typed || HONDURAS_BANKS_LIST[0];
+        const nextBank = typed || HONDURAS_BANKS_LIST[0];
+        this.currentExtracted.bankName = nextBank;
+        if (this.currentExtracted.accounts?.[0]) {
+          this.currentExtracted.accounts[0].bankName = nextBank;
+          this.renderAccountsListTable();
+        }
       }
       this.syncSummaryBanner();
+    });
+
+    selectAllAccountsCheckbox?.addEventListener('change', () => {
+      if (!this.currentExtracted) return;
+      this.syncAccountsFromDom();
+      this.toggleSelectAllAccounts(Boolean(selectAllAccountsCheckbox.checked));
+    });
+
+    addAccountRowBtn?.addEventListener('click', () => {
+      if (!this.currentExtracted) return;
+      this.syncAccountsFromDom();
+      const defaultBank = this.currentExtracted.bankName || HONDURAS_BANKS_LIST[0];
+      const newAccItem = {
+        id: `imp_acc_manual_${Date.now().toString(36)}`,
+        bankName: defaultBank,
+        accountType: 'Cuenta de Ahorro',
+        accountNumber: '',
+        currency: 'HNL',
+        currentBalance: 0,
+        isCreditCard: false,
+        status: 'Activa',
+        selected: true,
+      };
+      this.currentExtracted.accounts.push(newAccItem);
+      this.currentExtracted.accountsArray = this.currentExtracted.accounts;
+      this.syncPrimaryInputsFromFirstAccount();
+      this.renderAccountsListTable();
+      this.syncSelectAllAccountsCheckboxState();
+      this.syncSummaryBanner();
+    });
+
+    const handleAccountRowMutation = (e) => {
+      const target = e.target;
+      if (!target || !this.currentExtracted) return;
+
+      if (target.hasAttribute?.('data-import-acc-select')) {
+        const idx = Number.parseInt(target.getAttribute('data-import-acc-select') || '-1', 10);
+        this.updateAccountAtIndex(idx, 'selected', Boolean(target.checked));
+        return;
+      }
+
+      if (target.hasAttribute?.('data-import-acc-bank')) {
+        const idx = Number.parseInt(target.getAttribute('data-import-acc-bank') || '-1', 10);
+        this.updateAccountAtIndex(idx, 'bankName', target.value);
+        return;
+      }
+
+      if (target.hasAttribute?.('data-import-acc-type')) {
+        const idx = Number.parseInt(target.getAttribute('data-import-acc-type') || '-1', 10);
+        this.updateAccountAtIndex(idx, 'accountType', target.value);
+        return;
+      }
+
+      if (target.hasAttribute?.('data-import-acc-number')) {
+        const idx = Number.parseInt(target.getAttribute('data-import-acc-number') || '-1', 10);
+        this.updateAccountAtIndex(idx, 'accountNumber', target.value);
+        return;
+      }
+
+      if (target.hasAttribute?.('data-import-acc-currency')) {
+        const idx = Number.parseInt(target.getAttribute('data-import-acc-currency') || '-1', 10);
+        this.updateAccountAtIndex(idx, 'currency', target.value);
+        return;
+      }
+
+      if (target.hasAttribute?.('data-import-acc-balance')) {
+        const idx = Number.parseInt(target.getAttribute('data-import-acc-balance') || '-1', 10);
+        this.updateAccountAtIndex(idx, 'currentBalance', target.value);
+        return;
+      }
+
+      if (target.hasAttribute?.('data-import-acc-card')) {
+        const idx = Number.parseInt(target.getAttribute('data-import-acc-card') || '-1', 10);
+        this.updateAccountAtIndex(idx, 'isCreditCard', target.value === 'true');
+      }
+    };
+
+    accountsTbody?.addEventListener('input', handleAccountRowMutation);
+    accountsTbody?.addEventListener('change', handleAccountRowMutation);
+    accountsTbody?.addEventListener('click', (e) => {
+      const removeBtn = e.target?.closest?.('[data-import-acc-remove]');
+      if (!removeBtn) return;
+      e.preventDefault();
+      const idx = Number.parseInt(removeBtn.getAttribute('data-import-acc-remove') || '-1', 10);
+      if (idx >= 0) {
+        this.removeAccountAtIndex(idx);
+      }
     });
 
     selectAllCheckbox?.addEventListener('change', () => {
@@ -589,17 +725,21 @@ export class ImportAccountModal {
     ];
     for (const id of editableFieldIds) {
       document.getElementById(id)?.addEventListener('input', () => {
+        this.syncFirstAccountFromPrimaryInputs();
         if (id === 'import-acc-number-input') {
           this.reconcileAccountAndTransactionDuplicates();
         }
+        this.renderAccountsListTable();
         this.syncSummaryBanner();
       });
       document.getElementById(id)?.addEventListener('change', () => {
+        this.syncFirstAccountFromPrimaryInputs();
         if (id === 'import-acc-currency-select' || id === 'import-acc-number-input') {
           this.syncTransactionsFromDom();
           this.reconcileAccountAndTransactionDuplicates();
           this.renderTransactionsTable();
         }
+        this.renderAccountsListTable();
         this.syncSummaryBanner();
       });
     }
@@ -670,7 +810,20 @@ export class ImportAccountModal {
     }
   }
 
+  get extractedAccounts() {
+    return this.currentExtracted?.accounts || [];
+  }
+
+  getSelectedAccounts() {
+    return (this.currentExtracted?.accounts || []).filter((acc) => acc.selected !== false);
+  }
+
+  populateForm(data, source = 'gemini-1.5-flash') {
+    return this.renderPreview(data, source);
+  }
+
   populateBankOptions() {
+    if (typeof document === 'undefined') return;
     const bankSelect = document.getElementById('import-acc-bank-select');
     const datalist = document.getElementById('import-acc-bank-datalist');
 
@@ -719,7 +872,7 @@ export class ImportAccountModal {
           <div>
             <h2 id="import-account-dialog-title">➕ Importar Cuenta desde Imagen / PDF</h2>
             <p style="font-size: 0.85rem; color: var(--text-secondary); margin: 0.15rem 0 0 0;">
-              Extrae los datos de tu cuenta y edita cualquier campo o movimiento antes de guardar en Firestore.
+              Extrae una o múltiples cuentas de tu captura o PDF, edita o elimina registros y selecciona qué cuentas guardar.
             </p>
           </div>
           <button type="button" class="btn-secondary btn-sm" id="btn-close-import-account" aria-label="Cerrar modal de importación de cuenta">Cerrar</button>
@@ -744,10 +897,10 @@ export class ImportAccountModal {
               📷📄 Arrastra tu captura de Banca Móvil (PNG, JPG, WEBP) o Estado de Cuenta (PDF)
             </div>
             <p style="font-size: 0.8125rem; color: var(--text-secondary); margin: 0 0 0.65rem 0;">
-              Detecta automáticamente Banco de Honduras, Tipo de Cuenta, Número Completo, Moneda, Saldo y Movimientos.
+              Detecta automáticamente 1 o múltiples cuentas/tarjetas (Banco, Tipo, Número Completo, Moneda, Saldo y Movimientos).
             </p>
             <div style="display: flex; justify-content: center; gap: 0.5rem; flex-wrap: wrap;">
-              <button type="button" class="btn-secondary btn-sm" id="btn-trigger-import-account-file">
+              <button type="button" class="btn-primary btn-sm" id="btn-trigger-import-account-file">
                 Seleccionar Imagen o PDF
               </button>
               <button type="button" class="btn-secondary btn-sm" id="btn-import-account-demo-adk">
@@ -758,7 +911,7 @@ export class ImportAccountModal {
 
           <div id="import-account-loading-box" class="voucher-progress-box is-hidden" role="status" aria-live="polite">
             <div class="voucher-progress-labels">
-              <span id="import-account-loading-text">🤖 Analizando estado de cuenta con Gemini Vision...</span>
+              <span id="import-account-loading-text">🤖 Analizando documento con Gemini Vision...</span>
             </div>
             <progress class="native-progress" max="100"></progress>
           </div>
@@ -770,7 +923,7 @@ export class ImportAccountModal {
           <div id="import-account-preview-box" class="is-hidden" style="display: flex; flex-direction: column; gap: 1rem;">
             <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap; padding: 0.75rem 1rem; border-radius: 12px; background: var(--bg-elevated); border: 1px solid var(--surface-border);">
               <div>
-                <strong id="import-account-summary-title" style="font-size: 0.95rem;">Cuenta detectada</strong>
+                <strong id="import-account-summary-title" style="font-size: 0.95rem;">Cuentas detectadas</strong>
                 <div id="import-account-tx-count-badge" style="font-size: 0.8125rem; color: var(--text-secondary); margin-top: 0.15rem;">
                   0 movimiento(s) seleccionado(s)
                 </div>
@@ -785,70 +938,105 @@ export class ImportAccountModal {
               style="max-height: 150px; object-fit: contain; border-radius: 10px; border: 1px solid var(--surface-border); align-self: center;"
             />
 
-            <div class="form-grid-2">
-              <div class="field">
-                <label for="import-acc-bank-select">Nombre del Banco (Honduras)</label>
-                <select id="import-acc-bank-select" name="bankSelect"></select>
+            <datalist id="import-acc-bank-datalist"></datalist>
+
+            <!-- Lista de Cuentas Extraídas (1 o múltiples cuentas editables y eliminables con checkboxes) -->
+            <div id="import-account-list-section">
+              <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; flex-wrap: wrap;">
+                <label style="display: inline-flex; align-items: center; gap: 0.45rem; font-weight: 600; cursor: pointer;">
+                  <input type="checkbox" id="import-account-select-all-accounts" checked />
+                  <span>Cuentas Extraídas (✏️ Edita Banco, Tipo, Número, Moneda, Saldo o 🗑️ Elimina filas)</span>
+                </label>
+                <button type="button" class="btn-secondary btn-sm" id="btn-import-account-add-acc">
+                  + Agregar Cuenta
+                </button>
               </div>
 
-              <div class="field" id="import-acc-bank-custom-wrapper">
-                <label for="import-acc-bank-input">Nombre del Banco (Editable / Autocompletado)</label>
-                <input
-                  type="text"
-                  id="import-acc-bank-input"
-                  name="bankName"
-                  list="import-acc-bank-datalist"
-                  placeholder="Ej. Banco Atlántida"
-                  required
-                />
-                <datalist id="import-acc-bank-datalist"></datalist>
+              <div class="statement-table-wrapper">
+                <table class="statement-table" aria-label="Lista de cuentas extraídas editables">
+                  <thead>
+                    <tr>
+                      <th scope="col" style="width: 40px; text-align: center;">✓</th>
+                      <th scope="col" style="min-width: 155px;">✏️ Nombre de Banco</th>
+                      <th scope="col" style="min-width: 170px;">✏️ Tipo de Cuenta</th>
+                      <th scope="col" style="min-width: 145px;">✏️ Número Completo</th>
+                      <th scope="col" style="width: 110px;">✏️ Moneda</th>
+                      <th scope="col" class="num-col" style="width: 135px;">✏️ Saldo</th>
+                      <th scope="col" style="width: 90px; text-align: center;">🗑️ Quitar</th>
+                    </tr>
+                  </thead>
+                  <tbody id="import-account-accounts-tbody"></tbody>
+                </table>
               </div>
             </div>
 
-            <div class="form-grid-2">
-              <div class="field">
-                <label for="import-acc-type-input">Tipo de Cuenta</label>
-                <input
-                  type="text"
-                  id="import-acc-type-input"
-                  name="accountType"
-                  placeholder="Ej. CUENTA DE AHORRO SOS"
-                  required
-                />
+            <!-- Campos de Cuenta Principal (sincronizados con la primera cuenta para compatibilidad directa) -->
+            <details class="firebase-config-accordion">
+              <summary>✏️ Edición Rápida de Cuenta Principal</summary>
+              <div class="form-grid-2" style="margin-top: 0.65rem;">
+                <div class="field">
+                  <label for="import-acc-bank-select">Nombre del Banco (Honduras)</label>
+                  <select id="import-acc-bank-select" name="bankSelect"></select>
+                </div>
+
+                <div class="field" id="import-acc-bank-custom-wrapper">
+                  <label for="import-acc-bank-input">Nombre del Banco (Editable)</label>
+                  <input
+                    type="text"
+                    id="import-acc-bank-input"
+                    name="bankName"
+                    list="import-acc-bank-datalist"
+                    placeholder="Ej. Banco Atlántida"
+                    required
+                  />
+                </div>
               </div>
 
-              <div class="field">
-                <label for="import-acc-number-input">Número de Cuenta Completo</label>
-                <input
-                  type="text"
-                  id="import-acc-number-input"
-                  name="accountNumber"
-                  inputmode="numeric"
-                  placeholder="Ej. 213130058771"
-                />
-              </div>
-            </div>
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="import-acc-type-input">Tipo de Cuenta</label>
+                  <input
+                    type="text"
+                    id="import-acc-type-input"
+                    name="accountType"
+                    placeholder="Ej. CUENTA DE AHORRO SOS"
+                    required
+                  />
+                </div>
 
-            <div class="form-grid-2">
-              <div class="field">
-                <label for="import-acc-currency-select">Moneda</label>
-                <select id="import-acc-currency-select" name="currency">
-                  <option value="HNL">HNL (Lempiras - L)</option>
-                  <option value="USD">USD (Dólares - $)</option>
-                </select>
+                <div class="field">
+                  <label for="import-acc-number-input">Número de Cuenta Completo</label>
+                  <input
+                    type="text"
+                    id="import-acc-number-input"
+                    name="accountNumber"
+                    inputmode="numeric"
+                    placeholder="Ej. 213130058771"
+                  />
+                </div>
               </div>
 
-              <div class="field">
-                <label for="import-acc-balance-input">Saldo Inicial / Disponible</label>
-                <input
-                  type="number"
-                  id="import-acc-balance-input"
-                  name="currentBalance"
-                  step="0.01"
-                  required
-                />
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="import-acc-currency-select">Moneda</label>
+                  <select id="import-acc-currency-select" name="currency">
+                    <option value="HNL">HNL (Lempiras - L)</option>
+                    <option value="USD">USD (Dólares - $)</option>
+                  </select>
+                </div>
+
+                <div class="field">
+                  <label for="import-acc-balance-input">Saldo Inicial / Disponible</label>
+                  <input
+                    type="number"
+                    id="import-acc-balance-input"
+                    name="currentBalance"
+                    step="0.01"
+                    required
+                  />
+                </div>
               </div>
-            </div>
+            </details>
 
             <div>
               <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem; flex-wrap: wrap;">
@@ -958,7 +1146,7 @@ export class ImportAccountModal {
     previewBox?.classList.add('is-hidden');
     if (confirmBtn) confirmBtn.disabled = true;
     if (loadingText) {
-      loadingText.textContent = '🤖 Analizando estado de cuenta con Gemini Vision...';
+      loadingText.textContent = '🤖 Analizando documento con Gemini Vision...';
     }
     loadingBox?.classList.remove('is-hidden');
 
@@ -997,6 +1185,7 @@ export class ImportAccountModal {
 
       const sanitizedData = this.sanitizeExtractedData(adkResult.data, ocrTextFallback);
       this.currentExtracted = sanitizedData;
+
       this.reconcileAccountAndTransactionDuplicates();
       this.renderPreview(this.currentExtracted, adkResult.source);
       if (adkResult.isDemoFallback) {
@@ -1016,6 +1205,166 @@ export class ImportAccountModal {
   }
 
   /**
+   * Actualiza un campo de una cuenta específica en `this.currentExtracted.accounts[idx]`
+   * (✏️ Editar: Nombre de Banco, Tipo de Cuenta, Número Completo, Moneda, Saldo, o selección checkbox).
+   */
+  updateAccountAtIndex(idx, field, value) {
+    if (!this.currentExtracted || !Array.isArray(this.currentExtracted.accounts)) return null;
+    if (idx < 0 || idx >= this.currentExtracted.accounts.length) return null;
+
+    const item = this.currentExtracted.accounts[idx];
+    if (field === 'selected') {
+      item.selected = Boolean(value);
+    } else if (field === 'bankName') {
+      item.bankName = cleanBankName(value, item.accountType);
+    } else if (field === 'accountType') {
+      item.accountType = String(value ?? '').trim() || 'Cuenta de Ahorro';
+    } else if (field === 'accountNumber') {
+      item.accountNumber = String(value ?? '').trim();
+    } else if (field === 'currency') {
+      item.currency = String(value ?? '').toUpperCase().includes('USD') ? 'USD' : 'HNL';
+    } else if (field === 'currentBalance') {
+      item.currentBalance = cleanAmount(value);
+    } else if (field === 'isCreditCard') {
+      item.isCreditCard = Boolean(value === true || value === 'true');
+    }
+
+    if (idx === 0) {
+      this.currentExtracted.bankName = item.bankName;
+      this.currentExtracted.accountType = item.accountType;
+      this.currentExtracted.accountNumber = item.accountNumber;
+      this.currentExtracted.currency = item.currency;
+      this.currentExtracted.currentBalance = item.currentBalance;
+      this.currentExtracted.isCreditCard = Boolean(item.isCreditCard);
+      this.syncPrimaryInputsFromFirstAccount();
+      this.reconcileAccountAndTransactionDuplicates();
+    }
+
+    this.syncSelectAllAccountsCheckboxState();
+    this.syncSummaryBanner();
+    return item;
+  }
+
+  editAccountRow(idx, updates = {}) {
+    if (!updates || typeof updates !== 'object') return null;
+    let updated = null;
+    for (const [field, val] of Object.entries(updates)) {
+      updated = this.updateAccountAtIndex(idx, field, val);
+    }
+    this.renderAccountsListTable();
+    return updated;
+  }
+
+  /**
+   * 🗑️ Elimina / quita cualquier cuenta individual de la lista extraída antes de guardar.
+   * @param {number} idx
+   */
+  removeAccountAtIndex(idx) {
+    if (!this.currentExtracted || !Array.isArray(this.currentExtracted.accounts)) return [];
+    if (idx < 0 || idx >= this.currentExtracted.accounts.length) {
+      return this.currentExtracted.accounts;
+    }
+
+    this.syncAccountsFromDom();
+    this.currentExtracted.accounts.splice(idx, 1);
+    this.currentExtracted.accountsArray = this.currentExtracted.accounts;
+
+    if (this.currentExtracted.accounts.length > 0) {
+      const first = this.currentExtracted.accounts[0];
+      this.currentExtracted.bankName = first.bankName;
+      this.currentExtracted.accountType = first.accountType;
+      this.currentExtracted.accountNumber = first.accountNumber;
+      this.currentExtracted.currency = first.currency;
+      this.currentExtracted.currentBalance = first.currentBalance;
+      this.currentExtracted.isCreditCard = Boolean(first.isCreditCard);
+      this.syncPrimaryInputsFromFirstAccount();
+    }
+
+    this.reconcileAccountAndTransactionDuplicates();
+    this.renderAccountsListTable();
+    this.syncSelectAllAccountsCheckboxState();
+    this.syncSummaryBanner();
+    return this.currentExtracted.accounts;
+  }
+
+  removeExtractedAccount(idx) {
+    return this.removeAccountAtIndex(idx);
+  }
+
+  /**
+   * Selecciona o deselecciona todas las cuentas de `this.currentExtracted.accounts`.
+   * @param {boolean} checked
+   */
+  toggleSelectAllAccounts(checked) {
+    if (!this.currentExtracted || !Array.isArray(this.currentExtracted.accounts)) return [];
+    const nextChecked = Boolean(checked);
+    this.currentExtracted.accounts.forEach((acc) => {
+      acc.selected = nextChecked;
+    });
+    this.renderAccountsListTable();
+    this.syncSelectAllAccountsCheckboxState();
+    this.syncSummaryBanner();
+    return this.currentExtracted.accounts;
+  }
+
+  syncPrimaryInputsFromFirstAccount() {
+    if (typeof document === 'undefined' || !this.currentExtracted) return;
+    const first = this.currentExtracted.accounts?.[0];
+    if (!first) return;
+
+    const bankSelect = document.getElementById('import-acc-bank-select');
+    const bankInput = document.getElementById('import-acc-bank-input');
+    const typeInput = document.getElementById('import-acc-type-input');
+    const numberInput = document.getElementById('import-acc-number-input');
+    const currencySelect = document.getElementById('import-acc-currency-select');
+    const balanceInput = document.getElementById('import-acc-balance-input');
+
+    const resolvedBank = cleanBankName(first.bankName || this.currentExtracted.bankName, first.accountType);
+    if (bankInput) bankInput.value = resolvedBank;
+    if (bankSelect) {
+      const matchingOption = HONDURAS_BANKS_LIST.find(
+        (b) => b !== 'Otro / Personalizado' && b.toLowerCase() === resolvedBank.toLowerCase()
+      );
+      bankSelect.value = matchingOption || 'Otro / Personalizado';
+    }
+    if (typeInput) typeInput.value = first.accountType || 'Cuenta de Ahorro';
+    if (numberInput) numberInput.value = first.accountNumber || '';
+    if (currencySelect) currencySelect.value = first.currency === 'USD' ? 'USD' : 'HNL';
+    if (balanceInput) balanceInput.value = String(cleanAmount(first.currentBalance));
+  }
+
+  syncFirstAccountFromPrimaryInputs() {
+    if (typeof document === 'undefined' || !this.currentExtracted) return;
+    const first = this.currentExtracted.accounts?.[0];
+    if (!first) return;
+
+    const typeInput = document.getElementById('import-acc-type-input');
+    const numberInput = document.getElementById('import-acc-number-input');
+    const currencySelect = document.getElementById('import-acc-currency-select');
+    const balanceInput = document.getElementById('import-acc-balance-input');
+
+    first.bankName = this.readEditedBankName();
+    if (typeInput?.value !== undefined) {
+      first.accountType = typeInput.value.trim() || 'Cuenta de Ahorro';
+    }
+    if (numberInput?.value !== undefined) {
+      first.accountNumber = numberInput.value.trim();
+    }
+    if (currencySelect?.value) {
+      first.currency = currencySelect.value === 'USD' ? 'USD' : 'HNL';
+    }
+    if (balanceInput?.value !== undefined && balanceInput.value !== '') {
+      first.currentBalance = cleanAmount(balanceInput.value);
+    }
+
+    this.currentExtracted.bankName = first.bankName;
+    this.currentExtracted.accountType = first.accountType;
+    this.currentExtracted.accountNumber = first.accountNumber;
+    this.currentExtracted.currency = first.currency;
+    this.currentExtracted.currentBalance = first.currentBalance;
+  }
+
+  /**
    * Verifica si la cuenta importada ya existe por `accountNumber` y si alguno de sus
    * movimientos detectados coincide con transacciones existentes (`accountId` + `date` + `amount` + `concept` similar).
    */
@@ -1025,10 +1374,12 @@ export class ImportAccountModal {
     const accounts = Array.isArray(state?.accounts) ? state.accounts : [];
     const transactions = Array.isArray(state?.transactions) ? state.transactions : [];
 
+    const firstAcc = this.currentExtracted.accounts?.[0];
     const numberInput =
       typeof document !== 'undefined' ? document.getElementById('import-acc-number-input') : null;
     const currentAccNumber = String(
-      numberInput?.value !== undefined ? numberInput.value : this.currentExtracted.accountNumber || ''
+      firstAcc?.accountNumber ??
+        (numberInput?.value !== undefined ? numberInput.value : this.currentExtracted.accountNumber || '')
     )
       .replace(/[\s-]/g, '')
       .trim();
@@ -1043,7 +1394,7 @@ export class ImportAccountModal {
       : null;
 
     const targetAccountId = this.matchedExistingAccount?.id || '';
-    const currency = this.currentExtracted.currency || 'HNL';
+    const currency = firstAcc?.currency || this.currentExtracted.currency || 'HNL';
 
     const duplicateMessages = [];
     for (const tx of this.currentExtracted.detectedTransactions || []) {
@@ -1114,13 +1465,50 @@ export class ImportAccountModal {
       duplicateWarning: tx.duplicateWarning || '',
     }));
 
+    const sourceAccountsList = Array.isArray(rawData?.accounts) && rawData.accounts.length > 0
+      ? rawData.accounts
+      : Array.isArray(rawData?.accountsArray) && rawData.accountsArray.length > 0
+        ? rawData.accountsArray
+        : null;
+
+    const normalizedAccounts = sourceAccountsList
+      ? sourceAccountsList.map((item, idx) => ({
+          id: item?.id || `imp_acc_${idx}_${Date.now().toString(36)}`,
+          bankName: cleanBankName(item?.bankName || cleanedBank, item?.accountType || cleanedAccountType),
+          accountType: cleanAccountType(item?.accountType),
+          accountNumber: String(item?.accountNumber ?? '').trim(),
+          currency: item?.currency === 'USD' ? 'USD' : 'HNL',
+          currentBalance: cleanAmount(item?.currentBalance ?? 0),
+          isCreditCard: Boolean(item?.isCreditCard),
+          status: item?.status || 'Activa',
+          selected: item?.selected !== false,
+        }))
+      : [
+          {
+            id: `imp_acc_0_${Date.now().toString(36)}`,
+            bankName: cleanedBank,
+            accountType: cleanedAccountType,
+            accountNumber: String(rawData?.accountNumber ?? '').trim(),
+            currency: rawData?.currency === 'USD' ? 'USD' : 'HNL',
+            currentBalance: cleanAmount(rawData?.currentBalance ?? 0),
+            isCreditCard: Boolean(rawData?.isCreditCard),
+            status: rawData?.status || 'Activa',
+            selected: true,
+          },
+        ];
+
+    const primaryAcc = normalizedAccounts[0];
+
     return {
       ...rawData,
-      bankName: cleanedBank,
-      accountType: cleanedAccountType,
-      accountNumber: String(rawData?.accountNumber ?? '').trim(),
-      currency: rawData?.currency === 'USD' ? 'USD' : 'HNL',
-      currentBalance: cleanAmount(rawData?.currentBalance ?? 0),
+      bankName: primaryAcc?.bankName || cleanedBank,
+      accountType: primaryAcc?.accountType || cleanedAccountType,
+      accountNumber: primaryAcc?.accountNumber ?? String(rawData?.accountNumber ?? '').trim(),
+      currency: primaryAcc?.currency || (rawData?.currency === 'USD' ? 'USD' : 'HNL'),
+      currentBalance: primaryAcc?.currentBalance ?? cleanAmount(rawData?.currentBalance ?? 0),
+      isCreditCard: Boolean(primaryAcc?.isCreditCard ?? rawData?.isCreditCard),
+      accounts: normalizedAccounts,
+      accountsArray: normalizedAccounts,
       status: rawData?.status || 'Activa',
       detectedTransactions: cleanedTransactions,
     };
@@ -1165,52 +1553,214 @@ export class ImportAccountModal {
     const sanitized = this.sanitizeExtractedData(data);
     this.currentExtracted = sanitized;
 
-    const previewBox = document.getElementById('import-account-preview-box');
-    const sourceBadge = document.getElementById('import-account-source-badge');
-    const confirmBtn = document.getElementById('btn-confirm-import-account');
-
-    const bankSelect = document.getElementById('import-acc-bank-select');
-    const bankInput = document.getElementById('import-acc-bank-input');
-    const typeInput = document.getElementById('import-acc-type-input');
-    const numberInput = document.getElementById('import-acc-number-input');
-    const currencySelect = document.getElementById('import-acc-currency-select');
-    const balanceInput = document.getElementById('import-acc-balance-input');
-
-    const resolvedBank = cleanBankName(sanitized.bankName, sanitized.accountType);
-    if (bankInput) {
-      bankInput.value = resolvedBank;
-    }
-    if (bankSelect) {
-      const matchingOption = HONDURAS_BANKS_LIST.find(
-        (b) => b !== 'Otro / Personalizado' && b.toLowerCase() === resolvedBank.toLowerCase()
-      );
-      bankSelect.value = matchingOption || 'Otro / Personalizado';
-    }
-
-    if (typeInput) typeInput.value = sanitized.accountType || 'Cuenta de Ahorro';
-    if (numberInput) numberInput.value = sanitized.accountNumber || '';
-    if (currencySelect) currencySelect.value = sanitized.currency === 'USD' ? 'USD' : 'HNL';
-    if (balanceInput) balanceInput.value = String(cleanAmount(sanitized.currentBalance));
-
-    if (sourceBadge) {
-      sourceBadge.textContent =
-        source.includes('gemini') || source.includes('genkit')
-          ? '🤖 Gemini Vision'
-          : '⚡ Extractor OCR/PDF';
-    }
-
+    this.syncPrimaryInputsFromFirstAccount();
     this.reconcileAccountAndTransactionDuplicates();
+    this.renderAccountsListTable();
+    this.syncSelectAllAccountsCheckboxState();
     this.renderTransactionsTable();
     this.syncSelectAllCheckboxState();
     this.syncSummaryBanner();
 
-    previewBox?.classList.remove('is-hidden');
-    if (confirmBtn) confirmBtn.disabled = false;
+    if (typeof document !== 'undefined') {
+      const previewBox = document.getElementById('import-account-preview-box');
+      const sourceBadge = document.getElementById('import-account-source-badge');
+      const confirmBtn = document.getElementById('btn-confirm-import-account');
+
+      if (sourceBadge) {
+        sourceBadge.textContent =
+          source.includes('gemini') || source.includes('genkit')
+            ? '🤖 Gemini Vision'
+            : '⚡ Extractor OCR/PDF';
+      }
+
+      previewBox?.classList.remove('is-hidden');
+      if (confirmBtn) {
+        confirmBtn.disabled =
+          this.currentExtracted.accounts.filter((a) => a.selected !== false).length === 0;
+      }
+    }
+    return this.currentExtracted;
+  }
+
+  renderAccountsListTable() {
+    if (typeof document === 'undefined' || !this.currentExtracted) return '';
+    const accountsTbody = document.getElementById('import-account-accounts-tbody');
+    const accountsList = Array.isArray(this.currentExtracted.accounts)
+      ? this.currentExtracted.accounts
+      : [];
+
+    const markup =
+      accountsList.length === 0
+        ? `
+          <tr>
+            <td colspan="7" style="text-align: center; padding: 1rem; color: var(--text-secondary);">
+              No hay cuentas en la lista. Haz clic en "+ Agregar Cuenta" o selecciona una imagen/PDF.
+            </td>
+          </tr>
+        `
+        : accountsList
+            .map((acc, idx) => {
+              const isChecked = acc.selected !== false;
+              const numericBal = cleanAmount(acc.currentBalance);
+              return `
+                <tr data-import-acc-row="${idx}" class="${isChecked ? 'is-selected' : 'is-unselected'}">
+                  <td style="width: 40px; text-align: center;">
+                    <input
+                      type="checkbox"
+                      data-import-acc-select="${idx}"
+                      ${isChecked ? 'checked' : ''}
+                      aria-label="Seleccionar cuenta ${idx + 1}"
+                    />
+                  </td>
+                  <td>
+                    <input
+                      type="text"
+                      class="smart-nlp-input"
+                      data-import-acc-bank="${idx}"
+                      list="import-acc-bank-datalist"
+                      value="${escapeHtmlAttr(acc.bankName || this.currentExtracted.bankName || HONDURAS_BANKS_LIST[0])}"
+                      placeholder="Nombre de Banco"
+                      aria-label="Nombre de Banco de cuenta ${idx + 1}"
+                      style="width: 100%; padding: 0.38rem 0.6rem; font-size: 0.85rem;"
+                    />
+                  </td>
+                  <td>
+                    <input
+                      type="text"
+                      class="smart-nlp-input"
+                      data-import-acc-type="${idx}"
+                      value="${escapeHtmlAttr(acc.accountType || 'Cuenta de Ahorro')}"
+                      placeholder="Tipo de Cuenta"
+                      aria-label="Tipo de Cuenta ${idx + 1}"
+                      style="width: 100%; padding: 0.38rem 0.6rem; font-size: 0.85rem;"
+                    />
+                  </td>
+                  <td>
+                    <input
+                      type="text"
+                      class="smart-nlp-input"
+                      data-import-acc-number="${idx}"
+                      inputmode="numeric"
+                      value="${escapeHtmlAttr(acc.accountNumber || '')}"
+                      placeholder="Número Completo"
+                      aria-label="Número Completo de cuenta ${idx + 1}"
+                      style="width: 100%; padding: 0.38rem 0.6rem; font-size: 0.85rem; font-variant-numeric: tabular-nums;"
+                    />
+                  </td>
+                  <td>
+                    <select
+                      class="stmt-cat-select"
+                      data-import-acc-currency="${idx}"
+                      aria-label="Moneda de cuenta ${idx + 1}"
+                      style="width: 100%;"
+                    >
+                      <option value="HNL" ${acc.currency !== 'USD' ? 'selected' : ''}>HNL (L)</option>
+                      <option value="USD" ${acc.currency === 'USD' ? 'selected' : ''}>USD ($)</option>
+                    </select>
+                  </td>
+                  <td class="num-col">
+                    <input
+                      type="number"
+                      step="0.01"
+                      class="smart-nlp-input"
+                      data-import-acc-balance="${idx}"
+                      value="${numericBal}"
+                      aria-label="Saldo de cuenta ${idx + 1}"
+                      style="width: 100%; text-align: right; padding: 0.38rem 0.6rem; font-size: 0.85rem; font-variant-numeric: tabular-nums;"
+                    />
+                  </td>
+                  <td style="text-align: center;">
+                    <button
+                      type="button"
+                      class="btn-secondary btn-sm btn-remove-extracted-account"
+                      data-import-acc-remove="${idx}"
+                      aria-label="Eliminar cuenta ${idx + 1}"
+                      title="Eliminar esta cuenta de la lista"
+                    >🗑️ Eliminar</button>
+                  </td>
+                </tr>
+              `;
+            })
+            .join('');
+
+    if (accountsTbody) {
+      accountsTbody.innerHTML = markup;
+    }
+    return markup;
+  }
+
+  syncAccountsFromDom() {
+    if (!this.currentExtracted || !Array.isArray(this.currentExtracted.accounts)) return [];
+    if (typeof document === 'undefined') return this.currentExtracted.accounts;
+
+    const accountsTbody = document.getElementById('import-account-accounts-tbody');
+    if (accountsTbody && accountsTbody.querySelectorAll('tr[data-import-acc-row]').length > 0) {
+      this.currentExtracted.accounts = this.currentExtracted.accounts.map((acc, idx) => {
+        const selectEl = accountsTbody.querySelector(`[data-import-acc-select="${idx}"]`);
+        const bankEl = accountsTbody.querySelector(`[data-import-acc-bank="${idx}"]`);
+        const typeEl = accountsTbody.querySelector(`[data-import-acc-type="${idx}"]`);
+        const numEl = accountsTbody.querySelector(`[data-import-acc-number="${idx}"]`);
+        const curEl = accountsTbody.querySelector(`[data-import-acc-currency="${idx}"]`);
+        const balEl = accountsTbody.querySelector(`[data-import-acc-balance="${idx}"]`);
+
+        const nextType =
+          typeEl?.value !== undefined
+            ? typeEl.value.trim() || 'Cuenta de Ahorro'
+            : acc.accountType;
+        const nextBank =
+          bankEl?.value !== undefined
+            ? cleanBankName(bankEl.value, nextType)
+            : acc.bankName;
+
+        return {
+          ...acc,
+          selected: selectEl ? Boolean(selectEl.checked) : acc.selected !== false,
+          bankName: nextBank,
+          accountType: nextType,
+          accountNumber: numEl?.value !== undefined ? numEl.value.trim() : acc.accountNumber,
+          currency: curEl?.value ? (curEl.value === 'USD' ? 'USD' : 'HNL') : acc.currency,
+          currentBalance:
+            balEl?.value !== undefined && balEl.value !== ''
+              ? cleanAmount(balEl.value)
+              : cleanAmount(acc.currentBalance),
+        };
+      });
+    } else {
+      this.syncFirstAccountFromPrimaryInputs();
+    }
+
+    this.currentExtracted.accountsArray = this.currentExtracted.accounts;
+    return this.currentExtracted.accounts;
+  }
+
+  syncSelectAllAccountsCheckboxState() {
+    if (typeof document === 'undefined' || !this.currentExtracted) return;
+    const selectAllAccountsCheckbox = document.getElementById('import-account-select-all-accounts');
+    const confirmBtn = document.getElementById('btn-confirm-import-account');
+    const list = this.currentExtracted.accounts || [];
+    const selectedCount = list.filter((a) => a.selected !== false).length;
+
+    if (selectAllAccountsCheckbox) {
+      if (list.length === 0) {
+        selectAllAccountsCheckbox.checked = false;
+        selectAllAccountsCheckbox.indeterminate = false;
+        selectAllAccountsCheckbox.disabled = true;
+      } else {
+        selectAllAccountsCheckbox.disabled = false;
+        selectAllAccountsCheckbox.checked = selectedCount === list.length;
+        selectAllAccountsCheckbox.indeterminate = selectedCount > 0 && selectedCount < list.length;
+      }
+    }
+
+    if (confirmBtn && !this.isProcessing) {
+      confirmBtn.disabled = selectedCount === 0;
+    }
   }
 
   renderTransactionsTable() {
+    if (typeof document === 'undefined' || !this.currentExtracted) return;
     const tbody = document.getElementById('import-account-tx-tbody');
-    if (!tbody || !this.currentExtracted) return;
+    if (!tbody) return;
 
     const txs = this.currentExtracted.detectedTransactions || [];
     const currencySelect = document.getElementById('import-acc-currency-select');
@@ -1221,7 +1771,7 @@ export class ImportAccountModal {
       tbody.innerHTML = `
         <tr>
           <td colspan="5" style="text-align: center; padding: 1rem; color: var(--text-secondary);">
-            No se detectaron movimientos adicionales en el documento (se creará la cuenta con su saldo disponible o puedes agregar una fila manual).
+            No se detectaron movimientos adicionales en el documento (se guardarán las cuentas seleccionadas con su saldo disponible o puedes agregar una fila manual).
           </td>
         </tr>
       `;
@@ -1357,8 +1907,9 @@ export class ImportAccountModal {
   }
 
   syncSelectAllCheckboxState() {
+    if (typeof document === 'undefined' || !this.currentExtracted) return;
     const selectAllCheckbox = document.getElementById('import-account-select-all-tx');
-    if (!selectAllCheckbox || !this.currentExtracted) return;
+    if (!selectAllCheckbox) return;
     const txs = this.currentExtracted.detectedTransactions || [];
     if (txs.length === 0) {
       selectAllCheckbox.checked = false;
@@ -1370,8 +1921,9 @@ export class ImportAccountModal {
   }
 
   syncSummaryBanner() {
-    if (!this.currentExtracted) return;
+    if (typeof document === 'undefined' || !this.currentExtracted) return;
     const currentPayload = this.collectConfirmedPayload();
+    const selectedAccounts = (currentPayload.accounts || []).filter((a) => a.selected !== false);
     const selectedTxs = currentPayload.detectedTransactions.filter(
       (t) => t.selected !== false && t.duplicateAction !== DUPLICATE_TRANSACTION_ACTIONS.SKIP
     );
@@ -1383,13 +1935,32 @@ export class ImportAccountModal {
 
     const summaryTitleEl = document.getElementById('import-account-summary-title');
     const txCountBadgeEl = document.getElementById('import-account-tx-count-badge');
-    if (summaryTitleEl) summaryTitleEl.textContent = summary.accountSummaryTitle;
+    const confirmBtn = document.getElementById('btn-confirm-import-account');
+
+    if (summaryTitleEl) {
+      summaryTitleEl.textContent =
+        currentPayload.accounts.length > 1
+          ? `${selectedAccounts.length} de ${currentPayload.accounts.length} cuenta(s) seleccionada(s) (${currentPayload.bankName})`
+          : summary.accountSummaryTitle;
+    }
     if (txCountBadgeEl) {
-      txCountBadgeEl.textContent = `${selectedTxs.length} de ${currentPayload.detectedTransactions.length} movimiento(s) seleccionado(s)`;
+      txCountBadgeEl.textContent = `${selectedAccounts.length} cuenta(s) · ${selectedTxs.length} de ${currentPayload.detectedTransactions.length} movimiento(s) seleccionado(s)`;
+    }
+    if (confirmBtn) {
+      confirmBtn.textContent =
+        selectedAccounts.length > 1
+          ? `💾 Guardar ${selectedAccounts.length} Cuentas Seleccionadas`
+          : 'Confirmar y Crear Cuenta';
     }
   }
 
   collectConfirmedPayload() {
+    const editedAccounts = this.syncAccountsFromDom();
+    const editedTransactions = this.syncTransactionsFromDom();
+
+    const selectedAccounts = editedAccounts.filter((a) => a.selected !== false);
+    const primaryAcc = selectedAccounts[0] || editedAccounts[0] || {};
+
     const typeInput =
       typeof document !== 'undefined'
         ? document.getElementById('import-acc-type-input')
@@ -1407,21 +1978,28 @@ export class ImportAccountModal {
         ? document.getElementById('import-acc-balance-input')
         : null;
 
-    const editedTransactions = this.syncTransactionsFromDom();
     const editedAccountType =
+      primaryAcc.accountType ||
       typeInput?.value?.trim() ||
       cleanAccountType(this.currentExtracted?.accountType || 'Cuenta de Ahorro');
-    const editedBankName = this.readEditedBankName();
+    const editedBankName =
+      primaryAcc.bankName || this.readEditedBankName();
     const editedAccountNumber =
-      numberInput?.value !== undefined
-        ? numberInput.value.trim()
-        : String(this.currentExtracted?.accountNumber ?? '').trim();
+      primaryAcc.accountNumber !== undefined
+        ? String(primaryAcc.accountNumber).trim()
+        : numberInput?.value !== undefined
+          ? numberInput.value.trim()
+          : String(this.currentExtracted?.accountNumber ?? '').trim();
     const editedCurrency =
-      (currencySelect?.value || this.currentExtracted?.currency) === 'USD' ? 'USD' : 'HNL';
+      (primaryAcc.currency || currencySelect?.value || this.currentExtracted?.currency) === 'USD'
+        ? 'USD'
+        : 'HNL';
     const editedBalance =
-      balanceInput?.value !== undefined && balanceInput.value !== ''
-        ? cleanAmount(balanceInput.value)
-        : cleanAmount(this.currentExtracted?.currentBalance ?? 0);
+      primaryAcc.currentBalance !== undefined
+        ? cleanAmount(primaryAcc.currentBalance)
+        : balanceInput?.value !== undefined && balanceInput.value !== ''
+          ? cleanAmount(balanceInput.value)
+          : cleanAmount(this.currentExtracted?.currentBalance ?? 0);
 
     return ExtractedAccountSchema.parse({
       bankName: editedBankName,
@@ -1429,6 +2007,8 @@ export class ImportAccountModal {
       accountNumber: editedAccountNumber,
       currency: editedCurrency,
       currentBalance: editedBalance,
+      accounts: editedAccounts,
+      accountsArray: editedAccounts,
       status: this.currentExtracted?.status || 'Activa',
       detectedTransactions: editedTransactions,
     });
@@ -1444,8 +2024,37 @@ export class ImportAccountModal {
     try {
       this.reconcileAccountAndTransactionDuplicates();
       const payload = this.collectConfirmedPayload();
+      const selectedAccounts = (payload.accounts || []).filter((a) => a.selected !== false);
+
+      if (selectedAccounts.length === 0) {
+        this.showError('Selecciona al menos una cuenta en la lista antes de confirmar.');
+        if (confirmBtn) confirmBtn.disabled = false;
+        return;
+      }
+
       const state = this.options.getState?.();
       const ctx = this.options.getImportContext?.() || {};
+
+      if (selectedAccounts.length > 1) {
+        const batchResult = await saveBatchAccountsToFirestore(
+          {
+            bankName: payload.bankName,
+            accounts: selectedAccounts,
+            accountsArray: selectedAccounts,
+          },
+          state,
+          ctx
+        );
+        this.setIsImportAccountModalOpen(false);
+        this.options.showToast?.(batchResult.toastMessage);
+        this.options.onCreated?.(batchResult);
+        this.options.onAccountCreated?.(
+          batchResult.createdAccounts?.[0] || null,
+          [],
+          batchResult
+        );
+        return batchResult;
+      }
 
       if (this.matchedExistingAccount?.id) {
         ctx.existingAccountId = this.matchedExistingAccount.id;
@@ -1455,9 +2064,12 @@ export class ImportAccountModal {
       this.setIsImportAccountModalOpen(false);
       this.options.showToast?.(created.toastMessage);
       this.options.onCreated?.(created);
+      this.options.onAccountCreated?.(created.account, created.transactions, created);
+      return created;
     } catch (err) {
       this.showError(err?.message || 'Error al guardar la cuenta y movimientos.');
       if (confirmBtn) confirmBtn.disabled = false;
+      return null;
     } finally {
       this.isProcessing = false;
     }

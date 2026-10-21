@@ -93,6 +93,21 @@ import {
   resetGlobalDashboardMetricsToZero,
   initializeDashboardStateForNewUser,
 } from './dashboard.js';
+import {
+  saveBatchAccountsToFirestore,
+  fetchExistingWorkspaceAccountNumbers,
+  formatBatchAccountsToastMessage,
+  BATCH_DEMO_PRODUCTS_SUMMARY,
+  ExtractedBatchAccountsSchema,
+} from './accountExtractor.js';
+import {
+  buildDefaultUserDocument,
+  registerNewUserDocument,
+  persistOnboardingCompletionInFirestore,
+  removeOnboardingWizardFromDom,
+  verifyUserOnboardingOnSignIn,
+  cleanupOnboardingOnLogout,
+} from './auth.js';
 
 export {
   CUSTOM_FIREBASE_CONFIG_STORAGE_KEY,
@@ -158,6 +173,17 @@ export {
   purgeResidualTransactionsFromWorkspace,
   resetGlobalDashboardMetricsToZero,
   initializeDashboardStateForNewUser,
+  saveBatchAccountsToFirestore,
+  fetchExistingWorkspaceAccountNumbers,
+  formatBatchAccountsToastMessage,
+  BATCH_DEMO_PRODUCTS_SUMMARY,
+  ExtractedBatchAccountsSchema,
+  buildDefaultUserDocument,
+  registerNewUserDocument,
+  persistOnboardingCompletionInFirestore,
+  removeOnboardingWizardFromDom,
+  verifyUserOnboardingOnSignIn,
+  cleanupOnboardingOnLogout,
 };
 
 /**
