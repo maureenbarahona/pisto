@@ -170,6 +170,9 @@ function buildDefaultModalOptions(customOptions = {}) {
         storage: typeof localStorage !== 'undefined' ? localStorage : null,
       };
     },
+    ...(typeof customOptions.extractOcrFallbackText === 'function'
+      ? { extractOcrFallbackText: customOptions.extractOcrFallbackText }
+      : {}),
     showToast: (msg) => {
       if (typeof customOptions.showToast === 'function') {
         customOptions.showToast(msg);

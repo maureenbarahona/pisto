@@ -32,6 +32,12 @@ import {
   BATCH_DEMO_PRODUCTS_SUMMARY,
   ExtractedAccountSchema,
   ExtractedBatchAccountsSchema,
+  ACCOUNT_EXTRACTOR_SYSTEM_PROMPT,
+  EXTRACTED_ACCOUNT_JSON_SCHEMA,
+  buildAccountExtractorSystemPrompt,
+  learnAdaptiveAccountPattern,
+  getLearnedBankPatterns,
+  inferAccountsFromUnstructuredText,
 } from '../services/accountExtractor.js';
 import {
   BatchAccountsModal,
@@ -71,6 +77,12 @@ export {
   formatBatchAccountsToastMessage,
   BATCH_DEMO_PRODUCTS_SUMMARY,
   ExtractedBatchAccountsSchema,
+  ACCOUNT_EXTRACTOR_SYSTEM_PROMPT,
+  EXTRACTED_ACCOUNT_JSON_SCHEMA,
+  buildAccountExtractorSystemPrompt,
+  learnAdaptiveAccountPattern,
+  getLearnedBankPatterns,
+  inferAccountsFromUnstructuredText,
   BatchAccountsModal,
   formatBatchAccountRowSummary,
   renderBatchAccountsRowsMarkup,
@@ -124,6 +136,13 @@ export function cleanBankName(rawText, contextHint = '') {
 
   if (/\bsos\b/i.test(combined) || /\bcuenta\s+de\s+ahorro\s+sos\b/i.test(combined)) {
     return 'Banco Atlántida';
+  }
+
+  const learnedPatterns = getLearnedBankPatterns();
+  for (const learned of learnedPatterns) {
+    if (learned?.bankName && combined.includes(learned.bankName.toLowerCase())) {
+      return learned.bankName;
+    }
   }
 
   const hasUiGarbage =
@@ -366,6 +385,7 @@ export class ImportAccountModal {
     this.isImportAccountModalOpen = false;
     this.isProcessing = false;
     this.matchedExistingAccount = null;
+    this.lastOcrTextFallback = '';
     this.agentADK = useAccountAgentADK({
       notifyToast: (msg) => this.options.showToast?.(msg),
     });
@@ -383,10 +403,17 @@ export class ImportAccountModal {
     });
   }
 
-  get accounts() {
+  get accountsList() {
+    if (Array.isArray(this.currentExtracted?.accountsList)) {
+      return this.currentExtracted.accountsList;
+    }
     return Array.isArray(this.currentExtracted?.accounts)
       ? this.currentExtracted.accounts
       : [];
+  }
+
+  get accounts() {
+    return this.accountsList;
   }
 
   init() {
@@ -395,12 +422,67 @@ export class ImportAccountModal {
     this.bindDialogInternalEvents();
   }
 
+  handleSelectImageOrPdfClick(event) {
+    if (event && typeof event.preventDefault === 'function') {
+      event.preventDefault();
+    }
+    if (event && typeof event.stopPropagation === 'function') {
+      event.stopPropagation();
+    }
+    if (typeof document === 'undefined') return null;
+
+    this.ensureModalDom();
+    const fileInput = document.getElementById('import-account-file-input');
+    if (!fileInput) return null;
+
+    fileInput.disabled = false;
+    fileInput.removeAttribute('disabled');
+    try {
+      fileInput.value = '';
+    } catch {
+      // ignore read-only value in synthetic tests
+    }
+    if (typeof fileInput.click === 'function') {
+      fileInput.click();
+    }
+    return fileInput;
+  }
+
   bindDialogInternalEvents() {
     if (typeof document === 'undefined') return;
     const dialog = document.getElementById('import-account-dialog');
     if (!dialog) return;
 
     this.populateBankOptions();
+
+    const fileInput = document.getElementById('import-account-file-input');
+    const triggerBtn = document.getElementById('btn-trigger-import-account-file');
+
+    if (triggerBtn && triggerBtn.dataset.boundTriggerFile !== 'true') {
+      triggerBtn.dataset.boundTriggerFile = 'true';
+      triggerBtn.type = 'button';
+      triggerBtn.disabled = false;
+      triggerBtn.removeAttribute('disabled');
+      triggerBtn.addEventListener('click', (e) => {
+        this.handleSelectImageOrPdfClick(e);
+      });
+    }
+
+    if (fileInput && fileInput.dataset.boundFileInput !== 'true') {
+      fileInput.dataset.boundFileInput = 'true';
+      fileInput.addEventListener('change', () => {
+        const file = fileInput.files?.[0];
+        if (file) {
+          this.handleFileSelected(file);
+        }
+        try {
+          fileInput.value = '';
+        } catch {
+          // ignore
+        }
+      });
+    }
+
     if (dialog.dataset.boundImportModal === 'true') return;
     dialog.dataset.boundImportModal = 'true';
 
@@ -414,9 +496,7 @@ export class ImportAccountModal {
       }
     });
 
-    const fileInput = document.getElementById('import-account-file-input');
     const dropzone = document.getElementById('import-account-dropzone');
-    const triggerBtn = document.getElementById('btn-trigger-import-account-file');
     const demoAdkBtn = document.getElementById('btn-import-account-demo-adk');
     const confirmBtn = document.getElementById('btn-confirm-import-account');
     const cancelBtn = document.getElementById('btn-cancel-import-account');
@@ -431,12 +511,6 @@ export class ImportAccountModal {
     const bankSelect = document.getElementById('import-acc-bank-select');
     const bankInput = document.getElementById('import-acc-bank-input');
 
-    triggerBtn?.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      fileInput?.click();
-    });
-
     demoAdkBtn?.addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -450,7 +524,7 @@ export class ImportAccountModal {
       ) {
         return;
       }
-      fileInput?.click();
+      this.handleSelectImageOrPdfClick(e);
     });
 
     dropzone?.addEventListener('keydown', (e) => {
@@ -476,14 +550,6 @@ export class ImportAccountModal {
       if (file) {
         this.handleFileSelected(file);
       }
-    });
-
-    fileInput?.addEventListener('change', () => {
-      const file = fileInput.files?.[0];
-      if (file) {
-        this.handleFileSelected(file);
-      }
-      fileInput.value = '';
     });
 
     bankSelect?.addEventListener('change', () => {
@@ -552,6 +618,7 @@ export class ImportAccountModal {
         selected: true,
       };
       this.currentExtracted.accounts.push(newAccItem);
+      this.currentExtracted.accountsList = this.currentExtracted.accounts;
       this.currentExtracted.accountsArray = this.currentExtracted.accounts;
       this.syncPrimaryInputsFromFirstAccount();
       this.renderAccountsListTable();
@@ -1165,16 +1232,20 @@ export class ImportAccountModal {
         imgPreview?.classList.add('is-hidden');
       }
 
-      let ocrTextFallback = '';
+      let ocrTextFallback = String(file?.extractedText || file?.ocrText || '').trim();
       if (typeof this.options.extractOcrFallbackText === 'function') {
         try {
-          ocrTextFallback = await this.options.extractOcrFallbackText(file, (status) => {
+          const extractedOcr = await this.options.extractOcrFallbackText(file, (status) => {
             if (loadingText && status) loadingText.textContent = status;
           });
+          if (extractedOcr) {
+            ocrTextFallback = String(extractedOcr).trim();
+          }
         } catch {
-          ocrTextFallback = '';
+          // preserve initial ocrTextFallback if any
         }
       }
+      this.lastOcrTextFallback = ocrTextFallback;
 
       const ctx = this.options.getImportContext?.() || {};
       const adkResult = await this.agentADK.analyzeFile(file, {
@@ -1267,6 +1338,7 @@ export class ImportAccountModal {
 
     this.syncAccountsFromDom();
     this.currentExtracted.accounts.splice(idx, 1);
+    this.currentExtracted.accountsList = this.currentExtracted.accounts;
     this.currentExtracted.accountsArray = this.currentExtracted.accounts;
 
     if (this.currentExtracted.accounts.length > 0) {
@@ -1465,11 +1537,14 @@ export class ImportAccountModal {
       duplicateWarning: tx.duplicateWarning || '',
     }));
 
-    const sourceAccountsList = Array.isArray(rawData?.accounts) && rawData.accounts.length > 0
-      ? rawData.accounts
-      : Array.isArray(rawData?.accountsArray) && rawData.accountsArray.length > 0
-        ? rawData.accountsArray
-        : null;
+    const sourceAccountsList =
+      Array.isArray(rawData?.accountsList) && rawData.accountsList.length > 0
+        ? rawData.accountsList
+        : Array.isArray(rawData?.accounts) && rawData.accounts.length > 0
+          ? rawData.accounts
+          : Array.isArray(rawData?.accountsArray) && rawData.accountsArray.length > 0
+            ? rawData.accountsArray
+            : null;
 
     const normalizedAccounts = sourceAccountsList
       ? sourceAccountsList.map((item, idx) => ({
@@ -1507,6 +1582,7 @@ export class ImportAccountModal {
       currency: primaryAcc?.currency || (rawData?.currency === 'USD' ? 'USD' : 'HNL'),
       currentBalance: primaryAcc?.currentBalance ?? cleanAmount(rawData?.currentBalance ?? 0),
       isCreditCard: Boolean(primaryAcc?.isCreditCard ?? rawData?.isCreditCard),
+      accountsList: normalizedAccounts,
       accounts: normalizedAccounts,
       accountsArray: normalizedAccounts,
       status: rawData?.status || 'Activa',
@@ -1729,6 +1805,7 @@ export class ImportAccountModal {
       this.syncFirstAccountFromPrimaryInputs();
     }
 
+    this.currentExtracted.accountsList = this.currentExtracted.accounts;
     this.currentExtracted.accountsArray = this.currentExtracted.accounts;
     return this.currentExtracted.accounts;
   }
@@ -2007,6 +2084,7 @@ export class ImportAccountModal {
       accountNumber: editedAccountNumber,
       currency: editedCurrency,
       currentBalance: editedBalance,
+      accountsList: editedAccounts,
       accounts: editedAccounts,
       accountsArray: editedAccounts,
       status: this.currentExtracted?.status || 'Activa',
@@ -2024,12 +2102,18 @@ export class ImportAccountModal {
     try {
       this.reconcileAccountAndTransactionDuplicates();
       const payload = this.collectConfirmedPayload();
-      const selectedAccounts = (payload.accounts || []).filter((a) => a.selected !== false);
+      const selectedAccounts = (payload.accountsList || payload.accounts || []).filter(
+        (a) => a.selected !== false
+      );
 
       if (selectedAccounts.length === 0) {
         this.showError('Selecciona al menos una cuenta en la lista antes de confirmar.');
         if (confirmBtn) confirmBtn.disabled = false;
         return;
+      }
+
+      for (const confirmedAcc of selectedAccounts) {
+        learnAdaptiveAccountPattern(confirmedAcc, this.lastOcrTextFallback || '');
       }
 
       const state = this.options.getState?.();
@@ -2039,6 +2123,7 @@ export class ImportAccountModal {
         const batchResult = await saveBatchAccountsToFirestore(
           {
             bankName: payload.bankName,
+            accountsList: selectedAccounts,
             accounts: selectedAccounts,
             accountsArray: selectedAccounts,
           },

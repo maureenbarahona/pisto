@@ -15,38 +15,38 @@ import {
   createAccount,
   createCategory,
   extractLast4Digits,
-} from './domain/models.js?v=9';
-import { StorageRepository } from './repositories/storageRepository.js?v=9';
+} from './domain/models.js';
+import { StorageRepository } from './repositories/storageRepository.js';
 import {
   computeAccountsSummary,
   computeAccountDetailSummary,
   computePeriodAnalytics,
   groupTransactionsByDay,
-} from './services/financeService.js?v=9';
+} from './services/financeService.js';
 import {
   parseNaturalLanguageLocal,
   buildMicroPayload,
-} from './services/tokenOptimizerService.js?v=9';
+} from './services/tokenOptimizerService.js';
 import {
   decodeVoucherFile,
   matchAccountForVoucher,
   decodeBankStatementPdf,
   parseBankStatementText,
   findDuplicateTransaction,
-} from './services/voucherOcrService.js?v=9';
-import { renderIcon, renderPistoDonutChart } from './ui/charts.js?v=9';
+} from './services/voucherOcrService.js';
+import { renderIcon, renderPistoDonutChart } from './ui/charts.js';
 import {
   KeypadModalController,
   attachDialogLightDismissFallback,
-} from './ui/keypadModal.js?v=9';
-import { FirebaseAuthProfileService } from './services/authProfileService.js?v=11';
+} from './ui/keypadModal.js';
+import { FirebaseAuthProfileService } from './services/authProfileService.js';
 import {
   prepareTransactionForWorkspace,
   subscribeWorkspaceTransactions,
   saveTransactionToWorkspace,
   deleteTransactionFromWorkspace,
   migrateTransactionsToSharedWorkspace,
-} from './services/transactions.js?v=12';
+} from './services/transactions.js';
 import {
   isAccountArchived,
   filterActiveAccounts,
@@ -56,20 +56,20 @@ import {
   archiveAccount,
   unarchiveAccount,
   deleteAccountWithCascade,
-} from './services/accounts.js?v=12';
-import { DeleteAccountModal } from './ui/deleteAccountModal.js?v=12';
-import { ProfileViewController } from './ui/profileView.js?v=12';
+} from './services/accounts.js';
+import { DeleteAccountModal } from './ui/deleteAccountModal.js';
+import { ProfileViewController } from './ui/profileView.js';
 import {
   AccountsView,
   setIsImportAccountModalOpen,
   openImportModal,
-} from './ui/accountsTab.js?v=19';
+} from './ui/accountsTab.js';
 import {
   promptDuplicateTransactionModal,
   findAccountDuplicateTransactions,
   resolveDuplicateTransactionAction,
   DUPLICATE_TRANSACTION_ACTIONS,
-} from './ui/importAccountModal.js?v=19';
+} from './ui/importAccountModal.js';
 import {
   OnboardingWizard,
   createOnboardingWizard,
@@ -80,7 +80,7 @@ import {
   ONBOARDING_STEPS,
   ONBOARDING_FINISH_BUTTON_LABEL,
   EMPTY_STATE_CTA_LABELS,
-} from './ui/onboardingWizard.js?v=19';
+} from './ui/onboardingWizard.js';
 import {
   DEMO_SEED_ACCOUNT_IDS,
   ZERO_DASHBOARD_METRICS,
@@ -96,7 +96,7 @@ import {
   purgeResidualTransactionsFromWorkspace,
   resetGlobalDashboardMetricsToZero,
   initializeDashboardStateForNewUser,
-} from './services/dashboard.js?v=20';
+} from './services/dashboard.js';
 
 export {
   openImportModal,
@@ -221,13 +221,27 @@ export class FinanceAppController {
       const nextUid = user?.uid || profile.uid || 'local_default_user';
       const nextEmail = user?.email || profile.email || 'personal@pisto.hn';
       const nextWorkspaceId = profile.workspaceId || 'ws_default';
+      const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
+      const cleanEmail = String(nextEmail || '').trim().toLowerCase();
+
+      const hasCompletedLocally = Boolean(
+        storage?.getItem?.(`pisto_onboarding_completed_${nextUid}`) === 'true' ||
+          (cleanEmail &&
+            cleanEmail !== 'personal@pisto.hn' &&
+            storage?.getItem?.(`pisto_onboarding_completed_${cleanEmail}`) === 'true') ||
+          (this.state?.settings?.hasCompletedOnboarding === true &&
+            this.state?.settings?.onboardingCompletedUid === nextUid)
+      );
+
+      if (hasCompletedLocally && profile.hasCompletedOnboarding !== true) {
+        profile.hasCompletedOnboarding = true;
+      }
+
       const isFirstTimeUser = shouldTriggerOnboarding(profile);
 
       this.state.settings.currentUid = nextUid;
       this.state.settings.personalViewMode = Boolean(profile.personalViewMode);
       this.state.settings.workspaceId = nextWorkspaceId;
-
-      const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
 
       if (isFirstTimeUser && reason !== 'profile-saved') {
         // 1a. Guarantee initial workspace state & Dashboard KPIs are strictly ZERO (0 accounts, 0 transactions, 0 budgets)
@@ -320,6 +334,7 @@ export class FinanceAppController {
       this.ledgerFilters.currencyFilter = 'all';
       this.repo.saveState(this.state);
     }
+    this.profileView?.renderProfileTab?.();
     this.renderAll();
   }
 
@@ -1971,6 +1986,37 @@ export class FinanceAppController {
   bindGlobalEvents() {
     // Navigation Tabs with View Transitions API
     document.addEventListener('click', (e) => {
+      const onboardingFinishBtn =
+        e.target.closest?.('#btn-onboarding-finish') ||
+        e.target.closest?.('[data-onboarding-action="finish"]');
+      if (onboardingFinishBtn) {
+        e.preventDefault();
+        void this.onboardingWizard?.finish({ buttonEl: onboardingFinishBtn });
+        return;
+      }
+
+      const onboardingNavBtn = e.target.closest?.('[data-onboarding-action]');
+      if (onboardingNavBtn) {
+        e.preventDefault();
+        const navAction = onboardingNavBtn.dataset.onboardingAction;
+        if (navAction === 'next') {
+          this.onboardingWizard?.nextStep();
+        } else if (navAction === 'prev') {
+          this.onboardingWizard?.prevStep();
+        }
+        return;
+      }
+
+      const onboardingDotBtn = e.target.closest?.('[data-onboarding-step]');
+      if (onboardingDotBtn) {
+        e.preventDefault();
+        const targetIdx = Number.parseInt(onboardingDotBtn.dataset.onboardingStep, 10);
+        if (Number.isFinite(targetIdx)) {
+          this.onboardingWizard?.goToStep(targetIdx);
+        }
+        return;
+      }
+
       const tabBtn = e.target.closest('[data-tab-target]');
       if (tabBtn) {
         this.switchTab(tabBtn.dataset.tabTarget);
@@ -2541,6 +2587,12 @@ export class FinanceAppController {
           firestoreModule: runtime.firestoreModule || null,
           storage: typeof localStorage !== 'undefined' ? localStorage : null,
         };
+      },
+      extractOcrFallbackText: async (file, onStatus) => {
+        const decoded = await decodeVoucherFile(file, this.state, (status) => {
+          onStatus?.(status);
+        });
+        return decoded?.extractedText || '';
       },
       showToast: (msg) => this.showToast(msg),
       onCreated: () => {

@@ -161,49 +161,6 @@ export async function persistOnboardingCompletionInFirestore(params = {}) {
       ? params.authService.getFirestoreContext()
       : {};
 
-  const db = params.db ?? params.firestoreDb ?? fsContext.firestoreDb ?? null;
-  const fsMod = params.firestoreModule ?? fsContext.firestoreModule ?? null;
-  const doc = params.doc ?? fsMod?.doc;
-  const updateDoc = params.updateDoc ?? fsMod?.updateDoc;
-  const setDoc = params.setDoc ?? fsMod?.setDoc;
-
-  let updatedInFirestore = false;
-
-  if (db && typeof doc === 'function') {
-    const userDocRef = doc(db, 'users', auth.currentUser.uid);
-    if (typeof updateDoc === 'function') {
-      try {
-        await updateDoc(userDocRef, {
-          hasCompletedOnboarding: true,
-          ...(params.extraFields || {}),
-        });
-        updatedInFirestore = true;
-      } catch {
-        if (typeof setDoc === 'function') {
-          await setDoc(
-            userDocRef,
-            {
-              hasCompletedOnboarding: true,
-              ...(params.extraFields || {}),
-            },
-            { merge: true }
-          );
-          updatedInFirestore = true;
-        }
-      }
-    } else if (typeof setDoc === 'function') {
-      await setDoc(
-        userDocRef,
-        {
-          hasCompletedOnboarding: true,
-          ...(params.extraFields || {}),
-        },
-        { merge: true }
-      );
-      updatedInFirestore = true;
-    }
-  }
-
   const storage =
     params.storage ??
     fsContext.storage ??
@@ -226,13 +183,74 @@ export async function persistOnboardingCompletionInFirestore(params = {}) {
       updatedAt: new Date().toISOString(),
     });
     storage.setItem(docKey, JSON.stringify(updatedProfile));
+    storage.setItem(`pisto_onboarding_completed_${auth.currentUser.uid}`, 'true');
+    const cleanEmail = String(updatedProfile.email || auth.currentUser?.email || '')
+      .trim()
+      .toLowerCase();
+    if (cleanEmail) {
+      storage.setItem(`pisto_onboarding_completed_${cleanEmail}`, 'true');
+    }
+  }
+
+  const db = params.db ?? params.firestoreDb ?? fsContext.firestoreDb ?? null;
+  const fsMod = params.firestoreModule ?? fsContext.firestoreModule ?? null;
+  const doc = params.doc ?? fsMod?.doc;
+  const updateDoc = params.updateDoc ?? fsMod?.updateDoc;
+  const setDoc = params.setDoc ?? fsMod?.setDoc;
+
+  let updatedInFirestore = false;
+
+  if (db && typeof doc === 'function') {
+    if (typeof updateDoc === 'function') {
+      try {
+        await updateDoc(doc(db, 'users', auth.currentUser.uid), {
+          hasCompletedOnboarding: true,
+          ...(params.extraFields || {}),
+        });
+        updatedInFirestore = true;
+      } catch {
+        if (typeof setDoc === 'function') {
+          try {
+            await setDoc(
+              doc(db, 'users', auth.currentUser.uid),
+              {
+                hasCompletedOnboarding: true,
+                ...(params.extraFields || {}),
+              },
+              { merge: true }
+            );
+            updatedInFirestore = true;
+          } catch {
+            updatedInFirestore = false;
+          }
+        }
+      }
+    } else if (typeof setDoc === 'function') {
+      try {
+        await setDoc(
+          doc(db, 'users', auth.currentUser.uid),
+          {
+            hasCompletedOnboarding: true,
+            ...(params.extraFields || {}),
+          },
+          { merge: true }
+        );
+        updatedInFirestore = true;
+      } catch {
+        updatedInFirestore = false;
+      }
+    }
   }
 
   if (params.authService && typeof params.authService.saveUserProfile === 'function') {
-    await params.authService.saveUserProfile(auth.currentUser.uid, {
-      hasCompletedOnboarding: true,
-      ...(params.extraFields || {}),
-    });
+    try {
+      await params.authService.saveUserProfile(auth.currentUser.uid, {
+        hasCompletedOnboarding: true,
+        ...(params.extraFields || {}),
+      });
+    } catch {
+      // Ya persistido en caché Local-First
+    }
   }
 
   return {
@@ -240,6 +258,56 @@ export async function persistOnboardingCompletionInFirestore(params = {}) {
     hasCompletedOnboarding: true,
     updatedInFirestore,
   };
+}
+
+/**
+ * Sincroniza la visibilidad condicional del botón "Cerrar Sesión" (`#btn-profile-signout`):
+ * - Se muestra ÚNICAMENTE cuando existe un usuario autenticado activo (`auth.currentUser !== null`).
+ * - Si no hay sesión iniciada (`auth.currentUser === null`), se oculta por completo (`display: none`, `.is-hidden`, `hidden`).
+ *
+ * @param {any} [authOrUser]
+ * @param {Document} [docRef]
+ * @returns {boolean} `true` si el botón queda visible, `false` si se oculta.
+ */
+export function syncLogoutButtonVisibility(
+  authOrUser = null,
+  docRef = typeof document !== 'undefined' ? document : null
+) {
+  const candidateUser =
+    authOrUser && typeof authOrUser === 'object' && 'currentUser' in authOrUser
+      ? authOrUser.currentUser
+      : authOrUser;
+
+  const isAuthenticated = Boolean(
+    candidateUser !== null &&
+      candidateUser !== undefined &&
+      typeof candidateUser === 'object' &&
+      String(candidateUser.uid || '').trim() !== '' &&
+      String(candidateUser.uid || '').trim() !== 'local_default_user'
+  );
+
+  if (docRef && typeof docRef.getElementById === 'function') {
+    const signOutBtn = docRef.getElementById('btn-profile-signout');
+    if (signOutBtn) {
+      if (isAuthenticated) {
+        signOutBtn.classList?.remove?.('is-hidden');
+        signOutBtn.hidden = false;
+        signOutBtn.removeAttribute?.('hidden');
+        if (signOutBtn.style) {
+          signOutBtn.style.display = '';
+        }
+      } else {
+        signOutBtn.classList?.add?.('is-hidden');
+        signOutBtn.hidden = true;
+        signOutBtn.setAttribute?.('hidden', '');
+        if (signOutBtn.style) {
+          signOutBtn.style.display = 'none';
+        }
+      }
+    }
+  }
+
+  return isAuthenticated;
 }
 
 /**
@@ -307,28 +375,29 @@ export function removeOnboardingWizardFromDom(
 
 /**
  * Al iniciar sesión, lee el documento `users/{uid}` de Firestore:
- * - Si `hasCompletedOnboarding === true`, NO invoca ni renderiza el Wizard (y limpia cualquier modal en el DOM).
+ * - Si `hasCompletedOnboarding === true`, NO invoca ni renderiza el Wizard bajo ninguna circunstancia (y limpia cualquier modal en el DOM).
  * - Si `hasCompletedOnboarding === false` (o `undefined`), inicializa el Wizard.
  *
- * @param {string} uid
- * @param {object} [options]
- * @param {any} [options.db]
- * @param {any} [options.firestoreDb]
- * @param {any} [options.firestoreModule]
- * @param {function} [options.doc]
- * @param {function} [options.getDoc]
- * @param {function} [options.setDoc]
- * @param {any} [options.storage]
- * @param {any} [options.user]
- * @param {any} [options.wizard]
- * @param {Document} [options.docRef]
- * @returns {Promise<{ profile: object, hasCompletedOnboarding: boolean, wizardInitialized: boolean }>}
+ * @param {string|object} uidOrOptions
+ * @param {object} [maybeOptions]
+ * @returns {Promise<{ profile: object, hasCompletedOnboarding: boolean, wizardInitialized: boolean, shouldShowWizard: boolean }>}
  */
-export async function verifyUserOnboardingOnSignIn(uid, options = {}) {
-  const cleanUid = String(uid || options.user?.uid || '').trim();
+export async function verifyUserOnboardingOnSignIn(uidOrOptions, maybeOptions = {}) {
+  const options =
+    uidOrOptions && typeof uidOrOptions === 'object' ? uidOrOptions : maybeOptions || {};
+  const explicitUid = typeof uidOrOptions === 'string' ? uidOrOptions : options.uid;
+  const authObj = options.auth ?? options.firebaseAuth ?? null;
+  const cleanUid = String(
+    explicitUid || options.user?.uid || authObj?.currentUser?.uid || ''
+  ).trim();
   if (!cleanUid) {
     throw new Error('El uid del usuario es obligatorio al verificar el inicio de sesión.');
   }
+
+  syncLogoutButtonVisibility(
+    { currentUser: options.user || authObj?.currentUser || { uid: cleanUid } },
+    options.docRef
+  );
 
   const db = options.db ?? options.firestoreDb ?? null;
   const fsMod = options.firestoreModule ?? null;
@@ -338,42 +407,81 @@ export async function verifyUserOnboardingOnSignIn(uid, options = {}) {
   const storage =
     options.storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
 
+  let cachedData = null;
+  if (storage && typeof storage.getItem === 'function') {
+    try {
+      const raw = storage.getItem(`${FIRESTORE_USERS_CACHE_PREFIX}${cleanUid}`);
+      if (raw) cachedData = JSON.parse(raw);
+    } catch {
+      cachedData = null;
+    }
+  }
+
+  const cleanEmail = String(
+    options.user?.email || authObj?.currentUser?.email || cachedData?.email || ''
+  )
+    .trim()
+    .toLowerCase();
+
+  const localCompletedFlag =
+    storage && typeof storage.getItem === 'function'
+      ? storage.getItem(`pisto_onboarding_completed_${cleanUid}`) === 'true' ||
+        (cleanEmail !== '' && storage.getItem(`pisto_onboarding_completed_${cleanEmail}`) === 'true')
+      : false;
+
   let userData = null;
 
   if (db && typeof docFn === 'function' && typeof getDocFn === 'function') {
-    const userRef = docFn(db, 'users', cleanUid);
-    const snap = await getDocFn(userRef);
-    if (snap && typeof snap.exists === 'function' && snap.exists()) {
-      userData = snap.data() || {};
-    } else if (typeof setDocFn === 'function') {
-      const created = buildDefaultUserDocument({
-        ...(options.user || {}),
-        uid: cleanUid,
-        hasCompletedOnboarding: false,
-      });
-      await setDocFn(userRef, created, { merge: true });
-      userData = created;
+    try {
+      const userRef = docFn(db, 'users', cleanUid);
+      const snap = await getDocFn(userRef);
+      if (snap && typeof snap.exists === 'function' && snap.exists()) {
+        userData = snap.data() || {};
+      } else if (typeof setDocFn === 'function') {
+        const created = buildDefaultUserDocument({
+          ...(options.user || authObj?.currentUser || {}),
+          uid: cleanUid,
+          hasCompletedOnboarding: Boolean(
+            cachedData?.hasCompletedOnboarding === true || localCompletedFlag
+          ),
+        });
+        userData = created;
+        try {
+          await setDocFn(userRef, created, { merge: true });
+        } catch {
+          // Respaldo Local-First
+        }
+      }
+    } catch {
+      // Fallback a caché local
     }
   }
 
-  if (!userData && storage && typeof storage.getItem === 'function') {
-    try {
-      const raw = storage.getItem(`${FIRESTORE_USERS_CACHE_PREFIX}${cleanUid}`);
-      if (raw) userData = JSON.parse(raw);
-    } catch {
-      userData = null;
-    }
+  if (!userData && cachedData) {
+    userData = cachedData;
   }
+
+  const isCompleted = Boolean(
+    userData?.hasCompletedOnboarding === true ||
+      cachedData?.hasCompletedOnboarding === true ||
+      localCompletedFlag
+  );
 
   const profile = createUserProfile({
-    ...(options.user || {}),
+    ...(options.user || authObj?.currentUser || {}),
     ...(userData || {}),
     uid: cleanUid,
-    hasCompletedOnboarding: userData?.hasCompletedOnboarding === true,
+    hasCompletedOnboarding: isCompleted,
   });
 
   if (storage && typeof storage.setItem === 'function') {
     storage.setItem(`${FIRESTORE_USERS_CACHE_PREFIX}${cleanUid}`, JSON.stringify(profile));
+    if (isCompleted) {
+      storage.setItem(`pisto_onboarding_completed_${cleanUid}`, 'true');
+      if (cleanEmail) {
+        storage.setItem(`pisto_onboarding_completed_${cleanEmail}`, 'true');
+      }
+    }
   }
 
   if (profile.hasCompletedOnboarding === true) {
@@ -382,14 +490,16 @@ export async function verifyUserOnboardingOnSignIn(uid, options = {}) {
       profile,
       hasCompletedOnboarding: true,
       wizardInitialized: false,
+      shouldShowWizard: false,
     };
   }
 
   if (options.wizard) {
+    const userTarget = options.user || authObj?.currentUser || { uid: cleanUid };
     if (typeof options.wizard.checkAndStartForUser === 'function') {
-      await options.wizard.checkAndStartForUser(options.user || { uid: cleanUid }, profile, options);
+      await options.wizard.checkAndStartForUser(userTarget, profile, options);
     } else if (typeof options.wizard.open === 'function') {
-      options.wizard.open({ user: options.user || { uid: cleanUid }, profile });
+      options.wizard.open({ user: userTarget, profile });
     }
   }
 
@@ -397,12 +507,13 @@ export async function verifyUserOnboardingOnSignIn(uid, options = {}) {
     profile,
     hasCompletedOnboarding: false,
     wizardInitialized: true,
+    shouldShowWizard: true,
   };
 }
 
 /**
  * Limpieza segura en Cierre de Sesión (`Logout`):
- * Remueve cualquier modal del Wizard montado en el DOM y resetea los estados locales.
+ * Remueve cualquier modal del Wizard montado en el DOM, oculta el botón de Cerrar Sesión y resetea los estados locales.
  *
  * @param {object} [options]
  * @param {any} [options.wizard]
@@ -416,6 +527,8 @@ export function cleanupOnboardingOnLogout(options = {}) {
   } else {
     removeOnboardingWizardFromDom(options.docRef);
   }
+
+  syncLogoutButtonVisibility({ currentUser: null }, options.docRef);
 
   if (options.state && typeof options.state === 'object') {
     if (options.state.settings && typeof options.state.settings === 'object') {

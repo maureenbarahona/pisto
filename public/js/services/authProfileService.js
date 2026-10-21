@@ -280,23 +280,58 @@ export async function completeUserOnboarding(uid, options = {}) {
   const country = SUPPORTED_COUNTRIES.some((c) => c.code === options.country)
     ? String(options.country)
     : 'HN';
+  const cleanEmail = String(options.email || '').trim().toLowerCase();
   const nowIso = new Date().toISOString();
-
-  if (options.authService && typeof options.authService.saveUserProfile === 'function') {
-    return await options.authService.saveUserProfile(cleanUid, {
-      hasCompletedOnboarding: true,
-      defaultCurrency,
-      country,
-    });
-  }
 
   const payload = {
     uid: cleanUid,
+    ...(cleanEmail ? { email: cleanEmail } : {}),
     hasCompletedOnboarding: true,
     defaultCurrency,
     country,
     updatedAt: nowIso,
   };
+
+  const storage =
+    options.storage ??
+    options.authService?.getStorageAdapter?.() ??
+    (typeof localStorage !== 'undefined' ? localStorage : null);
+
+  let mergedLocalProfile = null;
+  if (storage && typeof storage.getItem === 'function' && typeof storage.setItem === 'function') {
+    const docKey = `${FIRESTORE_USERS_CACHE_PREFIX}${cleanUid}`;
+    let existing = {};
+    try {
+      const raw = storage.getItem(docKey);
+      if (raw) existing = JSON.parse(raw) || {};
+    } catch {
+      existing = {};
+    }
+    mergedLocalProfile = createUserProfile({
+      ...existing,
+      ...payload,
+      uid: cleanUid,
+      hasCompletedOnboarding: true,
+    });
+    storage.setItem(docKey, JSON.stringify(mergedLocalProfile));
+    storage.setItem(`pisto_onboarding_completed_${cleanUid}`, 'true');
+    const resolvedEmail = cleanEmail || String(mergedLocalProfile.email || '').trim().toLowerCase();
+    if (resolvedEmail) {
+      storage.setItem(`pisto_onboarding_completed_${resolvedEmail}`, 'true');
+    }
+  }
+
+  if (options.authService && typeof options.authService.saveUserProfile === 'function') {
+    try {
+      return await options.authService.saveUserProfile(cleanUid, {
+        hasCompletedOnboarding: true,
+        defaultCurrency,
+        country,
+      });
+    } catch {
+      return mergedLocalProfile || createUserProfile(payload);
+    }
+  }
 
   if (
     options.firestoreDb &&
@@ -319,30 +354,15 @@ export async function completeUserOnboarding(uid, options = {}) {
       }
     }
     if (!updated && typeof options.firestoreModule.setDoc === 'function') {
-      await options.firestoreModule.setDoc(userDocRef, payload, { merge: true });
+      try {
+        await options.firestoreModule.setDoc(userDocRef, payload, { merge: true });
+      } catch {
+        // Fallback Local-First ya guardado en storage
+      }
     }
   }
 
-  const storage = options.storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
-  if (storage && typeof storage.getItem === 'function' && typeof storage.setItem === 'function') {
-    const docKey = `${FIRESTORE_USERS_CACHE_PREFIX}${cleanUid}`;
-    let existing = {};
-    try {
-      const raw = storage.getItem(docKey);
-      if (raw) existing = JSON.parse(raw) || {};
-    } catch {
-      existing = {};
-    }
-    const merged = createUserProfile({
-      ...existing,
-      ...payload,
-      uid: cleanUid,
-    });
-    storage.setItem(docKey, JSON.stringify(merged));
-    return merged;
-  }
-
-  return createUserProfile(payload);
+  return mergedLocalProfile || createUserProfile(payload);
 }
 
 /**
@@ -555,10 +575,25 @@ export class FirebaseAuthProfileService {
   }
 
   async init() {
-    const { app, config } = await initializeFirebaseApp({
+    let { app, config } = await initializeFirebaseApp({
       storage: this.getStorageAdapter(),
     });
     this.firebaseApp = app;
+
+    if (!isLiveFirebaseCredentials(config) && typeof window !== 'undefined' && typeof fetch === 'function') {
+      try {
+        const res = await fetch('/api/config/firebase');
+        if (res.ok) {
+          const data = await res.json();
+          if (data?.config && isValidFirebaseConfig(data.config)) {
+            globalThis.__PISTO_FIREBASE_CONFIG__ = data.config;
+            config = this.getFirebaseConfig();
+          }
+        }
+      } catch {
+        // Ignore fetch errors in offline mode
+      }
+    }
 
     if (isLiveFirebaseCredentials(config) && typeof window !== 'undefined') {
       try {
@@ -592,13 +627,34 @@ export class FirebaseAuthProfileService {
                 emailVerified: Boolean(fbUser.emailVerified),
               };
               this.currentUser = authUser;
+              this.setItem(LOCAL_AUTH_SESSION_KEY, JSON.stringify(authUser));
               this.currentProfile = await this.loadUserProfile(authUser.uid, {
                 email: authUser.email,
                 name: authUser.displayName,
               });
             } else {
-              this.currentUser = null;
-              this.currentProfile = null;
+              const localSessionRaw = this.getItem(LOCAL_AUTH_SESSION_KEY);
+              let restoredLocalUser = null;
+              if (localSessionRaw) {
+                try {
+                  const parsedLocal = JSON.parse(localSessionRaw);
+                  if (parsedLocal && parsedLocal.uid) {
+                    restoredLocalUser = parsedLocal;
+                  }
+                } catch {
+                  restoredLocalUser = null;
+                }
+              }
+              if (restoredLocalUser) {
+                this.currentUser = restoredLocalUser;
+                this.currentProfile = await this.loadUserProfile(restoredLocalUser.uid, {
+                  email: restoredLocalUser.email,
+                  name: restoredLocalUser.displayName,
+                });
+              } else {
+                this.currentUser = null;
+                this.currentProfile = null;
+              }
             }
             this.notifyListeners();
             if (!resolvedOnce) {
@@ -731,9 +787,24 @@ export class FirebaseAuthProfileService {
    */
   async syncGoogleUserWithFirestore(user) {
     const uid = String(user.uid || '').trim();
+    const cleanEmail = String(user.email || '').trim().toLowerCase();
     const nowIso = new Date().toISOString();
     const initialWorkspaceId = uid || user.email || `ws_${uid}`;
     const docKey = `${FIRESTORE_USERS_CACHE_PREFIX}${uid}`;
+    const completedKey = `pisto_onboarding_completed_${uid}`;
+    const emailCompletedKey = cleanEmail ? `pisto_onboarding_completed_${cleanEmail}` : '';
+    let cachedProfile = null;
+    try {
+      const rawCache = this.getItem(docKey);
+      if (rawCache) cachedProfile = JSON.parse(rawCache);
+    } catch {
+      cachedProfile = null;
+    }
+    const localCompletedFlag = Boolean(
+      cachedProfile?.hasCompletedOnboarding === true ||
+        this.getItem(completedKey) === 'true' ||
+        (emailCompletedKey && this.getItem(emailCompletedKey) === 'true')
+    );
 
     if (this.firestoreDb && this.firestoreModule) {
       try {
@@ -742,6 +813,9 @@ export class FirebaseAuthProfileService {
 
         if (snap.exists()) {
           const existingData = snap.data() || {};
+          const resolvedCompleted = Boolean(
+            existingData.hasCompletedOnboarding === true || localCompletedFlag
+          );
           const hasMissingFields =
             !existingData.uid ||
             !existingData.displayName ||
@@ -749,7 +823,9 @@ export class FirebaseAuthProfileService {
             typeof existingData.photoURL !== 'string' ||
             !existingData.createdAt ||
             !existingData.workspaceId ||
-            existingData.workspaceId === 'ws_default';
+            existingData.workspaceId === 'ws_default' ||
+            typeof existingData.hasCompletedOnboarding !== 'boolean' ||
+            existingData.hasCompletedOnboarding !== resolvedCompleted;
 
           let profile = createUserProfile({
             ...existingData,
@@ -762,6 +838,7 @@ export class FirebaseAuthProfileService {
             photoURL: existingData.photoURL || user.photoURL || '',
             createdAt: existingData.createdAt || nowIso,
             updatedAt: nowIso,
+            hasCompletedOnboarding: resolvedCompleted,
             workspaceId:
               existingData.workspaceId && existingData.workspaceId !== 'ws_default'
                 ? existingData.workspaceId
@@ -770,12 +847,21 @@ export class FirebaseAuthProfileService {
 
           profile = await this.resolveSharedWorkspaceForProfile(profile);
 
-          if (hasMissingFields || profile.workspaceId !== existingData.workspaceId) {
-            await this.firestoreModule.setDoc(userDocRef, profile, { merge: true });
+          if (profile.hasCompletedOnboarding === true) {
+            this.setItem(completedKey, 'true');
+            if (emailCompletedKey) this.setItem(emailCompletedKey, 'true');
           }
-
           this.setItem(docKey, JSON.stringify(profile));
           this.currentProfile = profile;
+
+          if (hasMissingFields || profile.workspaceId !== existingData.workspaceId) {
+            try {
+              await this.firestoreModule.setDoc(userDocRef, profile, { merge: true });
+            } catch {
+              // Respaldo Local-First ya guardado en caché
+            }
+          }
+
           return profile;
         }
 
@@ -789,16 +875,29 @@ export class FirebaseAuthProfileService {
           defaultCurrency: 'HNL',
           personalViewMode: false,
           filterByDefaultCurrency: true,
-          hasCompletedOnboarding: false,
+          hasCompletedOnboarding: localCompletedFlag ? true : false,
           workspaceId: initialWorkspaceId,
           createdAt: nowIso,
           updatedAt: nowIso,
         });
 
         newProfile = await this.resolveSharedWorkspaceForProfile(newProfile);
-        await this.firestoreModule.setDoc(userDocRef, newProfile, { merge: true });
+        if (newProfile.hasCompletedOnboarding === true) {
+          this.setItem(completedKey, 'true');
+          if (emailCompletedKey) this.setItem(emailCompletedKey, 'true');
+        }
         this.setItem(docKey, JSON.stringify(newProfile));
         this.currentProfile = newProfile;
+
+        try {
+          await this.firestoreModule.setDoc(
+            userDocRef,
+            { ...newProfile, hasCompletedOnboarding: newProfile.hasCompletedOnboarding === true },
+            { merge: true }
+          );
+        } catch {
+          // Respaldo Local-First ya guardado en caché
+        }
         return newProfile;
       } catch {
         // Fallback a caché local
@@ -936,7 +1035,20 @@ export class FirebaseAuthProfileService {
     return this.signInWithDemoMode(customDemoAccount);
   }
 
-  async signInOrRegisterWithEmail(params) {
+  async signInOrRegisterWithEmail(params, maybePassword = '', maybeMode = '', maybeDisplayName = '') {
+    const normalizedParams =
+      typeof params === 'string'
+        ? {
+            email: params,
+            password: maybePassword,
+            isRegister: maybeMode === 'register' || maybeMode === true,
+            displayName: maybeDisplayName,
+          }
+        : {
+            ...(params || {}),
+            isRegister: Boolean(params?.isRegister || params?.mode === 'register'),
+          };
+    params = normalizedParams;
     const cleanEmail = String(params?.email || '').trim().toLowerCase();
     const password = String(params?.password || '');
 
@@ -945,6 +1057,14 @@ export class FirebaseAuthProfileService {
     }
     if (password.length < 6) {
       throw new Error('La contraseña debe tener al menos 6 caracteres.');
+    }
+
+    if (!this.firebaseAuth && typeof window !== 'undefined') {
+      try {
+        await this.ensureFirebaseAuthSdkLoaded();
+      } catch {
+        // Fallback a autenticación Local-First
+      }
     }
 
     if (this.firebaseAuth && this.authModule) {
@@ -1249,6 +1369,7 @@ export class FirebaseAuthProfileService {
 
   async loadUserProfile(uid, defaults = {}) {
     const docKey = `${FIRESTORE_USERS_CACHE_PREFIX}${uid}`;
+    const completedKey = `pisto_onboarding_completed_${uid}`;
     let cachedProfile = null;
     const cachedRaw = this.getItem(docKey);
     if (cachedRaw) {
@@ -1258,6 +1379,28 @@ export class FirebaseAuthProfileService {
         cachedProfile = null;
       }
     }
+    const cleanEmail = String(
+      defaults.email || cachedProfile?.email || this.currentUser?.email || ''
+    )
+      .trim()
+      .toLowerCase();
+    const emailCompletedKey = cleanEmail ? `pisto_onboarding_completed_${cleanEmail}` : '';
+
+    if (defaults.isRegister === true) {
+      this.removeItem(completedKey);
+      if (emailCompletedKey) {
+        this.removeItem(emailCompletedKey);
+      }
+    }
+
+    const localCompletedFlag =
+      defaults.isRegister === true
+        ? false
+        : Boolean(
+            cachedProfile?.hasCompletedOnboarding === true ||
+              this.getItem(completedKey) === 'true' ||
+              (emailCompletedKey && this.getItem(emailCompletedKey) === 'true')
+          );
 
     if (this.firestoreDb && this.firestoreModule) {
       try {
@@ -1268,10 +1411,7 @@ export class FirebaseAuthProfileService {
           const resolvedCompleted =
             defaults.isRegister === true
               ? false
-              : Boolean(
-                  data.hasCompletedOnboarding === true ||
-                    cachedProfile?.hasCompletedOnboarding === true
-                );
+              : Boolean(data.hasCompletedOnboarding === true || localCompletedFlag);
           let profile = createUserProfile({
             ...defaults,
             ...data,
@@ -1279,23 +1419,33 @@ export class FirebaseAuthProfileService {
             hasCompletedOnboarding: resolvedCompleted,
           });
           profile = await this.resolveSharedWorkspaceForProfile(profile);
-          if (
-            profile.workspaceId !== data.workspaceId ||
-            profile.hasCompletedOnboarding !== data.hasCompletedOnboarding
-          ) {
-            await this.firestoreModule.setDoc(userDocRef, profile, { merge: true });
+          if (resolvedCompleted) {
+            this.setItem(completedKey, 'true');
+            if (emailCompletedKey) this.setItem(emailCompletedKey, 'true');
           }
           this.setItem(docKey, JSON.stringify(profile));
           this.currentProfile = profile;
+          if (
+            profile.workspaceId !== data.workspaceId ||
+            profile.hasCompletedOnboarding !== data.hasCompletedOnboarding ||
+            typeof data.hasCompletedOnboarding !== 'boolean'
+          ) {
+            try {
+              await this.firestoreModule.setDoc(
+                userDocRef,
+                { ...profile, hasCompletedOnboarding: resolvedCompleted },
+                { merge: true }
+              );
+            } catch {
+              // Respaldo Local-First ya guardado
+            }
+          }
           return profile;
         }
         const initialCompleted =
           defaults.isRegister === true
             ? false
-            : Boolean(
-                defaults.hasCompletedOnboarding === true ||
-                  cachedProfile?.hasCompletedOnboarding === true
-              );
+            : Boolean(defaults.hasCompletedOnboarding === true || localCompletedFlag);
         let initialProfile = createUserProfile({
           uid,
           email: defaults.email || cachedProfile?.email || this.currentUser?.email || '',
@@ -1322,9 +1472,17 @@ export class FirebaseAuthProfileService {
           createdAt: defaults.createdAt || cachedProfile?.createdAt,
         });
         initialProfile = await this.resolveSharedWorkspaceForProfile(initialProfile);
-        await this.firestoreModule.setDoc(userDocRef, initialProfile, { merge: true });
+        if (initialCompleted) {
+          this.setItem(completedKey, 'true');
+          if (emailCompletedKey) this.setItem(emailCompletedKey, 'true');
+        }
         this.setItem(docKey, JSON.stringify(initialProfile));
         this.currentProfile = initialProfile;
+        try {
+          await this.firestoreModule.setDoc(userDocRef, initialProfile, { merge: true });
+        } catch {
+          // Respaldo Local-First ya guardado
+        }
         return initialProfile;
       } catch {
         // Fallback a caché local
@@ -1333,7 +1491,9 @@ export class FirebaseAuthProfileService {
 
     if (cachedProfile) {
       const resolvedCompleted =
-        defaults.isRegister === true ? false : Boolean(cachedProfile.hasCompletedOnboarding === true);
+        defaults.isRegister === true
+          ? false
+          : Boolean(cachedProfile.hasCompletedOnboarding === true || localCompletedFlag);
       let profile = createUserProfile({
         ...defaults,
         ...cachedProfile,
@@ -1341,11 +1501,19 @@ export class FirebaseAuthProfileService {
         hasCompletedOnboarding: resolvedCompleted,
       });
       profile = await this.resolveSharedWorkspaceForProfile(profile);
+      if (resolvedCompleted) {
+        this.setItem(completedKey, 'true');
+        if (emailCompletedKey) this.setItem(emailCompletedKey, 'true');
+      }
       this.setItem(docKey, JSON.stringify(profile));
       this.currentProfile = profile;
       return profile;
     }
 
+    const freshCompleted =
+      defaults.isRegister === true
+        ? false
+        : Boolean(defaults.hasCompletedOnboarding === true || localCompletedFlag);
     let freshProfile = createUserProfile({
       uid,
       email: defaults.email || this.currentUser?.email || '',
@@ -1356,11 +1524,15 @@ export class FirebaseAuthProfileService {
       defaultCurrency: defaults.defaultCurrency || 'HNL',
       personalViewMode: defaults.personalViewMode ?? false,
       filterByDefaultCurrency: defaults.filterByDefaultCurrency ?? true,
-      hasCompletedOnboarding: defaults.hasCompletedOnboarding === true ? true : false,
+      hasCompletedOnboarding: freshCompleted,
       workspaceId: defaults.workspaceId,
       createdAt: defaults.createdAt,
     });
     freshProfile = await this.resolveSharedWorkspaceForProfile(freshProfile);
+    if (freshCompleted) {
+      this.setItem(completedKey, 'true');
+      if (emailCompletedKey) this.setItem(emailCompletedKey, 'true');
+    }
     this.setItem(docKey, JSON.stringify(freshProfile));
     this.currentProfile = freshProfile;
     return freshProfile;
@@ -1379,6 +1551,16 @@ export class FirebaseAuthProfileService {
     });
 
     const docKey = `${FIRESTORE_USERS_CACHE_PREFIX}${uid}`;
+    const completedKey = `pisto_onboarding_completed_${uid}`;
+    const cleanEmail = String(updatedProfile.email || this.currentUser?.email || '')
+      .trim()
+      .toLowerCase();
+    if (updatedProfile.hasCompletedOnboarding === true) {
+      this.setItem(completedKey, 'true');
+      if (cleanEmail) {
+        this.setItem(`pisto_onboarding_completed_${cleanEmail}`, 'true');
+      }
+    }
     this.setItem(docKey, JSON.stringify(updatedProfile));
     this.currentProfile = updatedProfile;
 

@@ -2878,7 +2878,7 @@ describe('ImportAccountModal Unification (accounts[]), Top Filter Removal & Head
         `El botón #btn-profile-signout debe estar directamente en el Header en ${htmlFile}`
       );
       assert.ok(
-        headerMatch[0].includes('class="header-logout-btn"'),
+        headerMatch[0].includes('header-logout-btn'),
         `El botón Cerrar Sesión debe usar .header-logout-btn en ${htmlFile}`
       );
 
@@ -2923,3 +2923,408 @@ describe('ImportAccountModal Unification (accounts[]), Top Filter Removal & Head
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// 25. Visibilidad Condicional de "Cerrar Sesión", Extractor Adaptativo (accountsList),
+//     Bandera Onboarding en Firestore (users/{uid}) y Footer de la Aplicación
+// ---------------------------------------------------------------------------
+describe('Conditional Logout Visibility, Adaptive Account Extractor (accountsList), Onboarding Flag & Footer', () => {
+  function makeMemStorage() {
+    const store = new Map();
+    return {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    };
+  }
+
+  it('1. muestra el botón "Cerrar Sesión" ÚNICAMENTE cuando auth.currentUser !== null y lo oculta (display: none) sin sesión activa', async () => {
+    const fs = await import('node:fs/promises');
+    const { syncLogoutButtonVisibility } = await import('../src/js/services/auth.js');
+
+    for (const htmlFile of ['index.html', 'public/index.html']) {
+      const html = await fs.readFile(new URL(`../${htmlFile}`, import.meta.url), 'utf8');
+      const btnMatch = html.match(/<button[^>]*id="btn-profile-signout"[^>]*>/);
+      assert.ok(btnMatch, `Debe existir #btn-profile-signout en ${htmlFile}`);
+      assert.ok(
+        btnMatch[0].includes('display: none') || btnMatch[0].includes('hidden'),
+        `#btn-profile-signout debe estar oculto por defecto sin sesión en ${htmlFile}`
+      );
+    }
+
+    // Simulamos el botón en el DOM
+    const fakeSignoutBtn = {
+      hidden: false,
+      style: { display: '' },
+      classes: new Set(),
+      attributes: new Map(),
+      classList: {
+        add(cls) {
+          fakeSignoutBtn.classes.add(cls);
+        },
+        remove(cls) {
+          fakeSignoutBtn.classes.delete(cls);
+        },
+        contains(cls) {
+          return fakeSignoutBtn.classes.has(cls);
+        },
+      },
+      setAttribute(k, v) {
+        fakeSignoutBtn.attributes.set(k, v);
+      },
+      removeAttribute(k) {
+        fakeSignoutBtn.attributes.delete(k);
+      },
+    };
+    const fakeDoc = {
+      getElementById(id) {
+        return id === 'btn-profile-signout' ? fakeSignoutBtn : null;
+      },
+    };
+
+    // Caso A: Sin sesión iniciada (auth.currentUser === null) -> oculto por completo (display: none)
+    const visibleWhenLoggedOut = syncLogoutButtonVisibility({ currentUser: null }, fakeDoc);
+    assert.equal(visibleWhenLoggedOut, false);
+    assert.equal(fakeSignoutBtn.style.display, 'none');
+    assert.equal(fakeSignoutBtn.hidden, true);
+    assert.equal(fakeSignoutBtn.classList.contains('is-hidden'), true);
+
+    // Caso B: Sesión activa (auth.currentUser !== null) -> visible
+    const visibleWhenLoggedIn = syncLogoutButtonVisibility(
+      { currentUser: { uid: 'uid_active_123', email: 'mau@pisto.hn' } },
+      fakeDoc
+    );
+    assert.equal(visibleWhenLoggedIn, true);
+    assert.equal(fakeSignoutBtn.style.display, '');
+    assert.equal(fakeSignoutBtn.hidden, false);
+    assert.equal(fakeSignoutBtn.classList.contains('is-hidden'), false);
+  });
+
+  it('2. extrae siempre accountsList (agnóstico de banco/formato), infiere formatos nuevos por contexto y aprende patrones adaptativos', async () => {
+    const {
+      ACCOUNT_EXTRACTOR_SYSTEM_PROMPT,
+      EXTRACTED_ACCOUNT_JSON_SCHEMA,
+      buildAccountExtractorSystemPrompt,
+      learnAdaptiveAccountPattern,
+      getLearnedBankPatterns,
+      inferAccountsFromUnstructuredText,
+      validateExtractedAccount,
+    } = await import('../src/js/services/accountExtractor.js');
+
+    // Prompt y esquema exigen accountsList con los 5 campos obligatorios
+    assert.ok(ACCOUNT_EXTRACTOR_SYSTEM_PROMPT.includes('accountsList'));
+    assert.ok(EXTRACTED_ACCOUNT_JSON_SCHEMA.properties.accountsList);
+    assert.ok(EXTRACTED_ACCOUNT_JSON_SCHEMA.required.includes('accountsList'));
+
+    // Inferencia por contexto de negocio en un formato nuevo / no reconocido previamente
+    const unrecognizedBankOcr = [
+      'Cooperativa Sagrada Familia - Portal Digital',
+      'Ahorro Navideño Preferencial',
+      'No. Producto: 880011223344',
+      'Disponible a la fecha: L 14,890.75',
+      'Tarjeta Visa Cooperativa **** 7788',
+      'Saldo al corte: $ 420.50',
+    ].join('\n');
+
+    const inferredList = inferAccountsFromUnstructuredText(unrecognizedBankOcr);
+    assert.ok(Array.isArray(inferredList));
+    assert.ok(inferredList.length >= 2);
+    assert.equal(inferredList[0].accountNumber, '880011223344');
+    assert.equal(inferredList[0].currency, 'HNL');
+    assert.equal(inferredList[0].currentBalance, 14890.75);
+    assert.equal(inferredList[1].accountNumber, '7788');
+    assert.equal(inferredList[1].currency, 'USD');
+    assert.equal(inferredList[1].currentBalance, 420.5);
+
+    const validated = validateExtractedAccount({
+      bankName: 'Cooperativa Sagrada Familia',
+      accountsList: inferredList,
+    });
+    assert.ok(Array.isArray(validated.accountsList));
+    assert.equal(validated.accountsList.length, inferredList.length);
+    assert.equal(validated.accountsList[0].currentBalance, 14890.75);
+
+    // Aprendizaje adaptativo al confirmar/editar cuenta
+    const memStorage = makeMemStorage();
+    learnAdaptiveAccountPattern(
+      {
+        bankName: 'Cooperativa Sagrada Familia',
+        accountType: 'Ahorro Navideño Preferencial',
+        currency: 'HNL',
+      },
+      unrecognizedBankOcr,
+      memStorage
+    );
+    const learned = getLearnedBankPatterns(memStorage);
+    assert.equal(learned.length, 1);
+    assert.equal(learned[0].bankName, 'Cooperativa Sagrada Familia');
+    const adaptivePrompt = buildAccountExtractorSystemPrompt({ storage: memStorage });
+    assert.ok(adaptivePrompt.includes('Cooperativa Sagrada Familia'));
+    assert.ok(adaptivePrompt.includes('Ahorro Navideño Preferencial'));
+  });
+
+  it('3. persiste hasCompletedOnboarding: false al registrar usuario y actualiza hasCompletedOnboarding: true con updateDoc al finalizar el Wizard', async () => {
+    const {
+      OnboardingWizard,
+      verifyUserOnboardingOnSignIn,
+    } = await import('../src/js/components/OnboardingWizard.js');
+
+    const memStorage = makeMemStorage();
+    const authService = new FirebaseAuthProfileService(memStorage);
+
+    // Al registrar un nuevo usuario en users/{uid}, escribe explícitamente hasCompletedOnboarding: false
+    const regResult = await authService.signInOrRegisterWithEmail(
+      'nuevo.usuario@pisto.hn',
+      'Pass123!',
+      'register',
+      'Nuevo Usuario'
+    );
+    assert.equal(regResult.profile.hasCompletedOnboarding, false);
+
+    // Simulamos llamadas reales al SDK modular de Firestore: doc(db, "users", auth.currentUser.uid) + updateDoc(...)
+    const firestoreCalls = [];
+    const fakeDb = { name: 'firestore-pisto' };
+    const fakeAuth = {
+      currentUser: {
+        uid: regResult.user.uid,
+        email: regResult.user.email,
+      },
+    };
+    const fakeFirestoreModule = {
+      doc(db, col, id) {
+        firestoreCalls.push({ op: 'doc', col, id });
+        return { db, path: `${col}/${id}` };
+      },
+      async updateDoc(ref, data) {
+        firestoreCalls.push({ op: 'updateDoc', path: ref.path, data });
+      },
+      async getDoc(ref) {
+        return {
+          exists: () => true,
+          data: () => ({
+            uid: regResult.user.uid,
+            email: regResult.user.email,
+            hasCompletedOnboarding: true,
+          }),
+        };
+      },
+    };
+
+    authService.firebaseAuth = fakeAuth;
+    authService.firestoreDb = fakeDb;
+    authService.firestoreModule = fakeFirestoreModule;
+
+    const state = {
+      accounts: [],
+      transactions: [],
+      categories: [],
+      budgets: {},
+      settings: { baseCurrency: 'HNL', workspaceId: regResult.profile.workspaceId },
+    };
+
+    const wizard = new OnboardingWizard({
+      authService,
+      getState: () => state,
+    });
+    const finishRes = await wizard.finish();
+    assert.equal(finishRes.hasCompletedOnboarding, true);
+
+    const updateCall = firestoreCalls.find((c) => c.op === 'updateDoc');
+    assert.ok(updateCall, 'Debe invocarse updateDoc sobre users/{uid}');
+    assert.equal(updateCall.path, `users/${regResult.user.uid}`);
+    assert.deepEqual(updateCall.data, { hasCompletedOnboarding: true });
+
+    // Al iniciar sesión nuevamente, lee users/{uid} y si hasCompletedOnboarding === true NO muestra el Wizard
+    const signInCheck = await verifyUserOnboardingOnSignIn({
+      auth: fakeAuth,
+      db: fakeDb,
+      firestoreModule: fakeFirestoreModule,
+      storage: memStorage,
+    });
+    assert.equal(signInCheck.hasCompletedOnboarding, true);
+    assert.equal(signInCheck.shouldShowWizard, false);
+
+    wizard.open();
+    assert.equal(wizard.isOpen, false, 'No debe abrir el Wizard si hasCompletedOnboarding === true');
+  });
+
+  it('4. actualiza el <footer> con el texto exacto y el enlace a https://maureenbarahona.foo con target="_blank" rel="noopener"', async () => {
+    const fs = await import('node:fs/promises');
+
+    for (const htmlFile of ['index.html', 'public/index.html']) {
+      const html = await fs.readFile(new URL(`../${htmlFile}`, import.meta.url), 'utf8');
+      const footerMatch = html.match(/<footer[\s\S]*?<\/footer>/);
+      assert.ok(footerMatch, `Debe existir <footer> en ${htmlFile}`);
+      const footerHtml = footerMatch[0];
+      assert.ok(
+        footerHtml.includes(
+          'Hecho con Gemini 2.5 Flash / Agent Development Kit · Prompt por Maureen Barahona · Website:'
+        ),
+        `El footer en ${htmlFile} debe incluir el texto exacto de créditos`
+      );
+      assert.ok(
+        footerHtml.includes(
+          '<a href="https://maureenbarahona.foo" target="_blank" rel="noopener">https://maureenbarahona.foo</a>'
+        ),
+        `El footer en ${htmlFile} debe incluir el enlace con target="_blank" rel="noopener"`
+      );
+    }
+  });
+
+  it('5. cierra el modal al dar clic en "🚀 Comenzar a usar Pisto" y persiste hasCompletedOnboarding=true incluso si Firestore rechaza updateDoc y setDoc', async () => {
+    const {
+      OnboardingWizard,
+      shouldTriggerOnboarding,
+      verifyUserOnboardingOnSignIn,
+    } = await import('../src/js/app.js');
+    const { FirebaseAuthProfileService } = await import('../src/js/services/auth.js');
+
+    const memStore = new Map();
+    const memStorage = {
+      getItem: (k) => (memStore.has(k) ? memStore.get(k) : null),
+      setItem: (k, v) => memStore.set(k, String(v)),
+      removeItem: (k) => memStore.delete(k),
+    };
+
+    const authService = new FirebaseAuthProfileService(memStorage);
+    const uid = 'uid_resilient_wizard_user';
+    const email = 'resilient@pisto.hn';
+
+    // Simulamos un entorno donde Firestore rechaza tanto updateDoc como setDoc (ej. permisos de reglas en Cloud Firestore)
+    const failingFirestoreModule = {
+      doc: (db, col, id) => ({ db, path: `${col}/${id}` }),
+      updateDoc: async () => {
+        const err = new Error('Missing or insufficient permissions.');
+        err.code = 'permission-denied';
+        throw err;
+      },
+      setDoc: async () => {
+        const err = new Error('Missing or insufficient permissions.');
+        err.code = 'permission-denied';
+        throw err;
+      },
+      getDoc: async () => {
+        const err = new Error('Missing or insufficient permissions.');
+        err.code = 'permission-denied';
+        throw err;
+      },
+    };
+
+    authService.firebaseAuth = { currentUser: { uid, email } };
+    authService.firestoreDb = { name: 'firestore-restricted' };
+    authService.firestoreModule = failingFirestoreModule;
+    authService.currentUser = { uid, email, displayName: 'Usuario Resiliente' };
+    authService.currentProfile = {
+      uid,
+      email,
+      name: 'Usuario Resiliente',
+      country: 'HN',
+      defaultCurrency: 'HNL',
+      workspaceId: `ws_${uid}`,
+      hasCompletedOnboarding: false,
+    };
+
+    const state = {
+      accounts: [],
+      transactions: [],
+      categories: [],
+      budgets: {},
+      settings: {
+        baseCurrency: 'HNL',
+        workspaceId: `ws_${uid}`,
+        currentUid: uid,
+      },
+    };
+
+    let completedCallbackFired = false;
+    const wizard = new OnboardingWizard({
+      authService,
+      getState: () => state,
+      onComplete: ({ hasCompletedOnboarding }) => {
+        if (hasCompletedOnboarding === true) {
+          completedCallbackFired = true;
+        }
+      },
+    });
+
+    // Simulamos elemento dialog y botón de Paso 4 ("🚀 Comenzar a usar Pisto")
+    let finishBtnHandler = null;
+    const fakeFinishBtn = {
+      id: 'btn-onboarding-finish',
+      disabled: false,
+      setAttribute() {},
+      set onclick(fn) {
+        finishBtnHandler = fn;
+      },
+      get onclick() {
+        return finishBtnHandler;
+      },
+    };
+
+    let dialogRemoved = false;
+    wizard.dialogEl = {
+      open: true,
+      innerHTML: '',
+      close() {
+        this.open = false;
+      },
+      remove() {
+        dialogRemoved = true;
+      },
+      querySelector(sel) {
+        if (sel.includes('btn-onboarding-finish') || sel.includes('finish')) {
+          return fakeFinishBtn;
+        }
+        return null;
+      },
+      querySelectorAll() {
+        return [];
+      },
+    };
+
+    wizard.isOpen = true;
+    wizard.currentStepIndex = 3;
+    wizard.render();
+
+    assert.equal(typeof fakeFinishBtn.onclick, 'function', 'El botón final debe vincular onclick directo al renderizar Paso 4');
+
+    // Ejecutamos finish() tal como lo invoca el clic en "🚀 Comenzar a usar Pisto"
+    const updatedProfile = await wizard.finish({
+      buttonEl: fakeFinishBtn,
+      storage: memStorage,
+    });
+
+    assert.equal(updatedProfile.hasCompletedOnboarding, true);
+    assert.equal(wizard.isOpen, false, 'El modal debe cerrarse inmediatamente');
+    assert.equal(dialogRemoved, true, 'El modal debe removerse del DOM');
+    assert.equal(completedCallbackFired, true, 'El callback onComplete debe ejecutarse');
+    assert.equal(memStorage.getItem(`pisto_onboarding_completed_${uid}`), 'true');
+    assert.equal(memStorage.getItem(`pisto_onboarding_completed_${email}`), 'true');
+
+    // Simulamos recarga de página (F5) donde loadUserProfile vuelve a ejecutarse con Firestore fallando o devolviendo doc sin el flag
+    const reloadedAuthService = new FirebaseAuthProfileService(memStorage);
+    reloadedAuthService.firebaseAuth = { currentUser: { uid, email } };
+    reloadedAuthService.firestoreDb = { name: 'firestore-restricted' };
+    reloadedAuthService.firestoreModule = failingFirestoreModule;
+
+    const reloadedProfile = await reloadedAuthService.loadUserProfile(uid, { email });
+    assert.equal(
+      reloadedProfile.hasCompletedOnboarding,
+      true,
+      'Tras recargar la página, loadUserProfile debe conservar hasCompletedOnboarding === true'
+    );
+    assert.equal(shouldTriggerOnboarding(reloadedProfile), false);
+
+    const signInVerify = await verifyUserOnboardingOnSignIn({
+      uid,
+      user: { uid, email },
+      db: { name: 'firestore-restricted' },
+      firestoreModule: failingFirestoreModule,
+      storage: memStorage,
+    });
+    assert.equal(signInVerify.hasCompletedOnboarding, true);
+    assert.equal(signInVerify.shouldShowWizard, false);
+  });
+});
+
+
