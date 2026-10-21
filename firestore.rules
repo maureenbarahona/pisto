@@ -27,11 +27,13 @@ rules_version = '2';
 // Document ID: {workspaceId}
 // Fields:
 //   - workspaceId: string (required, immutable, 1..128 chars) - Unique workspace ID
+//   - inviteCode: string (optional/required, 4..32 chars) - Unique invitation code/token (e.g., 'PISTO-7X92')
 //   - ownerUid: string (required, immutable, 1..128 chars) - UID of the workspace creator
-//   - memberUids: list of strings (required, max 50 items) - UIDs of family members
-//   - memberEmails: list of strings (required, max 50 items) - Normalized emails of family members
-//   - createdAt: string (required, immutable, <= 40 chars) - ISO creation timestamp
-//   - updatedAt: string (required, <= 40 chars) - ISO update timestamp
+//   - members: list of strings (optional/required, max 50 items) - UIDs / emails of family members in the workspace
+//   - memberUids: list of strings (optional, max 50 items) - UIDs of family members
+//   - memberEmails: list of strings (optional, max 50 items) - Normalized emails of family members
+//   - createdAt: string (optional, immutable, <= 40 chars) - ISO creation timestamp
+//   - updatedAt: string (optional, <= 40 chars) - ISO update timestamp
 //
 // Collection: transactions (and subcollection /workspaces/{workspaceId}/transactions)
 // Document ID: {txId}
@@ -52,6 +54,32 @@ rules_version = '2';
 //   - note: string (optional, <= 160 chars) - Nota o concepto
 //   - date: string (required, <= 25 chars) - Fecha YYYY-MM-DD
 //   - createdAt: string (optional, immutable, <= 40 chars) - ISO creation timestamp
+//   - updatedAt: string (optional, <= 40 chars) - ISO update timestamp
+//
+// Collection: accounts (and subcollection /workspaces/{workspaceId}/accounts)
+// Document ID: {accountId}
+// Fields:
+//   - id: string (optional, immutable, <= 128 chars) - Account ID
+//   - uid: string (optional, <= 128 chars) - Owner UID alias
+//   - name: string (required on create/update, 1..80 chars) - Account or goal display name
+//   - type: string (optional/required, 1..32 chars, e.g., 'bank', 'cash', 'card', 'savings', 'debt') - Account type
+//   - institution: string (optional, <= 120 chars) - Financial institution name
+//   - accountNumber: string (optional, <= 64 chars) - Masked or last-4 account/card digits
+//   - currency: string (optional/required, 3..10 chars) - ISO currency code ('HNL', 'USD', etc.)
+//   - initialBalance: number (optional, -1000000000..1000000000) - Opening balance
+//   - targetAmount: number (optional, -1000000000..1000000000) - Savings goal or debt target
+//   - includeInTotal: bool (optional) - Whether included in net worth calculation
+//   - color: string (optional, <= 32 chars) - UI accent color
+//   - icon: string (optional, <= 32 chars) - UI icon key
+//   - isArchived: bool (optional) - Soft-delete / archive flag for accounts with historical transactions
+//   - status: string (optional, enum: 'active', 'archived') - Account lifecycle status
+//   - workspaceId: string (optional, <= 128 chars) - Shared family workspace ID
+//   - createdByUid: string (optional, <= 128 chars) - Creator Firebase Auth UID
+//   - createdByEmail: string (optional, <= 120 chars) - Creator email
+//   - createdByName: string (optional, <= 80 chars) - Creator display name
+//   - ownerUid: string (optional, <= 128 chars) - Owner UID
+//   - ownerName: string (optional, <= 80 chars) - Owner display name
+//   - createdAt: string (optional, <= 40 chars) - ISO creation timestamp
 //   - updatedAt: string (optional, <= 40 chars) - ISO update timestamp
 //
 // ===============================================================
@@ -170,10 +198,32 @@ service cloud.firestore {
           (
             exists(/databases/$(database)/documents/workspaces/$(wsId)) &&
             (
-              request.auth.uid in get(/databases/$(database)/documents/workspaces/$(wsId)).data.memberUids ||
-              request.auth.token.email in get(/databases/$(database)/documents/workspaces/$(wsId)).data.memberEmails ||
+              ('members' in get(/databases/$(database)/documents/workspaces/$(wsId)).data &&
+               (request.auth.uid in get(/databases/$(database)/documents/workspaces/$(wsId)).data.members ||
+                request.auth.token.email in get(/databases/$(database)/documents/workspaces/$(wsId)).data.members)) ||
+              ('memberUids' in get(/databases/$(database)/documents/workspaces/$(wsId)).data &&
+               request.auth.uid in get(/databases/$(database)/documents/workspaces/$(wsId)).data.memberUids) ||
+              ('memberEmails' in get(/databases/$(database)/documents/workspaces/$(wsId)).data &&
+               request.auth.token.email in get(/databases/$(database)/documents/workspaces/$(wsId)).data.memberEmails) ||
               get(/databases/$(database)/documents/workspaces/$(wsId)).data.ownerUid == request.auth.uid
             )
+          )
+        );
+    }
+
+    // Check if the authenticated user owns the account document or is an authorized workspace member
+    function isAccountOwnerOrWorkspaceMember(data) {
+      return isAuthenticated() &&
+        (
+          (('uid' in data) && data.uid == request.auth.uid) ||
+          (('ownerUid' in data) && data.ownerUid == request.auth.uid) ||
+          (('createdByUid' in data) && data.createdByUid == request.auth.uid) ||
+          (('workspaceId' in data) && data.workspaceId is string && data.workspaceId != '' && isAuthorizedWorkspaceMember(data.workspaceId)) ||
+          (
+            (!('workspaceId' in data) || data.workspaceId == null || data.workspaceId == '') &&
+            (!('uid' in data) || data.uid == null || data.uid == '' || data.uid == request.auth.uid) &&
+            (!('ownerUid' in data) || data.ownerUid == null || data.ownerUid == '' || data.ownerUid == request.auth.uid) &&
+            (!('createdByUid' in data) || data.createdByUid == null || data.createdByUid == '' || data.createdByUid == request.auth.uid || data.createdByUid == 'local_default_user')
           )
         );
     }
@@ -229,15 +279,13 @@ service cloud.firestore {
     function isValidWorkspace(data) {
       let requiredFields = [
         'workspaceId',
-        'ownerUid',
-        'memberUids',
-        'memberEmails',
-        'createdAt',
-        'updatedAt'
+        'ownerUid'
       ];
       let allowedFields = [
         'workspaceId',
+        'inviteCode',
         'ownerUid',
+        'members',
         'memberUids',
         'memberEmails',
         'createdAt',
@@ -247,10 +295,12 @@ service cloud.firestore {
         hasOnlyAllowedFields(allowedFields) &&
         validStringLength('workspaceId', 1, 128) &&
         validStringLength('ownerUid', 1, 128) &&
-        isValidList(data.memberUids, 50) &&
-        isValidList(data.memberEmails, 50) &&
-        isValidDateString(data.createdAt) &&
-        isValidDateString(data.updatedAt);
+        isValidOptionalString('inviteCode', 4, 32) &&
+        (!('members' in data) || isValidList(data.members, 50)) &&
+        (!('memberUids' in data) || isValidList(data.memberUids, 50)) &&
+        (!('memberEmails' in data) || isValidList(data.memberEmails, 50)) &&
+        isValidOptionalString('createdAt', 10, 40) &&
+        isValidOptionalString('updatedAt', 10, 40);
     }
 
     function isValidTransaction(data) {
@@ -310,6 +360,69 @@ service cloud.firestore {
         isValidOptionalString('updatedAt', 10, 40);
     }
 
+    function isValidAccount(data) {
+      let allowedFields = [
+        'id',
+        'uid',
+        'name',
+        'type',
+        'institution',
+        'accountNumber',
+        'currency',
+        'initialBalance',
+        'targetAmount',
+        'includeInTotal',
+        'color',
+        'icon',
+        'isArchived',
+        'status',
+        'workspaceId',
+        'createdByUid',
+        'createdByEmail',
+        'createdByName',
+        'ownerUid',
+        'ownerName',
+        'createdAt',
+        'updatedAt'
+      ];
+      return hasOnlyAllowedFields(allowedFields) &&
+        (
+          ('name' in data && validStringLength('name', 1, 80)) ||
+          ('isArchived' in data && data.isArchived is bool) ||
+          ('status' in data && data.status in ['active', 'archived'])
+        ) &&
+        isValidOptionalString('id', 0, 128) &&
+        isValidOptionalString('uid', 0, 128) &&
+        isValidOptionalString('name', 1, 80) &&
+        isValidOptionalString('type', 1, 32) &&
+        isValidOptionalString('institution', 0, 120) &&
+        isValidOptionalString('accountNumber', 0, 64) &&
+        isValidOptionalString('currency', 3, 10) &&
+        (!('initialBalance' in data) || data.initialBalance == null || (data.initialBalance is number && data.initialBalance >= -1000000000 && data.initialBalance <= 1000000000)) &&
+        (!('targetAmount' in data) || data.targetAmount == null || (data.targetAmount is number && data.targetAmount >= -1000000000 && data.targetAmount <= 1000000000)) &&
+        (!('includeInTotal' in data) || data.includeInTotal == null || data.includeInTotal is bool) &&
+        isValidOptionalString('color', 0, 32) &&
+        isValidOptionalString('icon', 0, 32) &&
+        (!('isArchived' in data) || data.isArchived == null || data.isArchived is bool) &&
+        (!('status' in data) || data.status == null || (data.status is string && data.status in ['active', 'archived'])) &&
+        isValidOptionalString('workspaceId', 0, 128) &&
+        isValidOptionalString('createdByUid', 0, 128) &&
+        isValidOptionalString('createdByEmail', 0, 120) &&
+        isValidOptionalString('createdByName', 0, 80) &&
+        isValidOptionalString('ownerUid', 0, 128) &&
+        isValidOptionalString('ownerName', 0, 80) &&
+        isValidOptionalString('createdAt', 0, 40) &&
+        isValidOptionalString('updatedAt', 0, 40);
+    }
+
+    function isValidAccountArchiveUpdate(data) {
+      return isValidAccount(data) &&
+        (
+          ('isArchived' in data && data.isArchived is bool) ||
+          ('status' in data && data.status in ['active', 'archived'])
+        );
+    }
+
     // ===============================================================
     // Collection Rules
     // ===============================================================
@@ -343,34 +456,33 @@ service cloud.firestore {
 
     // 2. Shared Family Workspaces (`workspaces/{workspaceId}`)
     match /workspaces/{workspaceId} {
-      allow get, list: if request.auth != null &&
-        (
-          request.auth.uid in resource.data.memberUids ||
-          request.auth.token.email in resource.data.memberEmails ||
-          resource.data.ownerUid == request.auth.uid
-        );
+      // Authenticated users can query workspaces by inviteCode (`where('inviteCode', '==', code)`) to join a family group
+      allow get, list: if isAuthenticated();
 
-      allow create: if request.auth != null &&
+      allow create: if isAuthenticated() &&
         request.resource.data.ownerUid == request.auth.uid &&
         request.resource.data.workspaceId == workspaceId &&
         isValidWorkspace(request.resource.data);
 
-      allow update: if request.auth != null &&
+      allow update: if isAuthenticated() &&
         isValidWorkspace(request.resource.data) &&
-        areImmutableFieldsUnchanged(['workspaceId', 'ownerUid', 'createdAt']) &&
+        areImmutableFieldsUnchanged(['workspaceId', 'ownerUid']) &&
         (
-          request.auth.uid in resource.data.memberUids ||
-          request.auth.token.email in resource.data.memberEmails ||
-          resource.data.ownerUid == request.auth.uid
+          resource.data.ownerUid == request.auth.uid ||
+          (
+            request.resource.data.inviteCode == resource.data.inviteCode &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members', 'memberUids', 'memberEmails', 'updatedAt'])
+          )
         );
 
-      allow delete: if request.auth != null &&
+      allow delete: if isAuthenticated() &&
         resource.data.ownerUid == request.auth.uid;
 
       // Subcollection for workspace-scoped transactions (`/workspaces/{workspaceId}/transactions/{txId}`)
       match /transactions/{txId} {
         allow read: if isAuthenticated() &&
           (
+            resource == null ||
             resource.data.createdByUid == request.auth.uid ||
             isAuthorizedWorkspaceMember(resource.data.workspaceId)
           );
@@ -405,8 +517,45 @@ service cloud.firestore {
 
         allow delete: if isAuthenticated() &&
           (
+            resource == null ||
             resource.data.createdByUid == request.auth.uid ||
             isAuthorizedWorkspaceMember(resource.data.workspaceId)
+          );
+      }
+
+      // Subcollection for workspace-scoped accounts (`/workspaces/{workspaceId}/accounts/{accountId}`)
+      match /accounts/{accountId} {
+        allow read: if isAuthenticated() &&
+          (
+            resource == null ||
+            isAuthorizedWorkspaceMember(workspaceId) ||
+            isAccountOwnerOrWorkspaceMember(resource.data)
+          );
+
+        allow create: if isAuthenticated() &&
+          isValidAccount(request.resource.data) &&
+          (
+            isAuthorizedWorkspaceMember(workspaceId) ||
+            isAccountOwnerOrWorkspaceMember(request.resource.data)
+          );
+
+        allow update: if isAuthenticated() &&
+          (isValidAccount(request.resource.data) || isValidAccountArchiveUpdate(request.resource.data)) &&
+          (
+            isAuthorizedWorkspaceMember(workspaceId) ||
+            isAccountOwnerOrWorkspaceMember(resource.data)
+          ) &&
+          (
+            isAuthorizedWorkspaceMember(workspaceId) ||
+            isAccountOwnerOrWorkspaceMember(request.resource.data)
+          ) &&
+          (!('id' in resource.data) || !('id' in request.resource.data) || request.resource.data.id == resource.data.id);
+
+        allow delete: if isAuthenticated() &&
+          (
+            resource == null ||
+            isAuthorizedWorkspaceMember(workspaceId) ||
+            isAccountOwnerOrWorkspaceMember(resource.data)
           );
       }
     }
@@ -415,6 +564,7 @@ service cloud.firestore {
     match /transactions/{txId} {
       allow read: if isAuthenticated() &&
         (
+          resource == null ||
           resource.data.createdByUid == request.auth.uid ||
           isAuthorizedWorkspaceMember(resource.data.workspaceId)
         );
@@ -448,8 +598,34 @@ service cloud.firestore {
 
       allow delete: if isAuthenticated() &&
         (
+          resource == null ||
           resource.data.createdByUid == request.auth.uid ||
           isAuthorizedWorkspaceMember(resource.data.workspaceId)
+        );
+    }
+
+    // 4. Top-Level Accounts (`accounts/{accountId}`)
+    match /accounts/{accountId} {
+      allow read: if isAuthenticated() &&
+        (
+          resource == null ||
+          isAccountOwnerOrWorkspaceMember(resource.data)
+        );
+
+      allow create: if isAuthenticated() &&
+        (isValidAccount(request.resource.data) || isValidAccountArchiveUpdate(request.resource.data)) &&
+        isAccountOwnerOrWorkspaceMember(request.resource.data);
+
+      allow update: if isAuthenticated() &&
+        (isValidAccount(request.resource.data) || isValidAccountArchiveUpdate(request.resource.data)) &&
+        isAccountOwnerOrWorkspaceMember(resource.data) &&
+        isAccountOwnerOrWorkspaceMember(request.resource.data) &&
+        (!('id' in resource.data) || !('id' in request.resource.data) || request.resource.data.id == resource.data.id);
+
+      allow delete: if isAuthenticated() &&
+        (
+          resource == null ||
+          isAccountOwnerOrWorkspaceMember(resource.data)
         );
     }
 

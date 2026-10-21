@@ -258,6 +258,9 @@ export class StorageRepository {
           ...(parsed.settings || {}),
         },
       };
+      if (Array.isArray(merged.accounts)) {
+        merged.accounts = merged.accounts.map((acc) => createAccount(acc));
+      }
       if (Array.isArray(merged.transactions)) {
         merged.transactions = merged.transactions.map((tx) => createTransaction(tx));
       }

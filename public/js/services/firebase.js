@@ -14,7 +14,12 @@
 export const CUSTOM_FIREBASE_CONFIG_STORAGE_KEY = 'pisto_custom_firebase_config';
 export const LEGACY_FIREBASE_CONFIG_STORAGE_KEY = 'pisto_firebase_web_config_v1';
 
-function readEnvVar(viteKey, nextPublicKey, fallbackValue) {
+function readEnvVar(viteKey, nextPublicKey, fallbackValue, configKey) {
+  const globalCfg =
+    typeof globalThis !== 'undefined' && globalThis.__PISTO_FIREBASE_CONFIG__
+      ? globalThis.__PISTO_FIREBASE_CONFIG__
+      : {};
+
   const metaEnv =
     typeof import.meta !== 'undefined' && import.meta.env
       ? import.meta.env
@@ -26,6 +31,8 @@ function readEnvVar(viteKey, nextPublicKey, fallbackValue) {
       : {};
 
   const val =
+    (configKey && globalCfg[configKey]) ||
+    globalCfg[viteKey] ||
     metaEnv[viteKey] ||
     procEnv[nextPublicKey] ||
     procEnv[viteKey] ||
@@ -43,42 +50,48 @@ export const defaultFirebaseConfig = {
     return readEnvVar(
       'VITE_FIREBASE_API_KEY',
       'NEXT_PUBLIC_FIREBASE_API_KEY',
-      'pisto-spark-default-api-key'
+      'AIzaSyBOtK3rmUmsIgFOIXqczESqWfomRNariis',
+      'apiKey'
     );
   },
   get authDomain() {
     return readEnvVar(
       'VITE_FIREBASE_AUTH_DOMAIN',
       'NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN',
-      'pisto-spark-free.firebaseapp.com'
+      'gen-lang-client-0806891468.firebaseapp.com',
+      'authDomain'
     );
   },
   get projectId() {
     return readEnvVar(
       'VITE_FIREBASE_PROJECT_ID',
       'NEXT_PUBLIC_FIREBASE_PROJECT_ID',
-      'pisto-spark-free'
+      'gen-lang-client-0806891468',
+      'projectId'
     );
   },
   get storageBucket() {
     return readEnvVar(
       'VITE_FIREBASE_STORAGE_BUCKET',
       'NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET',
-      'pisto-spark-free.appspot.com'
+      'gen-lang-client-0806891468.firebasestorage.app',
+      'storageBucket'
     );
   },
   get messagingSenderId() {
     return readEnvVar(
       'VITE_FIREBASE_MESSAGING_SENDER_ID',
       'NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID',
-      '000000000000'
+      '842169471386',
+      'messagingSenderId'
     );
   },
   get appId() {
     return readEnvVar(
       'VITE_FIREBASE_APP_ID',
       'NEXT_PUBLIC_FIREBASE_APP_ID',
-      '1:000000000000:web:pistosparkdefault'
+      '1:842169471386:web:8b1e4ff1a879fef6f16a23',
+      'appId'
     );
   },
 };

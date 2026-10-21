@@ -310,61 +310,94 @@ export class ProfileViewController {
       this.callbacks.onAuthAndProfileUpdated(currentUser, savedProfile, 'profile-saved');
     });
 
-    // Shared Family Finances ("Compartir Finanzas") handlers
-    const shareBtn = document.getElementById('btn-share-workspace') as HTMLButtonElement | null;
-    const shareEmailInput = document.getElementById('profile-share-email-input') as HTMLInputElement | null;
-    const sharedMembersList = document.getElementById('profile-shared-members-list');
+    // Shared Family Finances ("Compartir Finanzas — Código / Token Único de Invitación") handlers
+    const copyInviteBtn = document.getElementById('btn-copy-invite-code') as HTMLButtonElement | null;
+    const regenerateInviteBtn = document.getElementById('btn-regenerate-invite-code') as HTMLButtonElement | null;
+    const currentInviteInput = document.getElementById('profile-current-invite-code') as HTMLInputElement | null;
+    const joinInviteInput = document.getElementById('profile-invite-code-input') as HTMLInputElement | null;
+    const joinWorkspaceBtn = document.getElementById('btn-join-workspace-token') as HTMLButtonElement | null;
+    const leaveWorkspaceBtn = document.getElementById('btn-leave-shared-workspace') as HTMLButtonElement | null;
 
-    const handleShareSubmit = async () => {
-      const targetEmail = String(shareEmailInput?.value || '').trim();
-      if (!targetEmail) {
-        this.callbacks.showToast('⚠️ Ingresa el correo electrónico del miembro familiar a vincular.');
-        shareEmailInput?.focus();
+    copyInviteBtn?.addEventListener('click', async () => {
+      const wsDoc = await this.authService.ensureOrGenerateWorkspaceToken({ regenerate: false });
+      const code = wsDoc.inviteCode;
+      if (currentInviteInput) currentInviteInput.value = code;
+      try {
+        if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(code);
+        }
+      } catch {
+        // Fallback when Clipboard API is restricted
+      }
+      this.callbacks.showToast(`📋 Código de invitación copiado: ${code}`);
+    });
+
+    regenerateInviteBtn?.addEventListener('click', async () => {
+      try {
+        if (regenerateInviteBtn) regenerateInviteBtn.disabled = true;
+        const wsDoc = await this.authService.ensureOrGenerateWorkspaceToken({ regenerate: true });
+        if (currentInviteInput) currentInviteInput.value = wsDoc.inviteCode;
+        this.renderProfileTab();
+        this.callbacks.showToast(`🔄 Nuevo código de Espacio Familiar generado: ${wsDoc.inviteCode}`);
+      } catch (err: any) {
+        this.callbacks.showToast(`⚠️ ${err?.message || 'No se pudo regenerar el token.'}`);
+      } finally {
+        if (regenerateInviteBtn) regenerateInviteBtn.disabled = false;
+      }
+    });
+
+    const handleJoinByToken = async () => {
+      const rawCode = String(joinInviteInput?.value || '').trim().toUpperCase();
+      if (!rawCode) {
+        this.callbacks.showToast('⚠️ Ingresa un código de invitación familiar.');
+        joinInviteInput?.focus();
         return;
       }
 
       try {
-        if (shareBtn) shareBtn.disabled = true;
-        const { workspaceId, profile, linkedEmail } = await this.authService.shareWorkspaceWithEmail(targetEmail);
-        if (shareEmailInput) shareEmailInput.value = '';
+        if (joinWorkspaceBtn) joinWorkspaceBtn.disabled = true;
+        const { profile, message } = await this.authService.joinWorkspaceByInviteCode(rawCode);
+        if (joinInviteInput) joinInviteInput.value = '';
         this.renderProfileTab();
-        this.callbacks.showToast(
-          `👨‍👩‍👧‍👦 Espacio familiar (${workspaceId}) vinculado con ${linkedEmail}`
-        );
+        this.callbacks.showToast(`🎉 ${message}`);
         this.callbacks.onAuthAndProfileUpdated(
           this.authService.getCurrentUser(),
           profile,
           'workspace-shared'
         );
       } catch (err: any) {
-        this.callbacks.showToast(`⚠️ ${err?.message || 'Error al vincular el espacio familiar.'}`);
+        this.callbacks.showToast(`⚠️ ${err?.message || 'Código de invitación no válido o expirado'}`);
       } finally {
-        if (shareBtn) shareBtn.disabled = false;
+        if (joinWorkspaceBtn) joinWorkspaceBtn.disabled = false;
       }
     };
 
-    shareBtn?.addEventListener('click', handleShareSubmit);
-    shareEmailInput?.addEventListener('keydown', (e) => {
+    joinWorkspaceBtn?.addEventListener('click', handleJoinByToken);
+    joinInviteInput?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        handleShareSubmit();
+        handleJoinByToken();
       }
     });
 
-    sharedMembersList?.addEventListener('click', async (e) => {
-      const unlinkBtn = (e.target as HTMLElement).closest('[data-unlink-email]') as HTMLElement | null;
-      if (!unlinkBtn) return;
-      const emailToRemove = unlinkBtn.dataset.unlinkEmail || '';
-      if (!emailToRemove) return;
-
-      const updatedProfile = await this.authService.unlinkSharedMember(emailToRemove);
-      this.renderProfileTab();
-      this.callbacks.showToast(`Vínculo removido: ${emailToRemove}`);
-      this.callbacks.onAuthAndProfileUpdated(
-        this.authService.getCurrentUser(),
-        updatedProfile,
-        'workspace-unlinked'
-      );
+    leaveWorkspaceBtn?.addEventListener('click', async () => {
+      try {
+        if (leaveWorkspaceBtn) leaveWorkspaceBtn.disabled = true;
+        const { workspaceId, profile } = await this.authService.leaveSharedWorkspace();
+        this.renderProfileTab();
+        this.callbacks.showToast(
+          `🚪 Has abandonado el Espacio Compartido. Espacio personal activo: ${workspaceId}`
+        );
+        this.callbacks.onAuthAndProfileUpdated(
+          this.authService.getCurrentUser(),
+          profile,
+          'workspace-unlinked'
+        );
+      } catch (err: any) {
+        this.callbacks.showToast(`⚠️ ${err?.message || 'Error al abandonar el espacio compartido.'}`);
+      } finally {
+        if (leaveWorkspaceBtn) leaveWorkspaceBtn.disabled = false;
+      }
     });
   }
 
@@ -465,36 +498,54 @@ export class ProfileViewController {
       personalViewCheckbox.checked = Boolean(profile?.personalViewMode);
     }
 
-    // Render shared family members list
+    // Render Family Workspace Invite Token & Members UI
+    const currentInviteInput = document.getElementById('profile-current-invite-code') as HTMLInputElement | null;
+    const regenerateInviteBtn = document.getElementById('btn-regenerate-invite-code') as HTMLButtonElement | null;
+    const leaveWorkspaceBtn = document.getElementById('btn-leave-shared-workspace') as HTMLButtonElement | null;
     const sharedMembersList = document.getElementById('profile-shared-members-list');
-    if (sharedMembersList) {
-      const sharedEmails = profile?.sharedWithEmails || [];
-      if (sharedEmails.length === 0) {
-        sharedMembersList.innerHTML = `
-          <div class="shared-member-empty">
-            Espacio actual: <code>${activeWorkspaceId}</code> · Aún no has vinculado otros correos familiares.
-          </div>
-        `;
-      } else {
-        sharedMembersList.innerHTML = sharedEmails
-          .map(
-            (email) => `
-              <div class="shared-member-pill">
-                <span>👤 <strong>${email.split('@')[0]}</strong> <small>(${email})</small> · <code>${activeWorkspaceId}</code></span>
-                <button
-                  type="button"
-                  class="btn-secondary btn-sm"
-                  data-unlink-email="${email}"
-                  aria-label="Desvincular miembro familiar ${email}"
-                  title="Desvincular ${email}"
-                >
-                  ✕ Quitar
-                </button>
+
+    if (typeof this.authService.ensureOrGenerateWorkspaceToken === 'function') {
+      this.authService
+        .ensureOrGenerateWorkspaceToken({ regenerate: false })
+        .then((wsDoc) => {
+          if (currentInviteInput) {
+            currentInviteInput.value = wsDoc.inviteCode || 'SIN-TOKEN';
+          }
+          const isOwner = wsDoc.ownerUid === activeUid;
+          if (regenerateInviteBtn) {
+            regenerateInviteBtn.disabled = !isOwner;
+            regenerateInviteBtn.title = isOwner
+              ? 'Generar un nuevo código de invitación para tu Espacio Familiar'
+              : 'Solo el creador/dueño del Espacio Familiar puede regenerar el token';
+          }
+          const isInSharedSpace = wsDoc.workspaceId !== activeUid || (wsDoc.members || []).length > 1;
+          if (leaveWorkspaceBtn) {
+            leaveWorkspaceBtn.disabled = !isInSharedSpace;
+          }
+          if (sharedMembersList) {
+            const members = Array.isArray(wsDoc.members) ? wsDoc.members : [];
+            const roleLabel = isOwner ? '👑 Dueño (Host)' : '🤝 Invitado';
+            sharedMembersList.innerHTML = `
+              <div class="shared-member-pill" style="flex-wrap: wrap; gap: 0.5rem;">
+                <span>
+                  ${roleLabel} · Espacio: <code>${wsDoc.workspaceId}</code> · Código: <code>${wsDoc.inviteCode}</code>
+                </span>
+                <span style="font-size: 0.8rem; color: var(--text-secondary);">
+                  Miembros (${members.length}): ${members.map((m) => `<code>${m}</code>`).join(', ')}
+                </span>
               </div>
-            `
-          )
-          .join('');
-      }
+            `;
+          }
+        })
+        .catch(() => {
+          if (sharedMembersList) {
+            sharedMembersList.innerHTML = `
+              <div class="shared-member-empty">
+                Espacio actual: <code>${activeWorkspaceId}</code>
+              </div>
+            `;
+          }
+        });
     }
 
     const customFbCfg = typeof this.authService.getCustomFirebaseConfig === 'function'

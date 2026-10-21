@@ -46,8 +46,19 @@ import {
   saveTransactionToWorkspace,
   deleteTransactionFromWorkspace,
   migrateTransactionsToSharedWorkspace,
-} from './services/transactions.js?v=11';
-import { ProfileViewController } from './ui/profileView.js?v=11';
+} from './services/transactions.js?v=12';
+import {
+  isAccountArchived,
+  filterActiveAccounts,
+  filterArchivedAccounts,
+  filterAccountsForView,
+  saveAccountToFirestore,
+  archiveAccount,
+  unarchiveAccount,
+  deleteAccountWithCascade,
+} from './services/accounts.js?v=12';
+import { DeleteAccountModal } from './ui/deleteAccountModal.js?v=12';
+import { ProfileViewController } from './ui/profileView.js?v=12';
 
 class FinanceAppController {
   constructor() {
@@ -63,6 +74,7 @@ class FinanceAppController {
       this.state.settings.endDate = this.state.settings.endDate || '';
     }
     this.activeTab = 'categories';
+    this.showArchivedAccounts = Boolean(this.state.settings?.showArchivedAccounts ?? false);
     this.ledgerFilters = {
       searchQuery: '',
       typeFilter: 'all',
@@ -455,6 +467,9 @@ class FinanceAppController {
 
       const formData = new FormData(form);
       const existingId = String(formData.get('id') || '').trim();
+      const existingAcc = existingId
+        ? this.state.accounts.find((a) => a.id === existingId)
+        : null;
       const accType = formData.get('type') || 'bank';
       const defaultIcon = this.getDefaultIconForAccountType(accType);
 
@@ -470,6 +485,10 @@ class FinanceAppController {
         includeInTotal: formData.get('includeInTotal') === 'on',
         color: formData.get('color') || '#10b981',
         icon: formData.get('icon') || defaultIcon,
+        isArchived: existingAcc ? Boolean(existingAcc.isArchived) : false,
+        status: existingAcc?.status || 'active',
+        workspaceId: this.state.settings?.workspaceId || 'ws_default',
+        createdByUid: this.state.settings?.currentUid || 'local_default_user',
       });
 
       if (existingId) {
@@ -483,11 +502,25 @@ class FinanceAppController {
         this.showToast(`Cuenta o meta "${accEntity.name}" creada correctamente.`);
       }
 
+      saveAccountToFirestore(accEntity, this.getAccountServiceContext()).catch(() => {});
       this.repo.saveState(this.state);
       accountDialog.close();
       form.reset();
       this.renderAll();
     });
+  }
+
+  getAccountServiceContext() {
+    const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
+    const user = this.authService.getCurrentUser();
+    const profile = this.authService.getCurrentProfile();
+    return {
+      workspaceId: profile?.workspaceId || this.state.settings?.workspaceId || 'ws_default',
+      currentUid: user?.uid || profile?.uid || this.state.settings?.currentUid || 'local_default_user',
+      firestoreDb,
+      firestoreModule,
+      storage,
+    };
   }
 
   openAccountModal(accountId = null) {
@@ -535,93 +568,91 @@ class FinanceAppController {
     const warningDialog = document.getElementById('delete-warning-dialog');
     if (!warningDialog) return;
 
-    attachDialogLightDismissFallback(warningDialog);
-
-    const cancelBtn = document.getElementById('btn-cancel-delete-warning');
-    const confirmBtn = document.getElementById('btn-confirm-delete-warning');
-
-    cancelBtn?.addEventListener('click', () => {
-      this.pendingDeleteCallback = null;
-      warningDialog.close();
-    });
-
-    confirmBtn?.addEventListener('click', () => {
-      const fn = this.pendingDeleteCallback;
-      this.pendingDeleteCallback = null;
-      warningDialog.close();
-      if (typeof fn === 'function') {
-        fn();
-      }
+    this.deleteAccountModal = new DeleteAccountModal({
+      dialogEl: warningDialog,
+      onArchive: async (accountId) => {
+        await this.archiveAccountById(accountId);
+      },
+      onCascadeDelete: async (accountId) => {
+        await this.deleteAccountCascadeById(accountId);
+      },
     });
   }
 
   promptDeleteAccount(accountId) {
-    if (this.state.accounts.length <= 1) {
-      this.showToast('⚠️ Debe conservar al menos una cuenta activa.');
-      return;
-    }
     const target = this.state.accounts.find((a) => a.id === accountId);
     if (!target) return;
 
-    const warningDialog = document.getElementById('delete-warning-dialog');
-    const titleEl = document.getElementById('delete-warning-title');
-    const targetNameEl = document.getElementById('delete-warning-target-name');
-    const descEl = document.getElementById('delete-warning-description');
-
+    const summary = this.currentAccountsSummary || computeAccountsSummary(this.state);
+    const accWithBalance =
+      summary.accountsWithBalance?.find((a) => a.id === accountId) || target;
+    const currentBalance = accWithBalance.currentBalance ?? target.initialBalance ?? 0;
     const relatedTxCount = this.state.transactions.filter(
       (tx) => tx.accountId === accountId || tx.toAccountId === accountId
     ).length;
 
-    if (!warningDialog) {
-      this.deleteAccount(accountId);
-      return;
+    if (this.deleteAccountModal) {
+      this.deleteAccountModal.open({
+        account: target,
+        currentBalance,
+        txCount: relatedTxCount,
+      });
+    } else {
+      this.archiveAccountById(accountId);
     }
-
-    if (titleEl) {
-      titleEl.innerHTML = `<span aria-hidden="true">⚠️</span> Advertencia: Borrar Cuenta`;
-    }
-    if (targetNameEl) {
-      targetNameEl.textContent = `¿Estás seguro de borrar la cuenta "${target.name}"?`;
-    }
-    if (descEl) {
-      descEl.textContent =
-        relatedTxCount > 0
-          ? `Esta cuenta tiene ${relatedTxCount} movimiento(s) registrado(s). Si la eliminas, sus movimientos serán reasignados a tu cuenta principal para no alterar tu historial. Esta acción no se puede deshacer.`
-          : `Esta acción eliminará permanentemente la cuenta "${target.name}". Esta acción no se puede deshacer.`;
-    }
-
-    this.pendingDeleteCallback = () => this.deleteAccount(accountId);
-    warningDialog.showModal();
   }
 
-  deleteAccount(accountId) {
-    if (this.state.accounts.length <= 1) {
-      this.showToast('Debe conservar al menos una cuenta activa.');
-      return;
+  async archiveAccountById(accountId) {
+    try {
+      const { account, preservedTxCount } = await archiveAccount(
+        accountId,
+        this.state,
+        this.getAccountServiceContext()
+      );
+      this.repo.saveState(this.state);
+      this.showToast(
+        `📦 Cuenta "${account.name}" archivada (${preservedTxCount} movimiento(s) históricos conservados).`
+      );
+      this.renderAll();
+    } catch (err) {
+      this.showToast(`⚠️ ${err?.message || 'Error al archivar la cuenta.'}`);
     }
-    const target = this.state.accounts.find((a) => a.id === accountId);
-    if (!target) return;
+  }
 
-    this.state.accounts = this.state.accounts.filter((a) => a.id !== accountId);
-    const fallbackAccountId = this.state.accounts[0].id;
+  async unarchiveAccountById(accountId) {
+    try {
+      const { account } = await unarchiveAccount(
+        accountId,
+        this.state,
+        this.getAccountServiceContext()
+      );
+      this.repo.saveState(this.state);
+      this.showToast(`♻️ Cuenta "${account.name}" reactivada y disponible en tus selectores.`);
+      this.renderAll();
+    } catch (err) {
+      this.showToast(`⚠️ ${err?.message || 'Error al reactivar la cuenta.'}`);
+    }
+  }
 
-    // Reassign or clean up transactions referencing the deleted account
-    this.state.transactions = this.state.transactions
-      .map((tx) => {
-        if (tx.accountId === accountId && tx.toAccountId === fallbackAccountId) {
-          return null;
-        }
-        return {
-          ...tx,
-          accountId: tx.accountId === accountId ? fallbackAccountId : tx.accountId,
-          toAccountId: tx.toAccountId === accountId ? fallbackAccountId : tx.toAccountId,
-        };
-      })
-      .filter(Boolean);
-
-    this.repo.saveState(this.state);
-    this.showToast(`Cuenta "${target.name}" eliminada.`);
-    this.renderAll();
+  async deleteAccountCascadeById(accountId) {
+    try {
+      const { deletedAccount, deletedTransactionsCount } = await deleteAccountWithCascade(
+        accountId,
+        this.state,
+        this.getAccountServiceContext()
+      );
+      if (this.activeDetailAccountId === accountId) {
+        this.activeDetailAccountId = null;
+        document.getElementById('account-detail-dialog')?.close();
+      }
+      this.repo.saveState(this.state);
+      this.showToast(
+        `🗑️ Cuenta "${deletedAccount?.name || accountId}" y ${deletedTransactionsCount} transacción(es) eliminadas permanentemente en cascada.`
+      );
+      this.renderAll();
+    } catch (err) {
+      this.showToast(`⚠️ ${err?.message || 'Error al eliminar la cuenta en cascada.'}`);
+    }
   }
 
   /**
@@ -1276,7 +1307,8 @@ class FinanceAppController {
     }
 
     if (accSelect) {
-      accSelect.innerHTML = this.state.accounts
+      const activeAccounts = filterActiveAccounts(this.state.accounts);
+      accSelect.innerHTML = activeAccounts
         .map((a) => {
           const numBadge = a.accountNumber ? ` (N.º *${extractLast4Digits(a.accountNumber) || a.accountNumber})` : '';
           const instBadge = a.institution ? ` · ${a.institution}` : '';
@@ -1457,7 +1489,8 @@ class FinanceAppController {
     const accountSelect = document.getElementById('statement-account-select');
     if (!accountSelect) return;
 
-    accountSelect.innerHTML = this.state.accounts
+    const activeAccounts = filterActiveAccounts(this.state.accounts);
+    accountSelect.innerHTML = activeAccounts
       .map((a) => {
         const numBadge = a.accountNumber
           ? ` (N.º *${extractLast4Digits(a.accountNumber) || a.accountNumber})`
@@ -1467,7 +1500,7 @@ class FinanceAppController {
       })
       .join('');
 
-    if (preferredAccountId && this.state.accounts.some((a) => a.id === preferredAccountId)) {
+    if (preferredAccountId && activeAccounts.some((a) => a.id === preferredAccountId)) {
       accountSelect.value = preferredAccountId;
     }
   }
@@ -1788,6 +1821,15 @@ class FinanceAppController {
         this.openAccountModal(actionEl.dataset.accountId);
       } else if (action === 'delete-account') {
         this.promptDeleteAccount(actionEl.dataset.accountId);
+      } else if (action === 'unarchive-account') {
+        this.unarchiveAccountById(actionEl.dataset.accountId);
+      } else if (action === 'toggle-show-archived-accounts') {
+        this.showArchivedAccounts = !this.showArchivedAccounts;
+        const toggleCheckbox = document.getElementById('toggle-show-archived-accounts');
+        if (toggleCheckbox) {
+          toggleCheckbox.checked = this.showArchivedAccounts;
+        }
+        this.renderAll();
       } else if (action === 'toggle-account-include') {
         const accId = actionEl.dataset.accountId;
         const acc = this.state.accounts.find((a) => a.id === accId);
@@ -1939,6 +1981,13 @@ class FinanceAppController {
       this.state.settings.theme = e.target.value;
       this.repo.saveState(this.state);
       this.applyTheme(e.target.value);
+    });
+
+    // Toggle for showing archived accounts in the "Cuentas y Metas" tab
+    const archivedToggle = document.getElementById('toggle-show-archived-accounts');
+    archivedToggle?.addEventListener('change', (e) => {
+      this.showArchivedAccounts = Boolean(e.target.checked);
+      this.renderAll();
     });
 
     // Quick NLP Input Live Preview & 0-Token Submit
@@ -2286,11 +2335,27 @@ class FinanceAppController {
   }
 
   /**
-   * Renders Tab 2: Accounts, Wallets, Savings Goals & Debts with Clickable Detail View and Edit/Delete actions.
+   * Renders Tab 2: Accounts, Wallets, Savings Goals & Debts with Clickable Detail View,
+   * Archived Accounts Toggle, Unarchive Action, and Edit/Delete actions.
    */
   renderAccountsView(accountsSummary) {
     const accountsGrid = document.getElementById('accounts-grid');
     if (!accountsGrid) return;
+
+    const allAccounts = accountsSummary.accountsWithBalance || [];
+    const archivedCount = filterArchivedAccounts(allAccounts).length;
+    const visibleAccounts = filterAccountsForView(allAccounts, this.showArchivedAccounts);
+
+    const archivedToggle = document.getElementById('toggle-show-archived-accounts');
+    if (archivedToggle) {
+      archivedToggle.checked = Boolean(this.showArchivedAccounts);
+    }
+
+    const archivedCountBadge = document.getElementById('archived-accounts-count-badge');
+    if (archivedCountBadge) {
+      archivedCountBadge.textContent = `(${archivedCount})`;
+      archivedCountBadge.classList.toggle('is-hidden', archivedCount === 0);
+    }
 
     const typeLabels = {
       bank: 'Cuenta Bancaria',
@@ -2305,8 +2370,32 @@ class FinanceAppController {
         (this.state.settings.startDate || this.state.settings.endDate)
     );
 
-    accountsGrid.innerHTML = accountsSummary.accountsWithBalance
+    if (visibleAccounts.length === 0) {
+      accountsGrid.innerHTML = `
+        <div class="empty-state-box" style="grid-column: 1 / -1;">
+          <p>
+            ${
+              archivedCount > 0
+                ? `No tienes cuentas activas visibles. Tienes <strong>${archivedCount} cuenta(s) archivada(s)</strong> que conservan su historial intacto.`
+                : 'Aún no tienes cuentas activas registradas.'
+            }
+          </p>
+          <div style="display: flex; gap: 0.6rem; justify-content: center; flex-wrap: wrap; margin-top: 0.75rem;">
+            ${
+              archivedCount > 0
+                ? `<button type="button" class="btn-secondary btn-sm" data-action="toggle-show-archived-accounts">📦 Mostrar Cuentas Archivadas (${archivedCount})</button>`
+                : ''
+            }
+            <button type="button" class="btn-primary btn-sm" data-action="open-account-modal">+ Nueva Cuenta / Meta</button>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    accountsGrid.innerHTML = visibleAccounts
       .map((acc) => {
+        const isArchived = Boolean(acc.isArchived || acc.status === 'archived');
         const accColor = acc.color || '#10b981';
         const isNegative = acc.currentBalance < 0;
         const hasGoal = acc.targetAmount > 0;
@@ -2326,43 +2415,63 @@ class FinanceAppController {
           ? `📋 ${acc.periodTxCount ?? 0} de ${acc.txCount ?? 0} mov. · Ver detalle →`
           : `📋 ${acc.txCount || 0} mov. · Ver detalle →`;
 
+        const archivedBadgeHtml = isArchived
+          ? `<span class="voucher-pill" style="background: rgba(245, 158, 11, 0.14); border-color: rgba(245, 158, 11, 0.4); color: #f59e0b; font-size: 0.72rem;" title="Cuenta archivada: su historial de transacciones sigue intacto">📦 Archivada</span>`
+          : '';
+
         return `
           <div class="account-card-container">
             <article
-              class="account-card account-card-clickable"
-              style="--acc-accent: ${accColor}"
+              class="account-card account-card-clickable ${isArchived ? 'is-archived-account' : ''}"
+              style="--acc-accent: ${accColor}; ${isArchived ? 'opacity: 0.84; border-style: dashed;' : ''}"
               role="button"
               tabindex="0"
               data-action="open-account-detail"
               data-account-id="${acc.id}"
-              aria-label="Ver detalle de transacciones de la cuenta ${acc.name}"
+              aria-label="Ver detalle de transacciones de la cuenta ${acc.name}${isArchived ? ' (Archivada)' : ''}"
             >
               <div class="account-card-top">
                 <div class="account-icon-box" style="background-color: ${accColor}20; color: ${accColor}">
                   ${renderIcon(acc.icon, 22)}
                 </div>
                 <div class="account-title-group">
-                  <h3 class="account-name">${acc.name}</h3>
+                  <div style="display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;">
+                    <h3 class="account-name">${acc.name}</h3>
+                    ${archivedBadgeHtml}
+                  </div>
                   <span class="account-type-badge">
                     ${acc.institution ? `${acc.institution} · ` : ''}${acc.accountNumber ? `N.º *${extractLast4Digits(acc.accountNumber) || acc.accountNumber} · ` : ''}${typeLabels[acc.type] || acc.type} · ${acc.currency}
                   </span>
                 </div>
-                <button
-                  type="button"
-                  class="btn-include-toggle ${acc.includeInTotal ? 'is-included' : ''}"
-                  data-action="toggle-account-include"
-                  data-account-id="${acc.id}"
-                  aria-pressed="${acc.includeInTotal ? 'true' : 'false'}"
-                  aria-label="${acc.includeInTotal ? `Excluir ${acc.name} del Patrimonio Total` : `Incluir ${acc.name} en el Patrimonio Total`}"
-                  title="${acc.includeInTotal ? 'Incluida en el Patrimonio Total' : 'Excluida del Patrimonio Total'}"
-                >
-                  ${acc.includeInTotal ? 'En Total ✓' : 'Oculta'}
-                </button>
+                ${
+                  isArchived
+                    ? `<button
+                        type="button"
+                        class="btn-secondary btn-sm"
+                        data-action="unarchive-account"
+                        data-account-id="${acc.id}"
+                        aria-label="Desarchivar o reactivar la cuenta ${acc.name}"
+                        title="Reactivar cuenta para que vuelva a la vista principal y a los selectores de transacciones"
+                      >
+                        ♻️ Reactivar
+                      </button>`
+                    : `<button
+                        type="button"
+                        class="btn-include-toggle ${acc.includeInTotal ? 'is-included' : ''}"
+                        data-action="toggle-account-include"
+                        data-account-id="${acc.id}"
+                        aria-pressed="${acc.includeInTotal ? 'true' : 'false'}"
+                        aria-label="${acc.includeInTotal ? `Excluir ${acc.name} del Patrimonio Total` : `Incluir ${acc.name} en el Patrimonio Total`}"
+                        title="${acc.includeInTotal ? 'Incluida en el Patrimonio Total' : 'Excluida del Patrimonio Total'}"
+                      >
+                        ${acc.includeInTotal ? 'En Total ✓' : 'Oculta'}
+                      </button>`
+                }
               </div>
 
               <div class="account-balance-row">
                 <div style="display: flex; flex-direction: column; gap: 0.25rem;">
-                  <span class="account-balance-label">Saldo actual</span>
+                  <span class="account-balance-label">${isArchived ? 'Saldo histórico' : 'Saldo actual'}</span>
                   <span class="account-tx-count-pill">${txBadgeLabel}</span>
                 </div>
                 <strong class="account-balance-value ${isNegative ? 'text-danger' : ''}">
@@ -2373,14 +2482,26 @@ class FinanceAppController {
               ${goalHtml}
 
               <div class="account-actions-row">
-                <button
-                  type="button"
-                  class="btn-secondary btn-sm"
-                  data-action="open-account-transfer"
-                  data-account-id="${acc.id}"
-                >
-                  ${renderIcon('transfer', 14)} Transferir
-                </button>
+                ${
+                  isArchived
+                    ? `<button
+                        type="button"
+                        class="btn-secondary btn-sm"
+                        data-action="unarchive-account"
+                        data-account-id="${acc.id}"
+                        aria-label="Desarchivar la cuenta ${acc.name}"
+                      >
+                        ♻️ Desarchivar Cuenta
+                      </button>`
+                    : `<button
+                        type="button"
+                        class="btn-secondary btn-sm"
+                        data-action="open-account-transfer"
+                        data-account-id="${acc.id}"
+                      >
+                        ${renderIcon('transfer', 14)} Transferir
+                      </button>`
+                }
 
                 <div class="card-crud-group">
                   <button
@@ -2399,8 +2520,8 @@ class FinanceAppController {
                     class="btn-card-icon is-danger"
                     data-action="delete-account"
                     data-account-id="${acc.id}"
-                    title="Borrar cuenta ${acc.name}"
-                    aria-label="Borrar cuenta ${acc.name}"
+                    title="Archivar o borrar cuenta ${acc.name}"
+                    aria-label="Archivar o borrar cuenta ${acc.name}"
                   >
                     ${renderIcon('trash', 15)}
                   </button>
@@ -2755,13 +2876,15 @@ class FinanceAppController {
         throw new Error(data.error || 'No se pudieron extraer transacciones del texto.');
       }
 
+      const defaultActiveAccountId =
+        filterActiveAccounts(this.state.accounts)[0]?.id || this.state.accounts[0]?.id || 'acc_bank';
       for (const item of data.items) {
         const tx = this.recordWorkspaceTransaction({
           type: item.type || TRANSACTION_TYPES.EXPENSE,
           amount: item.amount,
           currency: this.state.settings.baseCurrency || 'USD',
           categoryId: item.categoryId || 'food',
-          accountId: this.state.accounts[0]?.id || 'acc_bank',
+          accountId: defaultActiveAccountId,
           note: item.note || 'Genkit Smart Parse',
         });
         this.state.transactions.unshift(tx);

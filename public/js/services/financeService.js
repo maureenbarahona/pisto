@@ -8,7 +8,13 @@
  * - Groups chronological transactions by date with daily net cashflow.
  */
 
-import { Money, TRANSACTION_TYPES, ACCOUNT_TYPES, DEFAULT_CATEGORIES } from '../domain/models.js';
+import {
+  Money,
+  TRANSACTION_TYPES,
+  ACCOUNT_TYPES,
+  DEFAULT_CATEGORIES,
+  isAccountArchived,
+} from '../domain/models.js';
 
 function resolveTransactionCategory(tx, categoryMap, stateCategories = []) {
   if (tx.type === TRANSACTION_TYPES.TRANSFER) {
@@ -170,9 +176,12 @@ export function computeAccountsSummary(state, options = {}) {
     const goalProgressPct = acc.targetAmount > 0
       ? Math.min(100, Math.max(0, Math.round((Math.abs(currentBalance) / acc.targetAmount) * 100)))
       : 0;
+    const archived = isAccountArchived(acc);
 
     return {
       ...acc,
+      isArchived: archived,
+      status: archived ? 'archived' : 'active',
       currentBalance,
       balanceInBase,
       goalProgressPct,
@@ -181,8 +190,13 @@ export function computeAccountsSummary(state, options = {}) {
     };
   });
 
+  const activeAccountsWithBalance = accountsWithBalance.filter((a) => !a.isArchived);
+  const archivedAccountsWithBalance = accountsWithBalance.filter((a) => a.isArchived);
+
   return {
     accountsWithBalance,
+    activeAccountsWithBalance,
+    archivedAccountsWithBalance,
     totalIncludedBalance: Money.fromCents(totalIncludedCents),
     totalSavings: Money.fromCents(totalSavingsCents),
     totalDebt: Money.fromCents(totalDebtCents),

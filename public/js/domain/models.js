@@ -289,6 +289,24 @@ export function extractLast4Digits(rawAccountOrCard) {
 }
 
 /**
+ * Checks whether an account is archived (`isArchived === true` or `status === 'archived'`).
+ * @param {object} acc
+ * @returns {boolean}
+ */
+export function isAccountArchived(acc) {
+  return Boolean(acc && (acc.isArchived === true || acc.status === 'archived'));
+}
+
+/**
+ * Returns only active (non-archived) accounts for transaction creation selectors.
+ * @param {Array<object>} accounts
+ * @returns {Array<object>}
+ */
+export function getActiveAccounts(accounts = []) {
+  return (Array.isArray(accounts) ? accounts : []).filter((acc) => !isAccountArchived(acc));
+}
+
+/**
  * Creates a validated Account / Wallet / Savings Goal / Debt entity.
  * @param {object} input
  */
@@ -304,13 +322,22 @@ export function createAccount({
   includeInTotal = true,
   color = '#10b981',
   icon = 'wallet',
+  isArchived = false,
+  status = 'active',
+  workspaceId = '',
+  createdByUid = '',
+  createdAt = '',
+  updatedAt = '',
 }) {
   const cleanName = String(name || '').trim();
   if (!cleanName) {
     throw new Error('El nombre de la cuenta es obligatorio.');
   }
 
-  return {
+  const archived = Boolean(isArchived === true || status === 'archived');
+  const resolvedStatus = archived ? 'archived' : 'active';
+
+  const account = {
     id,
     name: cleanName.slice(0, 48),
     type,
@@ -322,7 +349,16 @@ export function createAccount({
     includeInTotal: Boolean(includeInTotal),
     color: String(color || '#10b981'),
     icon: String(icon || 'wallet'),
+    isArchived: archived,
+    status: resolvedStatus,
   };
+
+  if (workspaceId) account.workspaceId = String(workspaceId).trim().slice(0, 80);
+  if (createdByUid) account.createdByUid = String(createdByUid).trim().slice(0, 128);
+  if (createdAt) account.createdAt = String(createdAt).trim().slice(0, 40);
+  if (updatedAt) account.updatedAt = String(updatedAt).trim().slice(0, 40);
+
+  return account;
 }
 
 /**

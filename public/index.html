@@ -326,7 +326,21 @@
               Gestiona múltiples divisas, transfiere fondos entre cuentas y monitorea metas de ahorro.
             </p>
           </div>
-          <div class="toolbar-action-group">
+          <div class="toolbar-action-group" style="display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap;">
+            <label
+              for="toggle-show-archived-accounts"
+              class="archived-toggle-pill"
+              style="display: inline-flex; align-items: center; gap: 0.45rem; font-size: 0.8125rem; color: var(--text-secondary); background: var(--bg-elevated); border: 1px solid var(--surface-border); border-radius: 999px; padding: 0.38rem 0.8rem; cursor: pointer;"
+              title="Mostrar u ocultar cuentas archivadas para poder desarchivarlas o reactivarlas"
+            >
+              <input
+                type="checkbox"
+                id="toggle-show-archived-accounts"
+                aria-label="Mostrar Cuentas Archivadas"
+                style="margin: 0; accent-color: var(--color-brand);"
+              />
+              <span>📦 Mostrar Cuentas Archivadas <small id="archived-accounts-count-badge">(0)</small></span>
+            </label>
             <button
               type="button"
               id="btn-new-transfer"
@@ -1264,12 +1278,13 @@
   </dialog>
 
   <!-- ==================================================================== -->
-  <!-- MODAL 4: ADVERTENCIA DE CONFIRMACIÓN PARA BORRAR CUENTA / CATEGORÍA  -->
+  <!-- MODAL 4: MODAL DE CONFIRMACIÓN DE ELIMINACIÓN / ARCHIVADO DE CUENTA  -->
+  <!-- (`DeleteAccountModal` — Integridad Relacional & Eliminación Cascada) -->
   <!-- ==================================================================== -->
-  <dialog id="delete-warning-dialog" class="modal-dialog" closedby="any" aria-labelledby="delete-warning-title">
+  <dialog id="delete-warning-dialog" class="modal-dialog modal-dialog-wide" closedby="any" aria-labelledby="delete-warning-title">
     <div class="modal-header">
       <h2 id="delete-warning-title" style="display: flex; align-items: center; gap: 0.5rem; color: #f59e0b; font-size: 1.1rem;">
-        <span aria-hidden="true">⚠️</span> Confirmar eliminación
+        <span aria-hidden="true">⚠️</span> Gestión de Cuenta e Integridad Relacional
       </h2>
       <form method="dialog">
         <button type="submit" class="btn-secondary btn-sm" id="btn-close-delete-warning" aria-label="Cerrar modal de confirmación de eliminación">Cerrar</button>
@@ -1278,18 +1293,65 @@
 
     <div class="delete-warning-body">
       <div class="warning-alert-banner">
-        <strong id="delete-warning-target-name">¿Deseas borrar esta cuenta?</strong>
-        <p id="delete-warning-description">
-          Esta acción eliminará la cuenta seleccionada. Sus movimientos asociados se conservarán reasignados a tu cuenta principal.
+        <strong id="delete-warning-target-name">¿Deseas archivar o eliminar esta cuenta?</strong>
+        <p id="delete-warning-description" style="margin-top: 0.2rem;">
+          Revisa el saldo actual y el número de transacciones asociadas antes de continuar:
         </p>
+        <div style="display: flex; flex-wrap: wrap; gap: 0.65rem; margin-top: 0.55rem;">
+          <span class="voucher-pill">
+            💰 Saldo actual: <strong id="delete-account-balance-badge" style="font-variant-numeric: tabular-nums;">$0.00</strong>
+          </span>
+          <span class="voucher-pill">
+            📋 Movimientos asociados: <strong id="delete-account-tx-count-badge">0 transacción(es)</strong>
+          </span>
+        </div>
       </div>
 
-      <div class="delete-warning-actions">
-        <button type="button" id="btn-cancel-delete-warning" class="btn-secondary" aria-label="Cancelar eliminación">
-          Cancelar
+      <!-- Opción A: Archivar Cuenta (Recomendado) -->
+      <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.35); border-left: 4px solid #10b981; border-radius: var(--radius-sm); padding: 0.9rem 1rem; margin-bottom: 0.95rem;">
+        <div style="font-weight: 700; font-size: 0.92rem; color: var(--text-primary); margin-bottom: 0.25rem;">
+          Opción A — Preservar Historial Financiero
+        </div>
+        <p style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.45; margin: 0 0 0.7rem 0;">
+          Oculta la cuenta de la lista activa y de los selectores de nuevos movimientos (<code>isArchived: true</code>), manteniendo intactas todas las transacciones históricas, presupuestos y reportes del Dashboard.
+        </p>
+        <button
+          type="button"
+          id="btn-archive-account-option"
+          class="btn-primary"
+          style="width: 100%; justify-content: center;"
+          aria-label="Opción A: Archivar Cuenta (Recomendado)"
+        >
+          📦 Archivar Cuenta (Recomendado)
         </button>
-        <button type="button" id="btn-confirm-delete-warning" class="btn-danger" aria-label="Confirmar y borrar definitivamente">
-          Sí, borrar definitivamente
+      </div>
+
+      <!-- Opción B: Borrar Cuenta y Transacciones (Eliminar en Cascada) -->
+      <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.45); border-left: 4px solid #ef4444; border-radius: var(--radius-sm); padding: 0.9rem 1rem; margin-bottom: 1rem;">
+        <div style="font-weight: 700; font-size: 0.92rem; color: #ef4444; margin-bottom: 0.25rem;">
+          Opción B — Eliminación Permanente en Cascada (Firestore writeBatch)
+        </div>
+        <p
+          id="delete-cascade-red-alert"
+          role="alert"
+          style="font-size: 0.83rem; color: #f87171; font-weight: 600; line-height: 1.45; margin: 0 0 0.75rem 0;"
+        >
+          Esta acción eliminará la cuenta Y TODAS las 0 transacciones/movimientos asociados permanentemente. Esta acción no se puede deshacer.
+        </p>
+        <button
+          type="button"
+          id="btn-confirm-delete-warning"
+          class="btn-danger"
+          style="width: 100%; justify-content: center;"
+          aria-label="Opción B: Borrar Cuenta y Transacciones (Eliminar en Cascada)"
+        >
+          ⚠️ Borrar Cuenta y Transacciones (Eliminar en Cascada)
+        </button>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end;">
+        <button type="button" id="btn-cancel-delete-warning" class="btn-secondary" aria-label="Cancelar y mantener la cuenta sin cambios">
+          Cancelar
         </button>
       </div>
     </div>
