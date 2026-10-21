@@ -25,6 +25,11 @@ import {
   shouldTriggerOnboarding,
   ensureCleanWorkspaceForFirstTimeUser,
   completeUserOnboarding,
+  ZERO_DASHBOARD_METRICS,
+  resetGlobalDashboardMetricsToZero,
+  renderDashboardMetricsToDom,
+  recalculateDashboardMetrics,
+  calculateSafeSavingsRate,
 } from '../services/firestore.js';
 
 export {
@@ -32,6 +37,11 @@ export {
   shouldTriggerOnboarding,
   ensureCleanWorkspaceForFirstTimeUser,
   completeUserOnboarding,
+  ZERO_DASHBOARD_METRICS,
+  resetGlobalDashboardMetricsToZero,
+  renderDashboardMetricsToDom,
+  recalculateDashboardMetrics,
+  calculateSafeSavingsRate,
 };
 
 export const ONBOARDING_WIZARD_DIALOG_ID = 'onboarding-wizard-dialog';
@@ -451,14 +461,16 @@ export class OnboardingWizard {
         ? this.authService.getFirestoreContext()
         : {});
 
-    await ensureCleanWorkspaceForFirstTimeUser({
+    const cleanResult = await ensureCleanWorkspaceForFirstTimeUser({
       workspaceId,
       uid,
+      baseCurrency: profile?.defaultCurrency || 'HNL',
       state,
       repo,
       storage: context.storage ?? fsContext.storage,
       firestoreDb: context.firestoreDb ?? fsContext.firestoreDb,
       firestoreModule: context.firestoreModule ?? fsContext.firestoreModule,
+      docRef: context.docRef,
     });
 
     this.open({
@@ -466,6 +478,7 @@ export class OnboardingWizard {
       profile,
       defaultCurrency: profile?.defaultCurrency || 'HNL',
       country: profile?.country || 'HN',
+      skipAsyncReset: true,
     });
 
     return {
@@ -473,6 +486,7 @@ export class OnboardingWizard {
       cleaned: true,
       workspaceId,
       uid,
+      dashboardMetrics: cleanResult.dashboardMetrics,
     };
   }
 
@@ -493,6 +507,34 @@ export class OnboardingWizard {
     this.transitionDirection = 'forward';
     this.isOpen = true;
     globalThis.__PISTO_ONBOARDING_WIZARD_OPEN__ = true;
+
+    renderDashboardMetricsToDom(ZERO_DASHBOARD_METRICS, this.selectedCurrency);
+
+    if (!options.skipAsyncReset) {
+      const uid =
+        this.activeUser?.uid ||
+        this.activeProfile?.uid ||
+        this.authService?.getCurrentUser?.()?.uid ||
+        'local_default_user';
+      const workspaceId =
+        this.activeProfile?.workspaceId ||
+        this.getState()?.settings?.workspaceId ||
+        `ws_${uid}`;
+      const fsContext =
+        this.authService && typeof this.authService.getFirestoreContext === 'function'
+          ? this.authService.getFirestoreContext()
+          : {};
+      void resetGlobalDashboardMetricsToZero({
+        workspaceId,
+        uid,
+        baseCurrency: this.selectedCurrency,
+        state: this.getState(),
+        repo: this.repo,
+        storage: fsContext.storage,
+        firestoreDb: fsContext.firestoreDb,
+        firestoreModule: fsContext.firestoreModule,
+      });
+    }
 
     this.render();
 

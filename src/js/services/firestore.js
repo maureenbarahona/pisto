@@ -77,6 +77,22 @@ import {
   filterTransactionsForUserView,
 } from '../../../public/js/services/authProfileService.js';
 import { createCleanWorkspaceState } from '../../../public/js/repositories/storageRepository.js';
+import {
+  DEMO_SEED_ACCOUNT_IDS,
+  ZERO_DASHBOARD_METRICS,
+  isDemoOrResidualTransaction,
+  isDemoOrResidualAccount,
+  filterCleanUserTransactions,
+  filterCleanUserAccounts,
+  calculateSafeSavingsRate,
+  formatDashboardKpiLabels,
+  renderDashboardMetricsToDom,
+  renderDashboardKpiElementsToZero,
+  recalculateDashboardMetrics,
+  purgeResidualTransactionsFromWorkspace,
+  resetGlobalDashboardMetricsToZero,
+  initializeDashboardStateForNewUser,
+} from './dashboard.js';
 
 export {
   CUSTOM_FIREBASE_CONFIG_STORAGE_KEY,
@@ -128,6 +144,20 @@ export {
   createCleanWorkspaceState,
   buildWorkspaceTransactionIndex,
   filterTransactionsForUserView,
+  DEMO_SEED_ACCOUNT_IDS,
+  ZERO_DASHBOARD_METRICS,
+  isDemoOrResidualTransaction,
+  isDemoOrResidualAccount,
+  filterCleanUserTransactions,
+  filterCleanUserAccounts,
+  calculateSafeSavingsRate,
+  formatDashboardKpiLabels,
+  renderDashboardMetricsToDom,
+  renderDashboardKpiElementsToZero,
+  recalculateDashboardMetrics,
+  purgeResidualTransactionsFromWorkspace,
+  resetGlobalDashboardMetricsToZero,
+  initializeDashboardStateForNewUser,
 };
 
 /**

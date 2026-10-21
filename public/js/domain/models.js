@@ -127,15 +127,19 @@ export const Money = Object.freeze({
     const validCode = CURRENCIES[currencyCode] ? currencyCode : 'USD';
     const numeric = Number.isFinite(Number(amount)) ? Number(amount) : 0;
     try {
-      return new Intl.NumberFormat('es-HN', {
+      const formatted = new Intl.NumberFormat('es-HN', {
         style: 'currency',
         currency: validCode,
         minimumFractionDigits: validCode === 'CRC' || validCode === 'CLP' || validCode === 'COP' ? 0 : 2,
         maximumFractionDigits: validCode === 'CRC' || validCode === 'CLP' || validCode === 'COP' ? 0 : 2,
       }).format(numeric);
+      if (validCode === 'HNL') {
+        return formatted.replace(/^(-?)L\s*/, '$1L ').replace(/\u00a0/g, ' ');
+      }
+      return formatted;
     } catch {
       const symbol = CURRENCIES[validCode]?.symbol || '$';
-      return `${symbol}${numeric.toFixed(2)}`;
+      return `${symbol}${validCode === 'HNL' ? ' ' : ''}${numeric.toFixed(2)}`;
     }
   },
 });

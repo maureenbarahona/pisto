@@ -2081,4 +2081,214 @@ describe('Primer Inicio / Onboarding Wizard & Clean Database Initialization (Van
   });
 });
 
+describe('Dashboard Global Metrics Zero Reset, Residual Cleanup & Safe Savings Rate (src/js/services/dashboard.js)', () => {
+  it('initializes Dashboard KPIs in strict zero (L 0.00, + L 0.00, - L 0.00, 0%) in Firestore and UI, purges residual transactions, and prevents division-by-zero (-4397%)', async () => {
+    const fs = await import('node:fs/promises');
+    const {
+      ZERO_DASHBOARD_METRICS,
+      calculateSafeSavingsRate,
+      recalculateDashboardMetrics,
+      resetGlobalDashboardMetricsToZero,
+      initializeDashboardStateForNewUser,
+      purgeResidualTransactionsFromWorkspace,
+    } = await import('../src/js/services/dashboard.js');
+
+    // 1. Safe Savings Rate guard: totalIncome === 0 must strictly return 0 (never -4397% or -Infinity)
+    assert.equal(calculateSafeSavingsRate(0, 0, false), 0);
+    assert.equal(calculateSafeSavingsRate(0, 4397, true), 0);
+    assert.equal(calculateSafeSavingsRate(0, 1250.5, true), 0);
+    assert.equal(calculateSafeSavingsRate(-100, 500, true), 0);
+    assert.equal(calculateSafeSavingsRate(10000, 2500, true), 75);
+
+    // 2. Recalculate metrics when state still holds demo seed records for an authenticated workspace
+    const dirtyState = createSeedState();
+    dirtyState.settings.workspaceId = 'ws_uid_nuevo_usuario';
+    dirtyState.settings.currentUid = 'uid_nuevo_usuario';
+    dirtyState.settings.baseCurrency = 'HNL';
+
+    const recalcBeforeCleanup = recalculateDashboardMetrics(dirtyState, {
+      workspaceId: 'ws_uid_nuevo_usuario',
+      currentUid: 'uid_nuevo_usuario',
+      baseCurrency: 'HNL',
+    });
+    assert.equal(recalcBeforeCleanup.totalIncludedBalance, 0);
+    assert.equal(recalcBeforeCleanup.totalIncome, 0);
+    assert.equal(recalcBeforeCleanup.totalExpenses, 0);
+    assert.equal(recalcBeforeCleanup.savingsRate, 0);
+    assert.equal(recalcBeforeCleanup.savingsRatePct, 0);
+    assert.equal(recalcBeforeCleanup.patrimonioLabel, 'L 0.00');
+    assert.equal(recalcBeforeCleanup.ingresosLabel, '+ L 0.00');
+    assert.equal(recalcBeforeCleanup.gastosLabel, '- L 0.00');
+    assert.equal(recalcBeforeCleanup.tasaAhorroLabel, '0%');
+
+    // Also verify computeAccountsSummary & computePeriodAnalytics in financeService.js
+    const summaryFromFinance = computeAccountsSummary(dirtyState);
+    const analyticsFromFinance = computePeriodAnalytics(dirtyState);
+    assert.equal(summaryFromFinance.totalIncludedBalance, 0);
+    assert.equal(analyticsFromFinance.totalIncome, 0);
+    assert.equal(analyticsFromFinance.totalExpense, 0);
+    assert.equal(analyticsFromFinance.savingsRatePct, 0);
+
+    // Verify computePeriodAnalytics when user has an expense but 0 income (e.g. L 43.97 expense, L 0.00 income)
+    const expenseOnlyState = {
+      settings: {
+        baseCurrency: 'HNL',
+        periodFilter: 'all',
+        workspaceId: 'ws_uid_nuevo_usuario',
+        currentUid: 'uid_nuevo_usuario',
+      },
+      accounts: [
+        createAccount({
+          id: 'acc_user_real_1',
+          name: 'Cuenta BAC',
+          type: 'bank',
+          currency: 'HNL',
+          initialBalance: 0,
+          workspaceId: 'ws_uid_nuevo_usuario',
+          createdByUid: 'uid_nuevo_usuario',
+        }),
+      ],
+      categories: dirtyState.categories,
+      budgets: {},
+      transactions: [
+        createTransaction({
+          id: 'tx_user_real_1',
+          type: 'expense',
+          amount: 4397,
+          currency: 'HNL',
+          categoryId: 'cat_food',
+          accountId: 'acc_user_real_1',
+          date: '2026-10-21',
+          note: 'Supermercado',
+          workspaceId: 'ws_uid_nuevo_usuario',
+          createdByUid: 'uid_nuevo_usuario',
+        }),
+      ],
+    };
+    const expenseOnlyAnalytics = computePeriodAnalytics(expenseOnlyState);
+    const expenseOnlyRecalc = recalculateDashboardMetrics(expenseOnlyState);
+    assert.equal(expenseOnlyAnalytics.totalIncome, 0);
+    assert.equal(expenseOnlyAnalytics.totalExpense, 4397);
+    assert.equal(expenseOnlyAnalytics.savingsRatePct, 0);
+    assert.equal(expenseOnlyRecalc.savingsRate, 0);
+    assert.equal(expenseOnlyRecalc.tasaAhorroLabel, '0%');
+
+    // 3. Verify resetGlobalDashboardMetricsToZero / initializeDashboardStateForNewUser in Firestore & DOM
+    const domElements = {
+      'kpi-total-balance': { textContent: '$999.99' },
+      'kpi-period-income': { textContent: '+$500.00' },
+      'kpi-period-expense': { textContent: '-$250.00' },
+      'kpi-savings-rate': { textContent: '-4397%' },
+    };
+    const mockDoc = {
+      getElementById(id) {
+        return domElements[id] || null;
+      },
+    };
+
+    const firestoreStores = {
+      users: new Map(),
+      workspaces: new Map(),
+      accounts: new Map([
+        ['acc_seed_residual', { id: 'acc_seed_residual', workspaceId: 'ws_uid_nuevo_usuario' }],
+      ]),
+      transactions: new Map([
+        ['tx_seed_1', { id: 'tx_seed_1', workspaceId: 'ws_uid_nuevo_usuario', amount: 1850 }],
+      ]),
+      budgets: new Map(),
+    };
+
+    const mockFirestoreModule = {
+      doc: (_db, col, id) => ({ col, id }),
+      getDoc: async (ref) => ({
+        exists: () => firestoreStores[ref.col]?.has(ref.id) || false,
+        data: () => firestoreStores[ref.col]?.get(ref.id) || null,
+      }),
+      setDoc: async (ref, data, opts) => {
+        const prev = opts?.merge ? firestoreStores[ref.col]?.get(ref.id) || {} : {};
+        firestoreStores[ref.col]?.set(ref.id, { ...prev, ...data });
+      },
+      collection: (_db, col) => ({ col }),
+      where: (field, op, val) => ({ field, op, val }),
+      query: (colRef, ...conds) => ({ col: colRef.col, conds }),
+      getDocs: async (q) => {
+        const store = firestoreStores[q.col] || new Map();
+        const docs = [];
+        for (const [id, data] of store.entries()) {
+          const matches = (q.conds || []).every((c) => data[c.field] === c.val);
+          if (matches) {
+            docs.push({
+              id,
+              ref: { col: q.col, id },
+              data: () => data,
+            });
+          }
+        }
+        return { empty: docs.length === 0, docs };
+      },
+      writeBatch: () => {
+        const ops = [];
+        return {
+          delete: (ref) => ops.push(ref),
+          commit: async () => {
+            for (const r of ops) {
+              firestoreStores[r.col]?.delete(r.id);
+            }
+          },
+        };
+      },
+    };
+
+    const resetMetrics = await initializeDashboardStateForNewUser({
+      workspaceId: 'ws_uid_nuevo_usuario',
+      uid: 'uid_nuevo_usuario',
+      baseCurrency: 'HNL',
+      state: dirtyState,
+      firestoreDb: {},
+      firestoreModule: mockFirestoreModule,
+      docRef: mockDoc,
+    });
+
+    assert.equal(resetMetrics.patrimonioLabel, ZERO_DASHBOARD_METRICS.patrimonioLabel);
+    assert.equal(resetMetrics.ingresosLabel, ZERO_DASHBOARD_METRICS.ingresosLabel);
+    assert.equal(resetMetrics.gastosLabel, ZERO_DASHBOARD_METRICS.gastosLabel);
+    assert.equal(resetMetrics.tasaAhorroLabel, ZERO_DASHBOARD_METRICS.tasaAhorroLabel);
+
+    // Check strict UI strings:
+    assert.equal(domElements['kpi-total-balance'].textContent, 'L 0.00');
+    assert.equal(domElements['kpi-period-income'].textContent, '+ L 0.00');
+    assert.equal(domElements['kpi-period-expense'].textContent, '- L 0.00');
+    assert.equal(domElements['kpi-savings-rate'].textContent, '0%');
+
+    // Check Firestore persistence of zero metrics and residual transaction cleanup:
+    assert.equal(firestoreStores.transactions.size, 0);
+    assert.equal(firestoreStores.accounts.size, 0);
+    const wsDoc = firestoreStores.workspaces.get('ws_uid_nuevo_usuario');
+    assert.ok(wsDoc?.dashboardMetrics);
+    assert.equal(wsDoc.dashboardMetrics.patrimonioEnCuentas, 'L 0.00');
+    assert.equal(wsDoc.dashboardMetrics.ingresosDelPeriodo, '+ L 0.00');
+    assert.equal(wsDoc.dashboardMetrics.gastosDelPeriodo, '- L 0.00');
+    assert.equal(wsDoc.dashboardMetrics.tasaDeAhorro, '0%');
+
+    // Check zero console.log in dashboard service files
+    for (const relPath of [
+      'src/js/services/dashboard.js',
+      'public/js/services/dashboard.js',
+      'public/js/services/financeService.js',
+      'public/js/app.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Expected zero console.log in ${relPath}`
+      );
+    }
+  });
+});
+
+
 

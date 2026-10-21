@@ -81,6 +81,22 @@ import {
   ONBOARDING_FINISH_BUTTON_LABEL,
   EMPTY_STATE_CTA_LABELS,
 } from './ui/onboardingWizard.js?v=19';
+import {
+  DEMO_SEED_ACCOUNT_IDS,
+  ZERO_DASHBOARD_METRICS,
+  isDemoOrResidualTransaction,
+  isDemoOrResidualAccount,
+  filterCleanUserTransactions,
+  filterCleanUserAccounts,
+  calculateSafeSavingsRate,
+  formatDashboardKpiLabels,
+  renderDashboardMetricsToDom,
+  renderDashboardKpiElementsToZero,
+  recalculateDashboardMetrics,
+  purgeResidualTransactionsFromWorkspace,
+  resetGlobalDashboardMetricsToZero,
+  initializeDashboardStateForNewUser,
+} from './services/dashboard.js?v=20';
 
 export {
   openImportModal,
@@ -93,6 +109,20 @@ export {
   ONBOARDING_STEPS,
   ONBOARDING_FINISH_BUTTON_LABEL,
   EMPTY_STATE_CTA_LABELS,
+  DEMO_SEED_ACCOUNT_IDS,
+  ZERO_DASHBOARD_METRICS,
+  isDemoOrResidualTransaction,
+  isDemoOrResidualAccount,
+  filterCleanUserTransactions,
+  filterCleanUserAccounts,
+  calculateSafeSavingsRate,
+  formatDashboardKpiLabels,
+  renderDashboardMetricsToDom,
+  renderDashboardKpiElementsToZero,
+  recalculateDashboardMetrics,
+  purgeResidualTransactionsFromWorkspace,
+  resetGlobalDashboardMetricsToZero,
+  initializeDashboardStateForNewUser,
 };
 
 export class FinanceAppController {
@@ -197,8 +227,10 @@ export class FinanceAppController {
       this.state.settings.personalViewMode = Boolean(profile.personalViewMode);
       this.state.settings.workspaceId = nextWorkspaceId;
 
+      const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
+
       if (isFirstTimeUser && reason !== 'profile-saved') {
-        // 1a. Guarantee initial workspace state is completely CLEAN (0 accounts, 0 transactions, 0 budgets)
+        // 1a. Guarantee initial workspace state & Dashboard KPIs are strictly ZERO (0 accounts, 0 transactions, 0 budgets)
         this.state.accounts = [];
         this.state.transactions = [];
         this.state.budgets = {};
@@ -208,25 +240,49 @@ export class FinanceAppController {
             defaultBudget: 0,
           }));
         }
+        void resetGlobalDashboardMetricsToZero({
+          workspaceId: nextWorkspaceId,
+          uid: nextUid,
+          baseCurrency: profile.defaultCurrency || this.state.settings.baseCurrency || 'HNL',
+          state: this.state,
+          repo: this.repo,
+          storage,
+          firestoreDb,
+          firestoreModule,
+        });
         // 1b. Automatically start the interactive Onboarding Wizard
         void this.onboardingWizard?.checkAndStartForUser(user, profile, {
           state: this.state,
           repo: this.repo,
         });
-      } else if (Array.isArray(this.state.transactions)) {
-        // Sync local current-user transactions into the active workspace when linking or signing in
-        this.state.transactions.forEach((tx) => {
-          if (tx.workspaceId === 'ws_default' || tx.createdByUid === nextUid) {
-            tx.workspaceId = nextWorkspaceId;
-          }
-          if (tx.createdByUid === 'local_default_user' && nextUid !== 'local_default_user') {
-            tx.createdByUid = nextUid;
-            tx.ownerUid = nextUid;
-            if (!tx.createdByEmail || tx.createdByEmail === 'personal@pisto.hn') {
-              tx.createdByEmail = nextEmail;
+      } else {
+        // Purge any demo/seed accounts or transactions (`tx_seed_*`, `acc_seed_*`) so authenticated workspaces stay clean
+        if (nextWorkspaceId && nextWorkspaceId !== 'ws_default') {
+          this.state.accounts = filterCleanUserAccounts(this.state.accounts || [], {
+            workspaceId: nextWorkspaceId,
+            currentUid: nextUid,
+            excludeDemoSeeds: true,
+          });
+          this.state.transactions = (this.state.transactions || []).filter(
+            (tx) => !/^tx_seed_/i.test(String(tx?.id || '')) && tx?.isDemo !== true
+          );
+        }
+
+        if (Array.isArray(this.state.transactions)) {
+          this.state.transactions.forEach((tx) => {
+            if (/^tx_seed_/i.test(String(tx?.id || ''))) return;
+            if (tx.workspaceId === 'ws_default' || tx.createdByUid === nextUid) {
+              tx.workspaceId = nextWorkspaceId;
             }
-          }
-        });
+            if (tx.createdByUid === 'local_default_user' && nextUid !== 'local_default_user') {
+              tx.createdByUid = nextUid;
+              tx.ownerUid = nextUid;
+              if (!tx.createdByEmail || tx.createdByEmail === 'personal@pisto.hn') {
+                tx.createdByEmail = nextEmail;
+              }
+            }
+          });
+        }
       }
 
       if (profile.defaultCurrency) {
@@ -239,7 +295,6 @@ export class FinanceAppController {
       this.repo.saveState(this.state);
 
       // Ensure member transactions are migrated & subscribed via workspaceId query
-      const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
       if (!isFirstTimeUser && nextWorkspaceId && nextWorkspaceId !== 'ws_default') {
         migrateTransactionsToSharedWorkspace(
           nextWorkspaceId,
@@ -293,15 +348,33 @@ export class FinanceAppController {
         storage,
       },
       (workspaceTransactions) => {
-        if (!Array.isArray(workspaceTransactions) || workspaceTransactions.length === 0) {
+        const excludeDemoSeeds = Boolean(workspaceId && workspaceId !== 'ws_default');
+        const cleanExisting = filterCleanUserTransactions(this.state.transactions || [], {
+          workspaceId,
+          currentUid,
+          excludeDemoSeeds,
+        });
+        const cleanIncoming = filterCleanUserTransactions(workspaceTransactions || [], {
+          workspaceId,
+          currentUid,
+          excludeDemoSeeds,
+        });
+
+        if (cleanIncoming.length === 0) {
+          if (cleanExisting.length !== (this.state.transactions || []).length) {
+            this.state.transactions = cleanExisting;
+            this.repo.saveState(this.state);
+            this.renderAll();
+          }
           return;
         }
+
         const mergedById = new Map();
-        for (const tx of this.state.transactions || []) {
+        for (const tx of cleanExisting) {
           if (tx && tx.id) mergedById.set(tx.id, tx);
         }
-        let hasChanges = false;
-        for (const incomingTx of workspaceTransactions) {
+        let hasChanges = cleanExisting.length !== (this.state.transactions || []).length;
+        for (const incomingTx of cleanIncoming) {
           if (!incomingTx || !incomingTx.id) continue;
           const prev = mergedById.get(incomingTx.id);
           if (
@@ -2280,16 +2353,33 @@ export class FinanceAppController {
   }
 
   renderHeaderKpis(accountsSummary, analytics) {
-    const cur = analytics.baseCurrency;
+    const cur = analytics?.baseCurrency || this.state?.settings?.baseCurrency || 'HNL';
+    const safeIncome = Number(analytics?.totalIncome || 0);
+    const safeExpenses = Number(analytics?.totalExpense ?? analytics?.totalExpenses ?? 0);
+    const safeSavingsRate = calculateSafeSavingsRate(
+      safeIncome,
+      safeExpenses,
+      safeIncome > 0 || safeExpenses > 0
+    );
+    const labels = formatDashboardKpiLabels(
+      {
+        totalIncludedBalance: accountsSummary?.totalIncludedBalance || 0,
+        totalIncome: safeIncome,
+        totalExpenses: safeExpenses,
+        savingsRatePct: safeSavingsRate,
+      },
+      cur
+    );
+
     const netWorthEl = document.getElementById('kpi-total-balance');
     const incomeEl = document.getElementById('kpi-period-income');
     const expenseEl = document.getElementById('kpi-period-expense');
     const savingsRateEl = document.getElementById('kpi-savings-rate');
 
-    if (netWorthEl) netWorthEl.textContent = Money.format(accountsSummary.totalIncludedBalance, cur);
-    if (incomeEl) incomeEl.textContent = `+ ${Money.format(analytics.totalIncome, cur)}`;
-    if (expenseEl) expenseEl.textContent = `- ${Money.format(analytics.totalExpense, cur)}`;
-    if (savingsRateEl) savingsRateEl.textContent = `${analytics.savingsRatePct}%`;
+    if (netWorthEl) netWorthEl.textContent = labels.patrimonioLabel;
+    if (incomeEl) incomeEl.textContent = labels.ingresosLabel;
+    if (expenseEl) expenseEl.textContent = labels.gastosLabel;
+    if (savingsRateEl) savingsRateEl.textContent = labels.tasaAhorroLabel;
 
     const periodSelect = document.getElementById('period-filter-select');
     const globalDateRangeGroup = document.getElementById('global-date-range-group');

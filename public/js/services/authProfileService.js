@@ -29,6 +29,22 @@ import {
   updateFirebaseConfig,
 } from './firebase.js';
 import { migrateTransactionsToSharedWorkspace } from './transactions.js';
+import {
+  DEMO_SEED_ACCOUNT_IDS,
+  ZERO_DASHBOARD_METRICS,
+  isDemoOrResidualTransaction,
+  isDemoOrResidualAccount,
+  filterCleanUserTransactions,
+  filterCleanUserAccounts,
+  calculateSafeSavingsRate,
+  formatDashboardKpiLabels,
+  renderDashboardMetricsToDom,
+  renderDashboardKpiElementsToZero,
+  recalculateDashboardMetrics,
+  purgeResidualTransactionsFromWorkspace,
+  resetGlobalDashboardMetricsToZero,
+  initializeDashboardStateForNewUser,
+} from './dashboard.js';
 
 export {
   CUSTOM_FIREBASE_CONFIG_STORAGE_KEY,
@@ -47,6 +63,20 @@ export {
   onFirebaseConfigUpdated,
   updateFirebaseConfig,
   migrateTransactionsToSharedWorkspace,
+  DEMO_SEED_ACCOUNT_IDS,
+  ZERO_DASHBOARD_METRICS,
+  isDemoOrResidualTransaction,
+  isDemoOrResidualAccount,
+  filterCleanUserTransactions,
+  filterCleanUserAccounts,
+  calculateSafeSavingsRate,
+  formatDashboardKpiLabels,
+  renderDashboardMetricsToDom,
+  renderDashboardKpiElementsToZero,
+  recalculateDashboardMetrics,
+  purgeResidualTransactionsFromWorkspace,
+  resetGlobalDashboardMetricsToZero,
+  initializeDashboardStateForNewUser,
 };
 
 export const GEMINI_API_KEY_STORAGE_KEY = 'pisto_user_gemini_api_key_v1';
@@ -194,94 +224,26 @@ export async function ensureCleanWorkspaceForFirstTimeUser(options = {}) {
   const {
     workspaceId = 'ws_default',
     uid = 'local_default_user',
+    baseCurrency = options.state?.settings?.baseCurrency || 'HNL',
     state = null,
     repo = null,
     storage = typeof localStorage !== 'undefined' ? localStorage : null,
     firestoreDb = null,
     firestoreModule = null,
+    docRef = typeof document !== 'undefined' ? document : null,
   } = options;
 
-  // 1. Clean in-memory application state (0 accounts, 0 transactions, 0 budgets)
-  if (state && typeof state === 'object') {
-    state.accounts = [];
-    state.transactions = [];
-    state.budgets = {};
-    if (Array.isArray(state.categories)) {
-      state.categories = state.categories.map((cat) => ({
-        ...cat,
-        defaultBudget: 0,
-      }));
-    }
-    if (state.settings && typeof state.settings === 'object') {
-      state.settings.workspaceId = workspaceId;
-      state.settings.currentUid = uid;
-    }
-    if (repo && typeof repo.saveState === 'function') {
-      repo.saveState(state);
-    }
-  }
-
-  // 2. Clean local storage workspace caches
-  if (storage && typeof storage.removeItem === 'function') {
-    storage.removeItem(`pisto_firestore_accounts_ws_${workspaceId}`);
-    storage.removeItem(`pisto_firestore_transactions_ws_${workspaceId}`);
-    storage.removeItem(`pisto_firestore_budgets_ws_${workspaceId}`);
-  }
-
-  // 3. Clean Firestore collections (`accounts`, `transactions`, `budgets`) for `workspaceId` if present
-  let deletedDocsCount = 0;
-  if (
-    firestoreDb &&
-    firestoreModule &&
-    typeof firestoreModule.collection === 'function' &&
-    typeof firestoreModule.query === 'function' &&
-    typeof firestoreModule.where === 'function' &&
-    typeof firestoreModule.getDocs === 'function'
-  ) {
-    const collectionsToClean = ['accounts', 'transactions', 'budgets'];
-    for (const colName of collectionsToClean) {
-      try {
-        const colRef = firestoreModule.collection(firestoreDb, colName);
-        const q = firestoreModule.query(
-          colRef,
-          firestoreModule.where('workspaceId', '==', workspaceId)
-        );
-        const snap = await firestoreModule.getDocs(q);
-        const docs = Array.isArray(snap?.docs) ? snap.docs : [];
-        if (docs.length > 0) {
-          if (typeof firestoreModule.writeBatch === 'function') {
-            const batch = firestoreModule.writeBatch(firestoreDb);
-            for (const d of docs) {
-              const docRef =
-                d.ref ||
-                (typeof firestoreModule.doc === 'function'
-                  ? firestoreModule.doc(firestoreDb, colName, d.id)
-                  : null);
-              if (docRef) {
-                batch.delete(docRef);
-                deletedDocsCount += 1;
-              }
-            }
-            await batch.commit();
-          } else if (typeof firestoreModule.deleteDoc === 'function') {
-            for (const d of docs) {
-              const docRef =
-                d.ref ||
-                (typeof firestoreModule.doc === 'function'
-                  ? firestoreModule.doc(firestoreDb, colName, d.id)
-                  : null);
-              if (docRef) {
-                await firestoreModule.deleteDoc(docRef);
-                deletedDocsCount += 1;
-              }
-            }
-          }
-        }
-      } catch {
-        // Ignore offline Firestore cleanup errors
-      }
-    }
-  }
+  const resetResult = await resetGlobalDashboardMetricsToZero({
+    workspaceId,
+    uid,
+    baseCurrency,
+    state,
+    repo,
+    storage,
+    firestoreDb,
+    firestoreModule,
+    docRef,
+  });
 
   return {
     cleaned: true,
@@ -289,7 +251,8 @@ export async function ensureCleanWorkspaceForFirstTimeUser(options = {}) {
     accountsCount: 0,
     transactionsCount: 0,
     budgetsCount: 0,
-    deletedDocsCount,
+    deletedDocsCount: resetResult.deletedDocsCount,
+    dashboardMetrics: resetResult,
   };
 }
 
@@ -427,7 +390,13 @@ export function filterTransactionsForUserView(transactions, options = {}) {
     candidates = transactions || [];
   }
 
+  const isAuthenticatedWorkspace =
+    Boolean(workspaceId) && workspaceId !== 'ws_default' && workspaceId !== 'all';
+
   return candidates.filter((tx) => {
+    if (isAuthenticatedWorkspace && /^tx_seed_/i.test(String(tx?.id || ''))) {
+      return false;
+    }
     if (currencyFilter && currencyFilter !== 'all') {
       if (tx.currency !== currencyFilter) {
         return false;
@@ -997,6 +966,16 @@ export class FirebaseAuthProfileService {
         country: params.country,
         defaultCurrency: params.defaultCurrency,
       });
+      if (params.isRegister || shouldTriggerOnboarding(this.currentProfile)) {
+        await ensureCleanWorkspaceForFirstTimeUser({
+          workspaceId: this.currentProfile.workspaceId,
+          uid: user.uid,
+          baseCurrency: this.currentProfile.defaultCurrency || 'HNL',
+          storage: this.getStorageAdapter(),
+          firestoreDb: this.firestoreDb,
+          firestoreModule: this.firestoreModule,
+        });
+      }
       this.notifyListeners();
       return { user, profile: this.currentProfile };
     }
@@ -1053,6 +1032,16 @@ export class FirebaseAuthProfileService {
       country: params.country,
       defaultCurrency: params.defaultCurrency,
     });
+    if (params.isRegister || shouldTriggerOnboarding(this.currentProfile)) {
+      await ensureCleanWorkspaceForFirstTimeUser({
+        workspaceId: this.currentProfile.workspaceId,
+        uid: user.uid,
+        baseCurrency: this.currentProfile.defaultCurrency || 'HNL',
+        storage: this.getStorageAdapter(),
+        firestoreDb: this.firestoreDb,
+        firestoreModule: this.firestoreModule,
+      });
+    }
     this.notifyListeners();
     return { user, profile: this.currentProfile };
   }
