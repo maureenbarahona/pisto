@@ -59,43 +59,44 @@ export async function processAccountWithAgentADK(fileOrDataUrl, options = {}) {
   // 1. Si hay API Key configurada, intentar extracción con Agente ADK Vision
   if (apiKey && fileOrDataUrl) {
     try {
-      const visionResult = await extractAccountFromFile(fileOrDataUrl, {
+      const extracted = await extractAccountFromFile(fileOrDataUrl, {
         apiKey,
-        ocrTextFallback: fallbackText,
+        ocrFallbackText: fallbackText,
         fetchImpl: options.fetchImpl,
       });
       return {
-        data: visionResult.data,
-        source: 'adk-gemini-vision',
+        data: extracted.data,
+        source: `adk:${extracted.source}`,
         isDemoFallback: false,
-        message: '🤖 Agente ADK Vision: Estado de cuenta analizado exitosamente.',
+        message: '🤖 Agente ADK Vision: Estado de cuenta extraído con éxito.',
       };
-    } catch (error) {
-      console.warn(
-        '[Agente ADK] Falló la conexión con Gemini Vision; activando fallback local de diagnóstico:',
-        error
-      );
+    } catch {
+      // Fallback silencioso a modo local sin llamadas a consola
     }
   }
 
-  // 2. Si existe texto OCR/PDF extraído con datos válidos de cuenta, usarlo
-  if (fallbackText.length > 0) {
+  // 2. Si hay texto OCR válido disponible
+  if (fallbackText.length >= 12) {
     try {
-      const parsedFromOcr = parseAccountDataFromTextFallback(fallbackText);
-      if (parsedFromOcr.currentBalance > 0 || parsedFromOcr.accountNumber.length >= 4) {
+      const parsedFromText = parseAccountDataFromTextFallback(fallbackText);
+      const hasMeaningfulData =
+        Boolean(parsedFromText.accountNumber) ||
+        parsedFromText.currentBalance > 0 ||
+        parsedFromText.detectedTransactions.length > 0;
+      if (hasMeaningfulData) {
         return {
-          data: parsedFromOcr,
-          source: 'adk-local-ocr',
+          data: parsedFromText,
+          source: 'adk-ocr-local',
           isDemoFallback: false,
-          message: '🤖 Agente ADK Local: Datos extraídos del documento.',
+          message: '🤖 Agente ADK (OCR Local): Datos extraídos del documento.',
         };
       }
     } catch {
-      // Continuar al fallback estático de demostración
+      // Continúa al fallback estático de demostración
     }
   }
 
-  // 3. Fallback de Diagnóstico Local del Agente ADK ("Banco Atlántida - Cuenta de Ahorro SOS", L 3,901.33)
+  // 3. Modo de prueba / Agente Local de demostración ("Banco Atlántida - Cuenta de Ahorro SOS", L 3,901.33)
   const demoData = getDemoAccountExtraction();
   return {
     data: demoData,
@@ -113,7 +114,6 @@ export async function processAccountWithAgentADK(fileOrDataUrl, options = {}) {
 export function useAccountAgentADK(defaultOptions = {}) {
   return {
     initializeModal(notifyToast) {
-      console.log(ADK_INIT_LOG_MESSAGE);
       const toastFn = notifyToast || defaultOptions.notifyToast;
       if (typeof toastFn === 'function') {
         toastFn(ADK_INIT_LOG_MESSAGE);
