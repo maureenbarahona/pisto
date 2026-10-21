@@ -6,11 +6,18 @@ export {
   ImportAccountModal,
   IMPORT_ACCOUNT_BUTTON_ID,
   IMPORT_ACCOUNT_BUTTON_LABEL,
+  isImportAccountModalOpen,
+  getIsImportAccountModalOpen,
+  setIsImportAccountModalOpen,
+  subscribeImportAccountModalState,
+  sanitizeClickableAncestors,
   isSupportedImportAccountFile,
   checkDuplicateAccountNumber,
   formatDuplicateAccountMessage,
   formatDuplicateOverwriteWarning,
-  persistImportedAccountAndTransactions
-} from './AccountsView.js';
-export type { AccountsViewOptions, AccountsViewController } from './AccountsView.js';
-export { default } from './AccountsView.js';
+  persistImportedAccountAndTransactions,
+  renderAccountsViewTemplate,
+} from './AccountsView.tsx';
+export type { AccountsViewOptions, AccountsViewController } from './AccountsView.tsx';
+export { default } from './AccountsView.tsx';
+

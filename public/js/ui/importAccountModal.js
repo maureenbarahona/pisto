@@ -164,14 +164,27 @@ export class ImportAccountModal {
   init() {
     this.ensureModalDom();
     this.bindTriggerButtons();
+    this.bindDialogInternalEvents();
+  }
+
+  bindDialogInternalEvents() {
+    if (typeof document === 'undefined') return;
     const dialog = document.getElementById('import-account-dialog');
     if (!dialog) return;
 
+    this.populateBankOptions();
+    if (dialog.dataset.boundImportModal === 'true') return;
+    dialog.dataset.boundImportModal = 'true';
+
     attachDialogLightDismissFallback(dialog);
     dialog.addEventListener('close', () => {
+      const wasOpen = this.isImportAccountModalOpen;
       this.isImportAccountModalOpen = false;
+      globalThis.__PISTO_IMPORT_ACCOUNT_MODAL_OPEN__ = false;
+      if (wasOpen) {
+        this.options.onClose?.();
+      }
     });
-    this.populateBankOptions();
 
     const fileInput = document.getElementById('import-account-file-input');
     const dropzone = document.getElementById('import-account-dropzone');
@@ -388,13 +401,24 @@ export class ImportAccountModal {
       '#btn-import-account-media, [data-action="open-import-account-modal"]'
     );
     buttons.forEach((btn) => {
+      btn.type = 'button';
       btn.disabled = false;
       btn.removeAttribute('disabled');
-      btn.classList.remove('pointer-events-none', 'is-disabled');
+      btn.classList.remove('pointer-events-none', 'select-none', 'is-disabled');
       btn.style.pointerEvents = 'auto';
       btn.style.cursor = 'pointer';
       btn.style.position = 'relative';
       btn.style.zIndex = '10';
+
+      let parentEl = btn.parentElement;
+      while (parentEl && parentEl !== document.body) {
+        parentEl.classList.remove('pointer-events-none', 'select-none', 'is-disabled');
+        if (parentEl.style?.pointerEvents === 'none') {
+          parentEl.style.pointerEvents = 'auto';
+        }
+        parentEl = parentEl.parentElement;
+      }
+
       btn.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -404,24 +428,55 @@ export class ImportAccountModal {
   }
 
   setIsImportAccountModalOpen(isOpen) {
-    this.isImportAccountModalOpen = Boolean(isOpen);
+    const nextState = Boolean(isOpen);
+    const prevState = this.isImportAccountModalOpen;
+    this.isImportAccountModalOpen = nextState;
+    globalThis.__PISTO_IMPORT_ACCOUNT_MODAL_OPEN__ = nextState;
+
     if (typeof document === 'undefined') {
-      if (isOpen) {
+      if (nextState) {
         this.agentADK.initializeModal(this.options.showToast);
+      } else if (prevState) {
+        this.options.onClose?.();
       }
       return;
     }
 
     this.ensureModalDom();
+    this.bindDialogInternalEvents();
     const dialog = document.getElementById('import-account-dialog');
-    if (isOpen) {
+    if (nextState) {
       this.agentADK.initializeModal(this.options.showToast);
       this.resetView();
-      if (dialog && !dialog.open) {
-        dialog.showModal();
+      if (dialog) {
+        dialog.classList.remove('is-hidden');
+        if (!dialog.open) {
+          if (typeof dialog.showModal === 'function') {
+            try {
+              dialog.showModal();
+            } catch {
+              dialog.setAttribute('open', '');
+            }
+          } else {
+            dialog.setAttribute('open', '');
+          }
+        }
       }
-    } else if (dialog?.open) {
-      dialog.close();
+    } else {
+      if (dialog) {
+        if (dialog.open && typeof dialog.close === 'function') {
+          try {
+            dialog.close();
+          } catch {
+            dialog.removeAttribute('open');
+          }
+        } else {
+          dialog.removeAttribute('open');
+        }
+      }
+      if (prevState) {
+        this.options.onClose?.();
+      }
     }
   }
 
@@ -445,7 +500,9 @@ export class ImportAccountModal {
   ensureModalDom() {
     if (typeof document === 'undefined') return;
 
-    const accountsPanelActions = document.querySelector('#panel-accounts .section-header > div:last-child');
+    const accountsPanelActions = document.querySelector(
+      '#panel-accounts .toolbar-action-group, #panel-accounts .section-toolbar > div:last-child, #panel-accounts .section-header > div:last-child'
+    );
     if (accountsPanelActions && !document.getElementById('btn-import-account-media')) {
       const btn = document.createElement('button');
       btn.type = 'button';
@@ -1077,7 +1134,7 @@ export class ImportAccountModal {
       const ctx = this.options.getImportContext?.() || {};
 
       const created = await persistImportedAccountAndTransactions(payload, state, ctx);
-      dialog?.close();
+      this.setIsImportAccountModalOpen(false);
       this.options.showToast?.(created.toastMessage);
       this.options.onCreated?.(created);
     } catch (err) {
@@ -1088,3 +1145,10 @@ export class ImportAccountModal {
     }
   }
 }
+
+if (typeof globalThis !== 'undefined') {
+  globalThis.__PISTO_IMPORT_ACCOUNT_MODAL__ = ImportAccountModal;
+}
+
+export default ImportAccountModal;
+

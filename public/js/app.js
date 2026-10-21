@@ -59,9 +59,14 @@ import {
 } from './services/accounts.js?v=12';
 import { DeleteAccountModal } from './ui/deleteAccountModal.js?v=12';
 import { ProfileViewController } from './ui/profileView.js?v=12';
+import {
+  AccountsView,
+  setIsImportAccountModalOpen,
+} from './ui/accountsTab.js?v=18';
 
 class FinanceAppController {
   constructor() {
+    globalThis.pistoApp = this;
     this.repo = new StorageRepository();
     this.authService = new FirebaseAuthProfileService();
     this.workspaceTransactionsUnsubscribe = null;
@@ -75,6 +80,7 @@ class FinanceAppController {
     }
     this.activeTab = 'categories';
     this.showArchivedAccounts = Boolean(this.state.settings?.showArchivedAccounts ?? false);
+    this.isImportAccountModalOpen = false;
     this.ledgerFilters = {
       searchQuery: '',
       typeFilter: 'all',
@@ -99,11 +105,13 @@ class FinanceAppController {
         this.handleAuthAndProfileUpdated(user, profile, reason),
       showToast: (msg) => this.showToast(msg),
     });
+    this.accountsView = null;
   }
 
   async init() {
     this.setupKeypadModal();
     this.setupAccountModal();
+    this.setupImportAccountModal();
     this.setupAccountDetailModal();
     this.setupCategoryModal();
     this.setupDeleteWarningModal();
@@ -1815,6 +1823,8 @@ class FinanceAppController {
         });
       } else if (action === 'open-account-modal') {
         this.openAccountModal(null);
+      } else if (action === 'open-import-account-modal') {
+        this.openImportAccountModal();
       } else if (action === 'open-account-detail') {
         this.openAccountDetailModal(actionEl.dataset.accountId);
       } else if (action === 'edit-account') {
@@ -2338,7 +2348,45 @@ class FinanceAppController {
    * Renders Tab 2: Accounts, Wallets, Savings Goals & Debts with Clickable Detail View,
    * Archived Accounts Toggle, Unarchive Action, and Edit/Delete actions.
    */
+  setupImportAccountModal() {
+    this.accountsView = new AccountsView({
+      getState: () => this.state,
+      getImportContext: () => {
+        const runtime = this.authService?.getFirebaseRuntime?.() || {};
+        return {
+          apiKey: this.authService?.geminiKeyStore?.getApiKey?.() || '',
+          workspaceId: this.authService?.getActiveWorkspaceId?.() || this.state?.settings?.workspaceId || 'ws_default',
+          currentUser: this.authService?.currentUser || null,
+          currentUserProfile: this.authService?.currentProfile || null,
+          firestoreDb: runtime.firestoreDb || null,
+          firestoreModule: runtime.firestoreModule || null,
+          storage: typeof localStorage !== 'undefined' ? localStorage : null,
+        };
+      },
+      showToast: (msg) => this.showToast(msg),
+      onCreated: () => {
+        this.repo.saveState(this.state);
+        this.renderAll();
+      },
+      onClose: () => {
+        this.isImportAccountModalOpen = false;
+      },
+    });
+    this.accountsView.init();
+    globalThis.__PISTO_ACCOUNTS_VIEW_INSTANCE__ = this.accountsView;
+  }
+
+  openImportAccountModal() {
+    this.isImportAccountModalOpen = true;
+    if (this.accountsView) {
+      this.accountsView.setIsImportAccountModalOpen(true);
+    } else {
+      setIsImportAccountModalOpen(true);
+    }
+  }
+
   renderAccountsView(accountsSummary) {
+    this.accountsView?.bindImportAccountButton();
     const accountsGrid = document.getElementById('accounts-grid');
     if (!accountsGrid) return;
 
