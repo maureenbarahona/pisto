@@ -421,8 +421,8 @@ export class FirebaseAuthProfileService {
             }
           });
         });
-      } catch (err) {
-        console.warn('[FirebaseAuthProfileService] Usando motor Local-First Free Tier para Auth/Firestore:', err);
+      } catch {
+        // Usando motor Local-First Free Tier para Auth/Firestore
       }
     }
 
@@ -613,8 +613,8 @@ export class FirebaseAuthProfileService {
         this.setItem(docKey, JSON.stringify(newProfile));
         this.currentProfile = newProfile;
         return newProfile;
-      } catch (err) {
-        console.warn('[Firestore users/{uid} post-login sync] Fallback a caché local:', err);
+      } catch {
+        // Fallback a caché local
       }
     }
 
@@ -708,10 +708,6 @@ export class FirebaseAuthProfileService {
       const errorCode = String(error?.code || 'auth/unknown-error');
       const errorMessage = String(
         error?.originalMessage || error?.message || 'Error desconocido al iniciar sesión con Google.'
-      );
-      console.error(
-        `[Firebase Auth - Google Sign-In Error] code=${errorCode} | message=${errorMessage}`,
-        error
       );
       const formattedError = new Error(
         formatFirebaseAuthDiagnosticMessage(errorCode, errorMessage)
@@ -996,8 +992,8 @@ export class FirebaseAuthProfileService {
             }
           }
         }
-      } catch (err) {
-        console.warn('[Firestore workspaces lookup] Fallback local:', err);
+      } catch {
+        // Fallback local
       }
     }
 
@@ -1052,8 +1048,8 @@ export class FirebaseAuthProfileService {
         this.setItem(docKey, JSON.stringify(initialProfile));
         this.currentProfile = initialProfile;
         return initialProfile;
-      } catch (err) {
-        console.warn('[Firestore users/{uid}] Fallback a caché local:', err);
+      } catch {
+        // Fallback a caché local
       }
     }
 
@@ -1118,8 +1114,8 @@ export class FirebaseAuthProfileService {
       try {
         const userDocRef = this.firestoreModule.doc(this.firestoreDb, 'users', uid);
         await this.firestoreModule.setDoc(userDocRef, updatedProfile, { merge: true });
-      } catch (err) {
-        console.warn('[Firestore users/{uid}] Guardado en mirror local (Firestore offline):', err);
+      } catch {
+        // Guardado en mirror local (Firestore offline)
       }
     }
 
@@ -1163,8 +1159,8 @@ export class FirebaseAuthProfileService {
           targetUid = docSnap.id;
           targetExistingProfile = createUserProfile({ ...docSnap.data(), uid: targetUid });
         }
-      } catch (err) {
-        console.warn('[Firestore Compartir Finanzas] Búsqueda local de usuario:', err);
+      } catch {
+        // Búsqueda local de usuario
       }
     }
 
@@ -1253,8 +1249,8 @@ export class FirebaseAuthProfileService {
           },
           { merge: true }
         );
-      } catch (err) {
-        console.warn('[Firestore users/{targetUid}] Guardado local de vínculo familiar:', err);
+      } catch {
+        // Guardado local de vínculo familiar
       }
     }
 
@@ -1273,8 +1269,8 @@ export class FirebaseAuthProfileService {
       try {
         const wsRef = this.firestoreModule.doc(this.firestoreDb, 'workspaces', sharedWorkspaceId);
         await this.firestoreModule.setDoc(wsRef, workspaceDoc, { merge: true });
-      } catch (err) {
-        console.warn('[Firestore workspaces/{workspaceId}] Guardado local de workspace:', err);
+      } catch {
+        // Guardado local de workspace
       }
     }
 
@@ -1352,8 +1348,8 @@ export class FirebaseAuthProfileService {
         if (snap.exists()) {
           existingDoc = snap.data();
         }
-      } catch (err) {
-        console.warn('[Firestore workspaces/{workspaceId}] Lectura local:', err);
+      } catch {
+        // Lectura local
       }
     }
 
@@ -1408,8 +1404,8 @@ export class FirebaseAuthProfileService {
       try {
         const wsRef = this.firestoreModule.doc(this.firestoreDb, 'workspaces', workspaceId);
         await this.firestoreModule.setDoc(wsRef, workspaceDoc, { merge: true });
-      } catch (err) {
-        console.warn('[Firestore workspaces/{workspaceId}] Guardado local de token:', err);
+      } catch {
+        // Guardado local de token
       }
     }
 
@@ -1541,8 +1537,8 @@ export class FirebaseAuthProfileService {
             { merge: true }
           );
         }
-      } catch (err) {
-        console.warn('[Firestore leaveSharedWorkspace] Fallback local:', err);
+      } catch {
+        // Fallback local
       }
     }
 

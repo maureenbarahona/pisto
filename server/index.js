@@ -12,7 +12,6 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { stripTypeScriptTypes } from 'node:module';
 import {
   executeSmartParse,
   executeFinancialInsights,
@@ -21,7 +20,9 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const ROOT_DIR = path.resolve(__dirname, '..');
 const PUBLIC_DIR = path.resolve(__dirname, '../public');
+const SRC_DIR = path.resolve(__dirname, '../src');
 
 // Load .env if present (Node 20.6+ native or fallback parser)
 await loadEnvFileIfPresent(path.resolve(__dirname, '../.env'));
@@ -33,7 +34,6 @@ const MIME_TYPES = Object.freeze({
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.mjs': 'text/javascript; charset=utf-8',
-  '.ts': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
@@ -234,12 +234,28 @@ export async function handleRequest(req, res) {
     }
   }
 
-  // 5. Static File Serving from /public (with native TypeScript type-stripping for .ts modules)
+  // 5. Static File Serving from /src and /public (Pure Vanilla ESNext Modules & CSS3)
   if (req.method === 'GET' || req.method === 'HEAD') {
-    const safeRelative = path.normalize(pathname === '/' ? '/index.html' : pathname).replace(/^(\.\.(\/|\\|$))+/, '');
-    const filePath = path.join(PUBLIC_DIR, safeRelative);
+    const safeRelative = path
+      .normalize(pathname === '/' ? '/index.html' : pathname)
+      .replace(/^(\.\.(\/|\\|$))+/, '');
 
-    if (!filePath.startsWith(PUBLIC_DIR)) {
+    let baseDir = PUBLIC_DIR;
+    let filePath = path.join(PUBLIC_DIR, safeRelative);
+
+    if (safeRelative.startsWith('/src/') || safeRelative.startsWith('src/')) {
+      baseDir = ROOT_DIR;
+      filePath = path.join(ROOT_DIR, safeRelative);
+      if (!filePath.startsWith(SRC_DIR)) {
+        return sendJson(res, 403, { error: 'Forbidden' });
+      }
+    } else if (safeRelative.startsWith('/public/') || safeRelative.startsWith('public/')) {
+      baseDir = ROOT_DIR;
+      filePath = path.join(ROOT_DIR, safeRelative);
+      if (!filePath.startsWith(PUBLIC_DIR)) {
+        return sendJson(res, 403, { error: 'Forbidden' });
+      }
+    } else if (!filePath.startsWith(baseDir)) {
       return sendJson(res, 403, { error: 'Forbidden' });
     }
 
@@ -248,18 +264,6 @@ export async function handleRequest(req, res) {
       const targetFile = stat.isDirectory() ? path.join(filePath, 'index.html') : filePath;
       const ext = path.extname(targetFile).toLowerCase();
       const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-
-      if (ext === '.ts' && typeof stripTypeScriptTypes === 'function') {
-        const tsSource = await fs.readFile(targetFile, 'utf8');
-        const jsOutput = stripTypeScriptTypes(tsSource);
-        applySecurityHeaders(res);
-        res.writeHead(200, {
-          'Content-Type': contentType,
-          'Cache-Control': 'no-cache, no-store, must-revalidate',
-        });
-        res.end(req.method === 'HEAD' ? undefined : jsOutput);
-        return;
-      }
 
       if (path.basename(targetFile) === 'index.html') {
         await loadEnvFileIfPresent(path.resolve(__dirname, '../.env'));
@@ -309,17 +313,12 @@ export async function handleRequest(req, res) {
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
   const server = http.createServer(handleRequest);
 
-  server.listen(PORT, '0.0.0.0', () => {
-    const status = getAiTelemetryStatus();
-    console.log(`🚀 Pisto Open-Finance ejecutándose en http://localhost:${PORT}`);
-    console.log(`⚡ Motor Genkit (${status.model}): ${status.genkitConfigured ? 'ACTIVO (GEMINI_API_KEY detectada)' : 'MODO 0-TOKENS LOCAL (Sin GEMINI_API_KEY)'}`);
-  });
+  server.listen(PORT, '0.0.0.0');
 
   // Cloud Run Graceful Shutdown
-  const shutdown = (signal) => {
-    console.log(`\n[${signal}] Cerrando servidor de forma segura...`);
+  const shutdown = () => {
     server.close(() => process.exit(0));
   };
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown());
+  process.on('SIGINT', () => shutdown());
 }

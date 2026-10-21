@@ -52,7 +52,7 @@
     href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
     rel="stylesheet"
   />
-  <link rel="stylesheet" href="/css/index.css?v=12" />
+  <link rel="stylesheet" href="/src/css/styles.css" />
 </head>
 <body>
   <a href="#main-workspace" class="skip-to-content-link">Saltar al contenido principal</a>
@@ -353,7 +353,7 @@
             </button>
             <button
               type="button"
-              id="btn-import-account-media"
+              id="btn-import-account"
               class="btn-primary"
               data-action="open-import-account-modal"
               commandfor="import-account-dialog"
@@ -1800,6 +1800,49 @@
     </div>
   </dialog>
 
+  <!-- ==================================================================== -->
+  <!-- MODAL 9: ADVERTENCIA DE TRANSACCIÓN DUPLICADA (DEDUPLICACIÓN)        -->
+  <!-- ==================================================================== -->
+  <dialog id="duplicate-tx-warning-dialog" class="modal-dialog" closedby="any" aria-labelledby="duplicate-tx-warning-title">
+    <div class="modal-header">
+      <div>
+        <h2 id="duplicate-tx-warning-title">⚠️ Transacción Duplicada Detectada</h2>
+        <p style="font-size: 0.85rem; color: var(--text-secondary); margin: 0.15rem 0 0 0;">
+          Se encontró un movimiento coincidente en esta misma cuenta bancaria.
+        </p>
+      </div>
+    </div>
+    <div class="modal-body" style="display: flex; flex-direction: column; gap: 1rem;">
+      <div
+        id="duplicate-tx-warning-banner"
+        class="duplicate-tx-warning-banner"
+        role="alert"
+      >
+        ⚠️ Posible transacción duplicada detectada (Monto: L 0.00, Fecha: DD/MM/YYYY, Comercio: —)
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 0.6rem;">
+        <button
+          type="button"
+          id="btn-dup-tx-overwrite"
+          class="btn-primary"
+          data-dup-action="overwrite"
+        >✏️ Sobreescribir / Actualizar Transacción Existente</button>
+        <button
+          type="button"
+          id="btn-dup-tx-create-new"
+          class="btn-secondary"
+          data-dup-action="create_new"
+        >➕ Crear como Nueva Transacción</button>
+        <button
+          type="button"
+          id="btn-dup-tx-skip"
+          class="btn-secondary"
+          data-dup-action="skip"
+        >🚫 Omitir</button>
+      </div>
+    </div>
+  </dialog>
+
   <div id="app-toast" class="app-toast" role="status" aria-live="polite"></div>
 
   <script type="module">
@@ -1807,7 +1850,7 @@
       import('https://esm.run/invokers-polyfill').catch(() => {});
     }
   </script>
-  <script type="module" src="/js/app.js?v=18"></script>
-  <script type="module" src="/js/ui/accountsTab.js?v=18"></script>
+  <script type="module" src="/src/js/app.js"></script>
+  <script type="module" src="/js/ui/accountsTab.js"></script>
 </body>
 </html>

@@ -220,8 +220,8 @@ export async function fetchWorkspaceTransactions(options) {
       });
       const snap = await options.firestoreModule.getDocs(q);
       remoteTxs = extractSnapshotDocs(snap, workspaceId);
-    } catch (err) {
-      console.warn('[TransactionsService] Fallback Local-First en getDocs(workspaceId):', err);
+    } catch {
+      // Fallback Local-First en getDocs(workspaceId)
     }
   }
 
@@ -298,12 +298,12 @@ export function subscribeWorkspaceTransactions(options, onUpdate) {
           });
           onUpdate(attachResultProps(visibleTransactions, allWorkspaceTransactions));
         },
-        (err) => {
-          console.warn('[TransactionsService] Fallback Local-First en onSnapshot(workspaceId):', err);
+        () => {
+          // Fallback Local-First en onSnapshot(workspaceId)
         }
       );
-    } catch (err) {
-      console.warn('[TransactionsService] No se pudo iniciar onSnapshot:', err);
+    } catch {
+      // Fallback Local-First si onSnapshot falla al iniciar
     }
   }
 
@@ -351,8 +351,8 @@ export async function saveTransactionToWorkspace(
     try {
       const txDocRef = context.firestoreModule.doc(context.firestoreDb, 'transactions', tx.id);
       await context.firestoreModule.setDoc(txDocRef, tx, { merge: true });
-    } catch (err) {
-      console.warn('[TransactionsService] Guardado en caché local de workspace (Firestore offline):', err);
+    } catch {
+      // Guardado en caché local de workspace (Firestore offline)
     }
   }
 
@@ -381,8 +381,8 @@ export async function deleteTransactionFromWorkspace(
     try {
       const txDocRef = context.firestoreModule.doc(context.firestoreDb, 'transactions', txId);
       await context.firestoreModule.deleteDoc(txDocRef);
-    } catch (err) {
-      console.warn('[TransactionsService] Eliminado localmente (Firestore offline):', err);
+    } catch {
+      // Eliminado localmente (Firestore offline)
     }
   }
 }
@@ -553,11 +553,8 @@ export async function deleteAccountAndTransactionsWriteBatch(accountId, options 
 
       await batch.commit();
       batchCommitted = true;
-    } catch (err) {
-      console.warn(
-        '[TransactionsService] Fallback Local-First en writeBatch de eliminación en cascada:',
-        err
-      );
+    } catch {
+      // Fallback Local-First en writeBatch de eliminación en cascada
     }
   }
 

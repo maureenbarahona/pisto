@@ -208,6 +208,8 @@ export function validateExtractedAccount(input) {
       const type = classifyTransactionType(tx?.type, concept);
       const date = normalizeScanDateToIso(tx?.date);
       const selected = tx?.selected !== undefined ? Boolean(tx.selected) : true;
+      const duplicateAction = tx?.duplicateAction || null;
+      const duplicateTxId = tx?.duplicateTxId || null;
       return {
         id: String(tx?.id || `imp_tx_${idx}_${Date.now().toString(36)}`),
         date,
@@ -215,6 +217,8 @@ export function validateExtractedAccount(input) {
         type,
         amount,
         selected,
+        ...(duplicateAction ? { duplicateAction } : {}),
+        ...(duplicateTxId ? { duplicateTxId } : {}),
       };
     })
     .filter((tx) => tx.amount > 0 && !isMobileUiNoiseLine(tx.concept));
@@ -471,8 +475,8 @@ export async function extractAccountFromFile(fileOrDataUrl, options = {}) {
           };
         }
       }
-    } catch (err) {
-      console.warn('[AccountExtractor] Gemini Vision direct call fallback:', err);
+    } catch {
+      // Fallback to server Genkit or local OCR
     }
   }
 
@@ -503,8 +507,8 @@ export async function extractAccountFromFile(fileOrDataUrl, options = {}) {
           };
         }
       }
-    } catch (err) {
-      console.warn('[AccountExtractor] Server Genkit fallback:', err);
+    } catch {
+      // Fallback to local OCR parser
     }
   }
 
@@ -558,11 +562,33 @@ function inferCategoryIdFromConcept(concept, type) {
  */
 export async function persistImportedAccountAndTransactions(
   rawAccountData,
-  state,
-  context = {}
+  stateOrContext,
+  maybeContext = {}
 ) {
-  const validated = ExtractedAccountSchema.parse(rawAccountData);
-  const selectedTxs = validated.detectedTransactions.filter((tx) => tx.selected !== false);
+  const isSecondArgState =
+    stateOrContext &&
+    (Array.isArray(stateOrContext.accounts) || Array.isArray(stateOrContext.transactions));
+  const state = isSecondArgState ? stateOrContext : stateOrContext?.appState || null;
+  const context = isSecondArgState ? maybeContext : stateOrContext || {};
+
+  const rawTxs = Array.isArray(rawAccountData?.detectedTransactions)
+    ? rawAccountData.detectedTransactions.map((tx) => ({
+        ...tx,
+        duplicateTxId: tx.duplicateTxId || tx.duplicateId || '',
+      }))
+    : [];
+
+  const validated = ExtractedAccountSchema.parse({
+    ...rawAccountData,
+    detectedTransactions: rawTxs,
+  });
+
+  const skippedTransactions = validated.detectedTransactions.filter(
+    (tx) => tx.selected === false || tx.duplicateAction === 'skip'
+  );
+  const selectedTxs = validated.detectedTransactions.filter(
+    (tx) => tx.selected !== false && tx.duplicateAction !== 'skip'
+  );
 
   const user = context.currentUser || null;
   const profile = context.currentUserProfile || null;
@@ -596,6 +622,7 @@ export async function persistImportedAccountAndTransactions(
 
   let netSelectedTxCents = 0;
   for (const tx of selectedTxs) {
+    if (tx.duplicateAction === 'overwrite') continue;
     const cents = Money.toCents(cleanAmount(tx.amount));
     if (tx.type === 'income') {
       netSelectedTxCents += cents;
@@ -611,16 +638,29 @@ export async function persistImportedAccountAndTransactions(
     validated.accountType;
   const accountDisplayName = `${validated.bankName} - ${shortType}`.slice(0, 48);
 
+  const normAccNum = String(validated.accountNumber || '').replace(/[\s-]/g, '');
+  const existingAccount =
+    (context.existingAccountId
+      ? (state?.accounts || []).find((a) => a.id === context.existingAccountId)
+      : null) ||
+    (normAccNum
+      ? (state?.accounts || []).find(
+          (a) => String(a.accountNumber || '').replace(/[\s-]/g, '') === normAccNum
+        )
+      : null) ||
+    null;
+
   const nowIso = new Date().toISOString();
   const accountEntity = {
     ...createAccount({
+      id: existingAccount?.id || undefined,
       name: accountDisplayName,
       type: internalType,
       institution: resolveCanonicalInstitution(validated.bankName),
       accountNumber: validated.accountNumber,
       currency: validated.currency === 'USD' ? 'USD' : 'HNL',
-      initialBalance: computedInitialBalance,
-      targetAmount: 0,
+      initialBalance: existingAccount ? existingAccount.initialBalance : computedInitialBalance,
+      targetAmount: existingAccount?.targetAmount || 0,
       includeInTotal: !isArchived,
       color: isCard ? '#8b5cf6' : '#10b981',
       icon: isCard ? 'card' : 'bank',
@@ -628,7 +668,7 @@ export async function persistImportedAccountAndTransactions(
       status: isArchived ? 'archived' : 'active',
       workspaceId,
       createdByUid,
-      createdAt: nowIso,
+      createdAt: existingAccount?.createdAt || nowIso,
       updatedAt: nowIso,
     }),
     bankName: validated.bankName,
@@ -636,9 +676,17 @@ export async function persistImportedAccountAndTransactions(
     currentBalance: validated.currentBalance,
   };
 
-  const createdTransactions = selectedTxs.map((detTx) =>
-    prepareTransactionForWorkspace(
+  const overwrittenTransactions = [];
+  const newlyCreatedTransactions = [];
+
+  const persistedTransactions = selectedTxs.map((detTx) => {
+    const existingDupId =
+      detTx.duplicateAction === 'overwrite' && detTx.duplicateTxId
+        ? String(detTx.duplicateTxId)
+        : undefined;
+    const txDoc = prepareTransactionForWorkspace(
       {
+        id: existingDupId,
         type: detTx.type === 'income' ? TRANSACTION_TYPES.INCOME : TRANSACTION_TYPES.EXPENSE,
         amount: cleanAmount(detTx.amount),
         currency: accountEntity.currency,
@@ -653,8 +701,14 @@ export async function persistImportedAccountAndTransactions(
       user,
       profile,
       workspaceId
-    )
-  );
+    );
+    if (existingDupId) {
+      overwrittenTransactions.push(txDoc);
+    } else {
+      newlyCreatedTransactions.push(txDoc);
+    }
+    return txDoc;
+  });
 
   let batchCommitted = false;
   const { firestoreDb, firestoreModule, storage } = context;
@@ -666,7 +720,7 @@ export async function persistImportedAccountAndTransactions(
         const batch = firestoreModule.writeBatch(firestoreDb);
         if (typeof batch.set === 'function') {
           batch.set(accountRef, accountEntity, { merge: true });
-          for (const txDoc of createdTransactions) {
+          for (const txDoc of persistedTransactions) {
             const txRef = firestoreModule.doc(firestoreDb, 'transactions', txDoc.id);
             batch.set(txRef, txDoc, { merge: true });
           }
@@ -676,18 +730,18 @@ export async function persistImportedAccountAndTransactions(
       }
       if (!batchCommitted && typeof firestoreModule.setDoc === 'function') {
         await firestoreModule.setDoc(accountRef, accountEntity, { merge: true });
-        for (const txDoc of createdTransactions) {
+        for (const txDoc of persistedTransactions) {
           const txRef = firestoreModule.doc(firestoreDb, 'transactions', txDoc.id);
           await firestoreModule.setDoc(txRef, txDoc, { merge: true });
         }
         batchCommitted = true;
       }
-    } catch (err) {
-      console.warn('[AccountExtractor] Guardado local (Firestore offline):', err);
+    } catch {
+      // Fallback to local workspace storage when Firestore is offline
     }
   }
 
-  for (const txDoc of createdTransactions) {
+  for (const txDoc of persistedTransactions) {
     await saveTransactionToWorkspace(txDoc, user, profile, {
       firestoreDb: batchCommitted ? null : firestoreDb,
       firestoreModule: batchCommitted ? null : firestoreModule,
@@ -697,11 +751,21 @@ export async function persistImportedAccountAndTransactions(
 
   if (state) {
     if (Array.isArray(state.accounts)) {
-      state.accounts.push(accountEntity);
+      const existingAccIdx = state.accounts.findIndex((a) => a.id === accountEntity.id);
+      if (existingAccIdx !== -1) {
+        state.accounts[existingAccIdx] = accountEntity;
+      } else {
+        state.accounts.push(accountEntity);
+      }
     }
     if (Array.isArray(state.transactions)) {
-      for (const txDoc of [...createdTransactions].reverse()) {
-        state.transactions.unshift(txDoc);
+      for (const txDoc of [...persistedTransactions].reverse()) {
+        const existingTxIdx = state.transactions.findIndex((t) => t.id === txDoc.id);
+        if (existingTxIdx !== -1) {
+          state.transactions[existingTxIdx] = txDoc;
+        } else {
+          state.transactions.unshift(txDoc);
+        }
       }
     }
   }
@@ -713,7 +777,11 @@ export async function persistImportedAccountAndTransactions(
 
   return {
     account: accountEntity,
-    transactions: createdTransactions,
+    accountUpdated: Boolean(existingAccount),
+    transactions: persistedTransactions,
+    createdTransactions: newlyCreatedTransactions,
+    overwrittenTransactions,
+    skippedTransactions,
     batchCommitted,
     toastMessage,
   };

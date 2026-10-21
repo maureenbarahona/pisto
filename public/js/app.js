@@ -62,9 +62,18 @@ import { ProfileViewController } from './ui/profileView.js?v=12';
 import {
   AccountsView,
   setIsImportAccountModalOpen,
-} from './ui/accountsTab.js?v=18';
+  openImportModal,
+} from './ui/accountsTab.js?v=19';
+import {
+  promptDuplicateTransactionModal,
+  findAccountDuplicateTransactions,
+  resolveDuplicateTransactionAction,
+  DUPLICATE_TRANSACTION_ACTIONS,
+} from './ui/importAccountModal.js?v=19';
 
-class FinanceAppController {
+export { openImportModal };
+
+export class FinanceAppController {
   constructor() {
     globalThis.pistoApp = this;
     this.repo = new StorageRepository();
@@ -336,11 +345,66 @@ class FinanceAppController {
     return preparedTx;
   }
 
+  async registerTransactionWithDeduplication(txInput) {
+    const dupCheck = findAccountDuplicateTransactions(
+      txInput,
+      this.state.transactions || [],
+      txInput.accountId
+    );
+
+    if (dupCheck.isDuplicate && dupCheck.duplicateTransaction) {
+      const action = await promptDuplicateTransactionModal(
+        txInput,
+        dupCheck.duplicateTransaction
+      );
+      const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
+      const resolved = await resolveDuplicateTransactionAction({
+        action,
+        candidateTx: {
+          ...txInput,
+          ...this.getActiveOwnerMetadata(),
+        },
+        existingTx: dupCheck.duplicateTransaction,
+        state: this.state,
+        context: {
+          currentUser: this.authService.getCurrentUser(),
+          currentUserProfile: this.authService.getCurrentProfile(),
+          workspaceId: this.state.settings?.workspaceId || 'ws_default',
+          firestoreDb,
+          firestoreModule,
+          storage,
+        },
+      });
+
+      this.repo.saveState(this.state);
+      if (resolved.action === DUPLICATE_TRANSACTION_ACTIONS.SKIP) {
+        this.showToast('🚫 Transacción duplicada omitida.');
+      } else if (resolved.action === DUPLICATE_TRANSACTION_ACTIONS.OVERWRITE && resolved.savedTransaction) {
+        this.showToast(
+          `✏️ Transacción existente actualizada: ${Money.format(resolved.savedTransaction.amount, resolved.savedTransaction.currency)}`
+        );
+      } else if (resolved.savedTransaction) {
+        this.showToast(
+          `➕ Nueva transacción registrada: ${Money.format(resolved.savedTransaction.amount, resolved.savedTransaction.currency)}`
+        );
+      }
+      this.renderAll();
+      return resolved.savedTransaction;
+    }
+
+    const newTx = this.recordWorkspaceTransaction(txInput, null);
+    this.state.transactions.unshift(newTx);
+    this.repo.saveState(this.state);
+    this.showToast(`Transacción registrada: ${Money.format(newTx.amount, newTx.currency)}`);
+    this.renderAll();
+    return newTx;
+  }
+
   setupKeypadModal() {
     const dialogEl = document.getElementById('tx-dialog');
     this.keypadModal = new KeypadModalController({
       dialogEl,
-      onSubmit: (txInput) => {
+      onSubmit: async (txInput) => {
         const existingIdx = txInput.id
           ? this.state.transactions.findIndex((t) => t.id === txInput.id)
           : -1;
@@ -353,13 +417,10 @@ class FinanceAppController {
           this.showToast(
             `Transacción actualizada: ${Money.format(updatedTx.amount, updatedTx.currency)}`
           );
+          this.renderAll();
         } else {
-          const newTx = this.recordWorkspaceTransaction(txInput, null);
-          this.state.transactions.unshift(newTx);
-          this.repo.saveState(this.state);
-          this.showToast(`Transacción registrada: ${Money.format(newTx.amount, newTx.currency)}`);
+          await this.registerTransactionWithDeduplication(txInput);
         }
-        this.renderAll();
       },
       onDelete: (txId) => {
         this.deleteTransaction(txId);
@@ -2373,6 +2434,7 @@ class FinanceAppController {
       },
     });
     this.accountsView.init();
+    document.getElementById('btn-import-account')?.addEventListener('click', openImportModal);
     globalThis.__PISTO_ACCOUNTS_VIEW_INSTANCE__ = this.accountsView;
   }
 
@@ -2387,6 +2449,7 @@ class FinanceAppController {
 
   renderAccountsView(accountsSummary) {
     this.accountsView?.bindImportAccountButton();
+    document.getElementById('btn-import-account')?.addEventListener('click', openImportModal);
     const accountsGrid = document.getElementById('accounts-grid');
     if (!accountsGrid) return;
 
@@ -3116,7 +3179,22 @@ class FinanceAppController {
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+export function bootstrapPistoApp() {
+  if (typeof document === 'undefined') return null;
+  document.getElementById('btn-import-account')?.addEventListener('click', openImportModal);
+  if (globalThis.pistoApp) {
+    return globalThis.pistoApp;
+  }
   const app = new FinanceAppController();
   app.init();
-});
+  return app;
+}
+
+if (typeof document !== 'undefined') {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootstrapPistoApp, { once: true });
+  } else {
+    bootstrapPistoApp();
+  }
+}
+
