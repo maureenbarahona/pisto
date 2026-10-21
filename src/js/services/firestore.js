@@ -68,10 +68,15 @@ import {
 import {
   FirebaseAuthProfileService,
   GeminiKeyLocalStore,
+  SUPPORTED_COUNTRIES,
   createUserProfile,
+  shouldTriggerOnboarding,
+  ensureCleanWorkspaceForFirstTimeUser,
+  completeUserOnboarding,
   buildWorkspaceTransactionIndex,
   filterTransactionsForUserView,
 } from '../../../public/js/services/authProfileService.js';
+import { createCleanWorkspaceState } from '../../../public/js/repositories/storageRepository.js';
 
 export {
   CUSTOM_FIREBASE_CONFIG_STORAGE_KEY,
@@ -115,7 +120,12 @@ export {
   deleteAccountWithCascade,
   FirebaseAuthProfileService,
   GeminiKeyLocalStore,
+  SUPPORTED_COUNTRIES,
   createUserProfile,
+  shouldTriggerOnboarding,
+  ensureCleanWorkspaceForFirstTimeUser,
+  completeUserOnboarding,
+  createCleanWorkspaceState,
   buildWorkspaceTransactionIndex,
   filterTransactionsForUserView,
 };

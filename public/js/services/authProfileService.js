@@ -158,11 +158,213 @@ export function createUserProfile(input) {
     defaultCurrency: validCurrency,
     personalViewMode: Boolean(input.personalViewMode ?? false),
     filterByDefaultCurrency: Boolean(input.filterByDefaultCurrency ?? true),
+    hasCompletedOnboarding: Boolean(input.hasCompletedOnboarding ?? false),
     workspaceId: cleanWorkspaceId,
     sharedWithEmails: cleanSharedEmails,
     createdAt: input.createdAt || nowIso,
     updatedAt: input.updatedAt || nowIso,
   };
+}
+
+/**
+ * Determines whether a user profile requires the First-Time Onboarding Wizard.
+ * Returns `true` when `hasCompletedOnboarding` is `false` or does not exist.
+ * @param {object|null|undefined} profile
+ * @returns {boolean}
+ */
+export function shouldTriggerOnboarding(profile) {
+  if (!profile || typeof profile !== 'object') return false;
+  return profile.hasCompletedOnboarding !== true;
+}
+
+/**
+ * Guarantees that the initial Firestore and local state for a first-time user's `workspaceId`
+ * is completely CLEAN (0 accounts, 0 transactions, 0 budgets).
+ *
+ * @param {object} [options]
+ * @param {string} [options.workspaceId]
+ * @param {string} [options.uid]
+ * @param {object} [options.state]
+ * @param {any} [options.repo]
+ * @param {any} [options.storage]
+ * @param {any} [options.firestoreDb]
+ * @param {any} [options.firestoreModule]
+ */
+export async function ensureCleanWorkspaceForFirstTimeUser(options = {}) {
+  const {
+    workspaceId = 'ws_default',
+    uid = 'local_default_user',
+    state = null,
+    repo = null,
+    storage = typeof localStorage !== 'undefined' ? localStorage : null,
+    firestoreDb = null,
+    firestoreModule = null,
+  } = options;
+
+  // 1. Clean in-memory application state (0 accounts, 0 transactions, 0 budgets)
+  if (state && typeof state === 'object') {
+    state.accounts = [];
+    state.transactions = [];
+    state.budgets = {};
+    if (Array.isArray(state.categories)) {
+      state.categories = state.categories.map((cat) => ({
+        ...cat,
+        defaultBudget: 0,
+      }));
+    }
+    if (state.settings && typeof state.settings === 'object') {
+      state.settings.workspaceId = workspaceId;
+      state.settings.currentUid = uid;
+    }
+    if (repo && typeof repo.saveState === 'function') {
+      repo.saveState(state);
+    }
+  }
+
+  // 2. Clean local storage workspace caches
+  if (storage && typeof storage.removeItem === 'function') {
+    storage.removeItem(`pisto_firestore_accounts_ws_${workspaceId}`);
+    storage.removeItem(`pisto_firestore_transactions_ws_${workspaceId}`);
+    storage.removeItem(`pisto_firestore_budgets_ws_${workspaceId}`);
+  }
+
+  // 3. Clean Firestore collections (`accounts`, `transactions`, `budgets`) for `workspaceId` if present
+  let deletedDocsCount = 0;
+  if (
+    firestoreDb &&
+    firestoreModule &&
+    typeof firestoreModule.collection === 'function' &&
+    typeof firestoreModule.query === 'function' &&
+    typeof firestoreModule.where === 'function' &&
+    typeof firestoreModule.getDocs === 'function'
+  ) {
+    const collectionsToClean = ['accounts', 'transactions', 'budgets'];
+    for (const colName of collectionsToClean) {
+      try {
+        const colRef = firestoreModule.collection(firestoreDb, colName);
+        const q = firestoreModule.query(
+          colRef,
+          firestoreModule.where('workspaceId', '==', workspaceId)
+        );
+        const snap = await firestoreModule.getDocs(q);
+        const docs = Array.isArray(snap?.docs) ? snap.docs : [];
+        if (docs.length > 0) {
+          if (typeof firestoreModule.writeBatch === 'function') {
+            const batch = firestoreModule.writeBatch(firestoreDb);
+            for (const d of docs) {
+              const docRef =
+                d.ref ||
+                (typeof firestoreModule.doc === 'function'
+                  ? firestoreModule.doc(firestoreDb, colName, d.id)
+                  : null);
+              if (docRef) {
+                batch.delete(docRef);
+                deletedDocsCount += 1;
+              }
+            }
+            await batch.commit();
+          } else if (typeof firestoreModule.deleteDoc === 'function') {
+            for (const d of docs) {
+              const docRef =
+                d.ref ||
+                (typeof firestoreModule.doc === 'function'
+                  ? firestoreModule.doc(firestoreDb, colName, d.id)
+                  : null);
+              if (docRef) {
+                await firestoreModule.deleteDoc(docRef);
+                deletedDocsCount += 1;
+              }
+            }
+          }
+        }
+      } catch {
+        // Ignore offline Firestore cleanup errors
+      }
+    }
+  }
+
+  return {
+    cleaned: true,
+    workspaceId,
+    accountsCount: 0,
+    transactionsCount: 0,
+    budgetsCount: 0,
+    deletedDocsCount,
+  };
+}
+
+/**
+ * Marks `hasCompletedOnboarding: true` in Firestore `users/{uid}` and updates currency/country preferences.
+ *
+ * @param {string} uid
+ * @param {object} [options]
+ * @param {string} [options.defaultCurrency]
+ * @param {string} [options.country]
+ * @param {any} [options.authService]
+ * @param {any} [options.firestoreDb]
+ * @param {any} [options.firestoreModule]
+ * @param {any} [options.storage]
+ */
+export async function completeUserOnboarding(uid, options = {}) {
+  const cleanUid = String(uid || '').trim();
+  if (!cleanUid) {
+    throw new Error('El uid del usuario es obligatorio para completar el onboarding.');
+  }
+
+  const defaultCurrency = options.defaultCurrency && CURRENCIES[options.defaultCurrency]
+    ? String(options.defaultCurrency)
+    : 'HNL';
+  const country = SUPPORTED_COUNTRIES.some((c) => c.code === options.country)
+    ? String(options.country)
+    : 'HN';
+  const nowIso = new Date().toISOString();
+
+  if (options.authService && typeof options.authService.saveUserProfile === 'function') {
+    return await options.authService.saveUserProfile(cleanUid, {
+      hasCompletedOnboarding: true,
+      defaultCurrency,
+      country,
+    });
+  }
+
+  const payload = {
+    uid: cleanUid,
+    hasCompletedOnboarding: true,
+    defaultCurrency,
+    country,
+    updatedAt: nowIso,
+  };
+
+  if (
+    options.firestoreDb &&
+    options.firestoreModule &&
+    typeof options.firestoreModule.doc === 'function' &&
+    typeof options.firestoreModule.setDoc === 'function'
+  ) {
+    const userDocRef = options.firestoreModule.doc(options.firestoreDb, 'users', cleanUid);
+    await options.firestoreModule.setDoc(userDocRef, payload, { merge: true });
+  }
+
+  const storage = options.storage ?? (typeof localStorage !== 'undefined' ? localStorage : null);
+  if (storage && typeof storage.getItem === 'function' && typeof storage.setItem === 'function') {
+    const docKey = `${FIRESTORE_USERS_CACHE_PREFIX}${cleanUid}`;
+    let existing = {};
+    try {
+      const raw = storage.getItem(docKey);
+      if (raw) existing = JSON.parse(raw) || {};
+    } catch {
+      existing = {};
+    }
+    const merged = createUserProfile({
+      ...existing,
+      ...payload,
+      uid: cleanUid,
+    });
+    storage.setItem(docKey, JSON.stringify(merged));
+    return merged;
+  }
+
+  return createUserProfile(payload);
 }
 
 /**
@@ -1121,6 +1323,45 @@ export class FirebaseAuthProfileService {
 
     this.notifyListeners();
     return updatedProfile;
+  }
+
+  /**
+   * Marks the user's Onboarding Wizard as completed (`hasCompletedOnboarding: true`)
+   * in Firestore `users/{uid}` and persists selected country/defaultCurrency.
+   * @param {string} [uid]
+   * @param {object} [options]
+   */
+  async completeOnboarding(uid, options = {}) {
+    const targetUid =
+      String(uid || this.currentUser?.uid || this.currentProfile?.uid || '').trim();
+    if (!targetUid) {
+      throw new Error('No se encontró un usuario activo para completar el Onboarding.');
+    }
+    return await this.saveUserProfile(targetUid, {
+      hasCompletedOnboarding: true,
+      ...(options.defaultCurrency ? { defaultCurrency: options.defaultCurrency } : {}),
+      ...(options.country ? { country: options.country } : {}),
+    });
+  }
+
+  /**
+   * Ensures a completely clean initial workspace (0 accounts, 0 transactions, 0 budgets)
+   * when `hasCompletedOnboarding` is false or missing.
+   * @param {object} [options]
+   */
+  async ensureCleanWorkspaceForUser(options = {}) {
+    const uid =
+      options.uid || this.currentUser?.uid || this.currentProfile?.uid || 'local_default_user';
+    const workspaceId =
+      options.workspaceId || this.currentProfile?.workspaceId || `ws_${uid}`;
+    return await ensureCleanWorkspaceForFirstTimeUser({
+      ...options,
+      uid,
+      workspaceId,
+      storage: options.storage ?? this.getStorageAdapter(),
+      firestoreDb: options.firestoreDb ?? this.firestoreDb,
+      firestoreModule: options.firestoreModule ?? this.firestoreModule,
+    });
   }
 
   /**

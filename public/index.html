@@ -286,6 +286,7 @@
       <!-- TAB 1: CATEGORÍAS (Pisto Signature Donut + Category Grid)         -->
       <!-- ================================================================== -->
       <section id="panel-categories" data-tab-panel="categories" role="tabpanel" aria-labelledby="tab-btn-categories">
+        <div id="dashboard-empty-state-banner" class="is-hidden" style="margin-bottom: 1rem;"></div>
         <div class="categories-workspace">
           <aside class="donut-panel" aria-label="Gráfico circular de gastos por categoría">
             <div id="donut-chart-mount"></div>
@@ -1842,6 +1843,16 @@
       </div>
     </div>
   </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 10: PRIMER INICIO / ONBOARDING WIZARD (4 PASOS VANILLA JS)     -->
+  <!-- ==================================================================== -->
+  <dialog
+    id="onboarding-wizard-dialog"
+    class="modal-dialog onboarding-wizard-dialog"
+    closedby="any"
+    aria-labelledby="onboarding-step-title"
+  ></dialog>
 
   <div id="app-toast" class="app-toast" role="status" aria-live="polite"></div>
 
