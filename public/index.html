@@ -353,6 +353,17 @@
             </button>
             <button
               type="button"
+              id="btn-import-account-media"
+              class="btn-primary"
+              data-action="open-import-account-modal"
+              commandfor="import-account-dialog"
+              command="show-modal"
+              aria-label="Importar cuenta y movimientos desde imagen o PDF"
+            >
+              ➕ Importar Cuenta desde Imagen/PDF
+            </button>
+            <button
+              type="button"
               id="btn-new-account"
               class="btn-primary"
               data-action="open-account-modal"
@@ -1791,6 +1802,12 @@
 
   <div id="app-toast" class="app-toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="/js/app.js?v=12"></script>
+  <script type="module">
+    if (!('commandForElement' in HTMLButtonElement.prototype)) {
+      import('https://esm.run/invokers-polyfill').catch(() => {});
+    }
+  </script>
+  <script type="module" src="/js/app.js?v=18"></script>
+  <script type="module" src="/js/ui/accountsTab.js?v=18"></script>
 </body>
 </html>
