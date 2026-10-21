@@ -394,3 +394,4 @@ export const ACCOUNT_SCAN_RESPONSE_JSON_SCHEMA = Object.freeze({
     'detectedTransactions',
   ],
 });
+
