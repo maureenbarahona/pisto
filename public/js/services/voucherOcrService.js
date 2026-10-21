@@ -112,14 +112,16 @@ const MERCHANT_CATEGORY_RULES = Object.freeze([
 ]);
 
 /**
- * Known POS header/footer boilerplate patterns that should NOT be mistaken for the Merchant name.
+ * Known POS header/footer boilerplate and Mobile Banking UI / Status Bar patterns
+ * that should NOT be mistaken for the Merchant / Concept name.
  */
 const POS_BOILERPLATE_PATTERNS = [
   /^BAC\s*CREDOMATIC$/i,
   /^CREDOMATIC$/i,
   /^BAC$/i,
-  /^BANCO\s+(ATLANTIDA|FICOHSA|DE\s+OCCIDENTE|DAVIVIENDA|LAFISE|PROMERICA|AZTECA|POPULAR|DEL\s+PAIS)/i,
-  /^BANPAIS$/i,
+  /^BANCO\s+(ATL[AÁ]NTIDA|FICOHSA|DE\s+OCCIDENTE|DAVIVIENDA|LAFISE|PROMERICA|AZTECA|POPULAR|DEL\s+PA[IÍ]S|GENERAL)/i,
+  /^ATL[AÁ]NTIDA$/i,
+  /^BANPA[IÍ]S$/i,
   /^FICOHSA$/i,
   /^SW\s*[:.]/i,
   /^REV\s*[:.]/i,
@@ -150,6 +152,13 @@ const POS_BOILERPLATE_PATTERNS = [
   /^AFILIACION/i,
   /^RTN\s*[:.]/i,
   /^CAI\s*[:.]/i,
+  // Mobile Status Bar (clock 5:30, 4G/5G/LTE/WiFi, battery %) & Navigation UI buttons
+  /^\s*\d{1,2}:\d{2}(?:\s*(?:AM|PM|a\.?\s*m\.?|p\.?\s*m\.?))?(?:\s+(?:4G|5G|LTE|WiFi|VoLTE|\d{1,3}%|[•|📶🔋⚡]))*\s*$/i,
+  /^(?:4G|5G|LTE|WIFI|VOLTE|\d{1,3}%)$/i,
+  /^(?:[<>←→✕×]\s*)?(?:DETALLE\s+DE\s+CUENTA|DETALLE\s+DE\s+MOVIMIENTOS|MOVIMIENTOS|[UÚ]LTIMOS\s+MOVIMIENTOS|ESTADO\s+DE\s+CUENTA)$/i,
+  /^(?:TRANSFERIR|PAGAR|COMPARTIR|DESCARGAR|RECARGAR|RETIRAR|CONFIGURAR|VER\s+M[AÁ]S|ATR[AÁ]S|VOLVER|INICIO|MEN[UÚ])$/i,
+  /^(?:TRANSFERIR\s+PAGAR|PAGAR\s+TRANSFERIR)$/i,
+  /^(?:SALDO\s+DISPONIBLE|SALDO\s+ACTUAL|SALDO\s+TOTAL|SALDO\s+EN\s+LIBROS|N[UÚ]MERO\s+DE\s+CUENTA|TIPO\s+DE\s+CUENTA|ESTADO|ACTIVA|INACTIVA|MONEDA|CR[EÉ]DITO|D[EÉ]BITO|DESCRIPCI[OÓ]N|CONCEPTO)$/i,
   /^[\d\s*#X•·.,:/-]+$/,
 ];
 
@@ -196,49 +205,138 @@ function normalizeOcrDigits(token) {
 }
 
 /**
- * Extracts the Merchant (Comercio) name from raw OCR voucher text.
+ * Helper function that sanitizes monetary amounts from OCR / Vision strings (`cleanAmount`).
+ * Cleans thousand-separator commas (`,`) BEFORE converting to FLOAT (`parseFloat`).
+ * Example: "3,901.33" -> remove commas -> "3901.33" -> parseFloat("3901.33") -> 3901.33
+ *
+ * @param {string|number} rawNum
+ * @returns {number}
+ */
+export function cleanAmount(rawNum) {
+  if (typeof rawNum === 'number') {
+    return Number.isFinite(rawNum) ? Money.fromCents(Money.toCents(rawNum)) : 0;
+  }
+  if (rawNum === null || rawNum === undefined) return 0;
+
+  let cleaned = String(rawNum)
+    .trim()
+    // Strip currency prefix ("HNL", "USD", "LPS", "US$", "L", "$") without touching numeric digits
+    .replace(/^(?:HNL|USD|LPS|US\$|EUR|CRC|MXN|[LlI|$€₡])\s*\.?\s*/i, '')
+    // Collapse OCR spaces around commas and decimal dots ("3, 901. 33" -> "3,901.33")
+    .replace(/\s*([,.])\s*/g, '$1')
+    .replace(/\s+/g, '');
+
+  if (!cleaned) return 0;
+
+  if (cleaned.includes(',') && cleaned.includes('.')) {
+    if (cleaned.lastIndexOf(',') < cleaned.lastIndexOf('.')) {
+      // Standard thousand-separator commas: "3,901.33" -> "3901.33"
+      cleaned = cleaned.replace(/,/g, '');
+    } else {
+      // European format: "3.901,33" -> "3901.33"
+      cleaned = cleaned.replace(/\./g, '').replace(',', '.');
+    }
+  } else if (/^-?\d{1,3}(?:,\d{3})+$/.test(cleaned)) {
+    // Integer with thousand commas: "3,901" -> "3901"
+    cleaned = cleaned.replace(/,/g, '');
+  } else if (/^-?\d+,\d{2}$/.test(cleaned)) {
+    // Decimal comma without thousand separator: "200,00" -> "200.00"
+    cleaned = cleaned.replace(',', '.');
+  } else {
+    // Remove any remaining commas BEFORE parseFloat
+    cleaned = cleaned.replace(/,/g, '');
+  }
+
+  cleaned = cleaned.replace(/[^0-9.-]/g, '');
+  const val = Number.parseFloat(cleaned);
+  return Number.isFinite(val) ? Money.fromCents(Money.toCents(val)) : 0;
+}
+
+/**
+ * Strips mobile UI chrome (status bar clock `5:30`, battery/WiFi icons, navigation buttons "Transferir" / "Pagar")
+ * from a line of OCR text.
+ * @param {string} line
+ * @returns {string}
+ */
+export function stripMobileUiChromeFromLine(line) {
+  return String(line || '')
+    .replace(/[|_~`^]/g, ' ')
+    // Strip status bar time prefix e.g. "5:30 " or "05:30 4G 85% "
+    .replace(/^\s*\d{1,2}:\d{2}(?:\s*(?:AM|PM|a\.?\s*m\.?|p\.?\s*m\.?))?(?:\s+(?:4G|5G|LTE|WiFi|VoLTE|\d{1,3}%))*\s*/i, '')
+    // Strip trailing currency/amount if attached to a transaction concept line
+    .replace(/\s+(?:HNL|USD|LPS|L\.?|\$)\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})\s*$/i, '')
+    // Strip navigation action button pairs
+    .replace(/\b(?:Transferir|Pagar)\s+(?:Pagar|Transferir)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Extracts the Merchant (Comercio) or Banking Concept from raw OCR voucher / mobile screenshot lines.
+ * Ignores mobile status bar elements (clock `5:30`, WiFi/battery icons, navigation buttons "Transferir" / "Pagar")
+ * and prioritizes transaction concepts (e.g. "DEPOSITO DE AHORRO CON T/D") or account descriptions
+ * (e.g. "CUENTA DE AHORRO SOS").
+ *
  * @param {string[]} lines
  * @returns {string}
  */
 export function extractMerchantFromLines(lines) {
   const cleanLines = lines
-    .map((l) =>
-      l
-        .replace(/[|_~`^]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim()
-    )
-    .filter((l) => l.length >= 3);
+    .map((l) => stripMobileUiChromeFromLine(l))
+    .filter((l) => l.length >= 3 && !isBoilerplateLine(l));
 
-  // 1. Explicit label pattern: "COMERCIO: XYZ" or "ESTABLECIMIENTO: XYZ"
+  // 1. Explicit label pattern: "COMERCIO: XYZ" or "CONCEPTO: XYZ" or "DESCRIPCIÓN: XYZ"
   for (const line of cleanLines) {
-    const labelMatch = line.match(/^(?:COMERCIO|ESTABLECIMIENTO|NEGOCIO|TIENDA|RAZON\s+SOCIAL)\s*[:.]\s*(.+)$/i);
-    if (labelMatch && labelMatch[1].trim().length >= 3) {
+    const labelMatch = line.match(
+      /^(?:COMERCIO|ESTABLECIMIENTO|NEGOCIO|TIENDA|RAZON\s+SOCIAL|CONCEPTO|DESCRIPCI[OÓ]N)\s*[:.]\s*(.+)$/i
+    );
+    if (labelMatch && labelMatch[1].trim().length >= 3 && !isBoilerplateLine(labelMatch[1])) {
       return cleanMerchantTypos(labelMatch[1].trim());
     }
   }
 
-  // 2. Line immediately following "VENTAS" or "SW: ..." (Standard BAC Credomatic / POS layout in Honduras)
-  for (let i = 0; i < cleanLines.length - 1; i += 1) {
-    if (/^VENTAS?$/i.test(cleanLines[i])) {
-      const candidate = cleanLines[i + 1];
+  // 2. Mobile Banking Transaction Description (e.g., "DEPOSITO DE AHORRO CON T/D", "TRANSFERENCIA ACH", "RETIRO ATM")
+  for (const line of cleanLines) {
+    if (
+      /\b(?:DEP[OÓ]SITO\s+DE\s+AHORRO|DEP[OÓ]SITO|TRANSFERENCIA\s+(?:ACH|ENTRE|A\s+TERCEROS|RECIBIDA|ENVIADA)|NOTA\s+DE\s+(?:CR[EÉ]DITO|D[EÉ]BITO)|RETIRO\s+(?:ATM|CAJERO|VENTANILLA)|ABONO\s+A\s+CUENTA|PAGO\s+DE\s+SERVICIO)/i.test(
+        line
+      )
+    ) {
+      return cleanMerchantTypos(line);
+    }
+  }
+
+  // 3. Mobile Banking Account Description (e.g., "CUENTA DE AHORRO SOS", "CUENTA DE AHORRO", "CUENTA CHEQUES")
+  for (const line of cleanLines) {
+    if (/\b(?:CUENTA\s+DE\s+AHORRO|CUENTA\s+CORRIENTE|CUENTA\s+CHEQUES|AHORRO\s+SOS)\b/i.test(line)) {
+      return cleanMerchantTypos(line);
+    }
+  }
+
+  // 4. Line immediately following "VENTAS" or "SW: ..." (Standard BAC Credomatic / POS layout in Honduras)
+  const rawTrimmedLines = lines
+    .map((l) => l.replace(/[|_~`^]/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter((l) => l.length >= 3);
+  for (let i = 0; i < rawTrimmedLines.length - 1; i += 1) {
+    if (/^VENTAS?$/i.test(rawTrimmedLines[i])) {
+      const candidate = stripMobileUiChromeFromLine(rawTrimmedLines[i + 1]);
       if (candidate && !isBoilerplateLine(candidate)) {
         return cleanMerchantTypos(candidate);
       }
     }
   }
 
-  // 3. Line immediately preceding "GRACIAS POR PREFERIRNOS"
-  for (let i = 1; i < cleanLines.length; i += 1) {
-    if (/GRACIAS\s+POR\s+PREFERIRNOS/i.test(cleanLines[i])) {
-      const candidate = cleanLines[i - 1];
+  // 5. Line immediately preceding "GRACIAS POR PREFERIRNOS"
+  for (let i = 1; i < rawTrimmedLines.length; i += 1) {
+    if (/GRACIAS\s+POR\s+PREFERIRNOS/i.test(rawTrimmedLines[i])) {
+      const candidate = stripMobileUiChromeFromLine(rawTrimmedLines[i - 1]);
       if (candidate && !isBoilerplateLine(candidate)) {
         return cleanMerchantTypos(candidate);
       }
     }
   }
 
-  // 4. First known merchant in any line (from MERCHANT_CATEGORY_RULES)
+  // 6. First known merchant in any line (from MERCHANT_CATEGORY_RULES)
   for (const line of cleanLines) {
     const norm = normalizeText(line);
     for (const rule of MERCHANT_CATEGORY_RULES) {
@@ -250,7 +348,7 @@ export function extractMerchantFromLines(lines) {
     }
   }
 
-  // 5. Fallback: first non-boilerplate line in top half of receipt with letters
+  // 7. Fallback: first non-boilerplate line in top half with letters
   const topHalf = cleanLines.slice(0, Math.min(12, cleanLines.length));
   for (const line of topHalf) {
     if (!isBoilerplateLine(line) && /[A-Za-zÁÉÍÓÚÑ]{3,}/.test(line)) {
@@ -278,15 +376,67 @@ function cleanMerchantTypos(merchant) {
 }
 
 /**
- * Infers the best Category ID based on the extracted Merchant and full voucher text.
+ * Detects whether the OCR / Vision text corresponds to an Income (`"income"`) or Expense (`"expense"`)
+ * in the Honduras banking context.
+ * If a movement has the label "Crédito" or "Depósito" (e.g. "DEPOSITO DE AHORRO CON T/D L 200.00"),
+ * it is automatically classified as `type: "income"`.
+ *
+ * @param {string} rawText
+ * @param {string} [merchantOrConcept='']
+ * @returns {'income' | 'expense'}
+ */
+export function detectVoucherTransactionType(rawText, merchantOrConcept = '') {
+  const combined = `${String(merchantOrConcept || '')}\n${String(rawText || '')}`;
+  const isPosReceipt =
+    /\b(?:VENTAS?|GRACIAS\s+POR\s+PREFERIRNOS|DEVOL\.?\s*ISV|PROPINA|COPIA\s+DE\s+CLIENTE)\b/i.test(
+      combined
+    );
+  if (isPosReceipt) {
+    return 'expense';
+  }
+
+  if (
+    /\b(?:DEP[OÓ]SITO\s+DE\s+AHORRO|DEP[OÓ]SITO|CR[EÉ]DITO|ABONO\s+A\s+CUENTA|NOTA\s+DE\s+CR[EÉ]DITO|INTERESES\s+GANADOS|TRANSFERENCIA\s+RECIBIDA)\b/i.test(
+      combined
+    ) &&
+    !/\bTARJETA\s+DE\s+CR[EÉ]DITO\b/i.test(combined)
+  ) {
+    return 'income';
+  }
+
+  return 'expense';
+}
+
+/**
+ * Infers the best Category ID based on the extracted Merchant/Concept, full text, and transaction type.
  * @param {string} merchant
  * @param {string} rawText
  * @param {Array<{id: string, name: string, type: string}>} [categories]
+ * @param {'income' | 'expense'} [txType='expense']
  * @returns {{ categoryId: string, confidence: string }}
  */
-export function inferCategoryFromMerchant(merchant, rawText = '', categories = []) {
+export function inferCategoryFromMerchant(
+  merchant,
+  rawText = '',
+  categories = [],
+  txType = 'expense'
+) {
   const combinedNorm = `${normalizeText(merchant)} ${normalizeText(rawText)}`;
   const merchantNorm = normalizeText(merchant);
+
+  if (txType === 'income') {
+    if (/\b(?:salario|planilla|nomina|sueldo)\b/i.test(combinedNorm)) {
+      return { categoryId: 'salary', confidence: 'high' };
+    }
+    if (/\b(?:interes|rendimiento|inversion|dividendo)\b/i.test(combinedNorm)) {
+      return { categoryId: 'investments', confidence: 'high' };
+    }
+    if (/\b(?:freelance|honorarios|consultoria)\b/i.test(combinedNorm)) {
+      return { categoryId: 'freelance', confidence: 'high' };
+    }
+    const incomeCat = categories.find((c) => c.type === 'income');
+    return { categoryId: incomeCat ? incomeCat.id : 'salary', confidence: 'high' };
+  }
 
   // 1. Check merchant name first for high precision
   for (const rule of MERCHANT_CATEGORY_RULES) {
@@ -320,91 +470,145 @@ export function inferCategoryFromMerchant(merchant, rawText = '', categories = [
 }
 
 /**
- * Extracts the last 4 card digits or account digits from a voucher text.
- * Handles patterns like:
- * - "CREDOMATIC ************0618-L"
- * - "**** **** **** 0618"
- * - "TARJETA: XXXXXXXXXXXX0618"
- * - "0618-L"
+ * Extracts the Account Number or Card Last 4 Digits and Bank Info from a voucher or mobile banking screenshot:
+ * - For Bank Accounts (Ahorro, Cheques, SOS, etc.): extracts and stores the FULL ACCOUNT NUMBER (e.g. "213130058771").
+ * - Reserves the "last 4 digits" rule ONLY when a Credit / Debit Card is explicitly detected (e.g. "**** **** **** 0618").
+ *
  * @param {string} rawText
- * @returns {{ cardLast4: string, currencySuffix: string | null, detectedBank: string | null }}
+ * @returns {{
+ *   cardLast4: string,
+ *   accountNumber: string,
+ *   isCard: boolean,
+ *   currencySuffix: string | null,
+ *   detectedBank: string | null
+ * }}
  */
 export function extractCardAndBankInfo(rawText) {
   const text = String(rawText || '');
   let cardLast4 = '';
+  let accountNumber = '';
+  let isCard = false;
   let currencySuffix = null;
 
-  // Pattern 1: Masked asterisks/X followed by 4 digits and optional -L / -D suffix
-  const maskedMatch = text.match(/[*X#•·~+.-]{3,}\s*([0-9OIlSB]{4})\s*(?:-\s*([A-Z1l]))?/i);
-  if (maskedMatch) {
-    const candidate = normalizeOcrDigits(maskedMatch[1]);
-    if (/^\d{4}$/.test(candidate)) {
-      cardLast4 = candidate;
-      currencySuffix = maskedMatch[2] ? maskedMatch[2].toUpperCase() : null;
+  // 1. Check for FULL Bank Account Number (Ahorro, Cheques, SOS, Número de cuenta, etc., e.g. "213130058771")
+  const bankAccLabelMatch = text.match(
+    /(?:CUENTA\s+DE\s+AHORRO(?:\s+SOS)?|CUENTA\s+CHEQUES|CUENTA\s+CORRIENTE|AHORRO\s+SOS|N[UÚ]MERO\s+DE\s+CUENTA|NRO\.?\s*DE\s*CUENTA|CUENTA\s*[:#]?)[^\d*X\n]{0,40}?(\d{6,22})\b/i
+  );
+  if (bankAccLabelMatch) {
+    accountNumber = bankAccLabelMatch[1].trim();
+    cardLast4 = accountNumber;
+    isCard = false;
+  } else {
+    // Also check standalone line with 10-20 unmasked digits (typical mobile banking account detail header)
+    const standaloneAccMatch = text.match(/(?:^|\n)\s*(\d{10,20})\s*(?:\n|$)/);
+    if (standaloneAccMatch) {
+      accountNumber = standaloneAccMatch[1].trim();
+      cardLast4 = accountNumber;
+      isCard = false;
     }
   }
 
-  // Pattern 2: Explicit 4 digits with -L or -D suffix (BAC Credomatic Honduras format: "0618-L")
-  if (!cardLast4) {
-    const suffixMatch = text.match(/\b([0-9OIlSB]{4})\s*-\s*([LD$])\b/i);
-    if (suffixMatch) {
-      const candidate = normalizeOcrDigits(suffixMatch[1]);
-      if (/^\d{4}$/.test(candidate)) {
-        cardLast4 = candidate;
-        currencySuffix = suffixMatch[2].toUpperCase();
-      }
-    }
-  }
-
-  // Pattern 3: Line containing CREDOMATIC / TARJETA / VISA / MASTERCARD / CARD / CUENTA + 4 digits
-  if (!cardLast4) {
-    const cardLineMatch = text.match(
-      /(?:CREDOMATIC|TARJETA|CARD|VISA|MASTERCARD|AMEX|CUENTA|NRO|CTA)[^\n]{0,30}?([0-9OIlSB]{4})(?:\s*-\s*([A-Z]))?(?:\s|$)/i
+  // 2. Only apply the "last 4 digits" rule if no full bank account was found AND a Credit/Debit card is explicitly detected
+  if (!accountNumber) {
+    // Pattern 2A: Masked asterisks/X followed by 4 digits (e.g. "**** **** **** 0618" or "************0618-L")
+    const maskedMatch = text.match(
+      /[*X#•·~+.-]{3,}(?:\s*[*X#•·~+.-]{3,})*\s*([0-9OIlSB]{4})\s*(?:-\s*([A-Z1l]))?/i
     );
-    if (cardLineMatch) {
-      const candidate = normalizeOcrDigits(cardLineMatch[1]);
+    if (maskedMatch) {
+      const candidate = normalizeOcrDigits(maskedMatch[1]);
       if (/^\d{4}$/.test(candidate)) {
         cardLast4 = candidate;
-        currencySuffix = cardLineMatch[2] ? cardLineMatch[2].toUpperCase() : null;
+        accountNumber = candidate;
+        isCard = true;
+        currencySuffix = maskedMatch[2] ? maskedMatch[2].toUpperCase() : null;
+      }
+    }
+
+    // Pattern 2B: Explicit 4 digits with -L or -D suffix (BAC Credomatic Honduras POS format: "0618-L")
+    if (!cardLast4) {
+      const suffixMatch = text.match(/\b([0-9OIlSB]{4})\s*-\s*([LD$])\b/i);
+      if (suffixMatch) {
+        const candidate = normalizeOcrDigits(suffixMatch[1]);
+        if (/^\d{4}$/.test(candidate)) {
+          cardLast4 = candidate;
+          accountNumber = candidate;
+          isCard = true;
+          currencySuffix = suffixMatch[2].toUpperCase();
+        }
+      }
+    }
+
+    // Pattern 2C: Explicit Card keyword (CREDOMATIC / TARJETA / CARD / VISA / MASTERCARD / AMEX) + 4 digits
+    if (!cardLast4) {
+      const cardLineMatch = text.match(
+        /(?:CREDOMATIC|TARJETA|CARD|VISA|MASTERCARD|AMEX)[^\n]{0,30}?([0-9OIlSB]{4})(?:\s*-\s*([A-Z]))?(?:\s|$)/i
+      );
+      if (cardLineMatch) {
+        const candidate = normalizeOcrDigits(cardLineMatch[1]);
+        if (/^\d{4}$/.test(candidate)) {
+          cardLast4 = candidate;
+          accountNumber = candidate;
+          isCard = true;
+          currencySuffix = cardLineMatch[2] ? cardLineMatch[2].toUpperCase() : null;
+        }
       }
     }
   }
 
-  // Detect Bank / Processor mentioned on the voucher
+  // Detect Bank / Processor mentioned on the voucher or screenshot
   let detectedBank = null;
   if (/\b(?:BAC|CREDOMATIC)\b/i.test(text)) detectedBank = 'BAC Credomatic Honduras';
-  else if (/\bATLANTIDA\b/i.test(text)) detectedBank = 'Banco Atlántida';
+  else if (/\bATL[AÁ]NTIDA\b/i.test(text)) detectedBank = 'Banco Atlántida';
   else if (/\bFICOHSA\b/i.test(text)) detectedBank = 'Banco Ficohsa';
-  else if (/\b(?:BANPAIS|BANCO\s+DEL\s+PAIS)\b/i.test(text)) detectedBank = 'Banpaís (Banco del País)';
+  else if (/\b(?:BANPA[IÍ]S|BANCO\s+DEL\s+PA[IÍ]S)\b/i.test(text)) detectedBank = 'Banpaís (Banco del País)';
   else if (/\bOCCIDENTE\b/i.test(text)) detectedBank = 'Banco de Occidente';
   else if (/\bDAVIVIENDA\b/i.test(text)) detectedBank = 'Banco Davivienda Honduras';
   else if (/\bLAFISE\b/i.test(text)) detectedBank = 'Banco Lafise Honduras';
   else if (/\bPROMERICA\b/i.test(text)) detectedBank = 'Banco Promerica Honduras';
   else if (/\bBANRURAL\b/i.test(text)) detectedBank = 'Banrural Honduras';
   else if (/\bAZTECA\b/i.test(text)) detectedBank = 'Banco Azteca Honduras';
+  else if (/\bCUENTA\s+DE\s+AHORRO\s+SOS\b/i.test(text)) detectedBank = 'Banco Atlántida';
 
-  return { cardLast4, currencySuffix, detectedBank };
+  return { cardLast4, accountNumber, isCard, currencySuffix, detectedBank };
 }
 
 /**
- * Associates the extracted cardLast4 and detectedBank with the user's accounts.
+ * Associates the extracted accountNumber / cardLast4 and detectedBank with the user's accounts.
  * @param {Array<object>} accounts
- * @param {string} cardLast4
+ * @param {string} accountOrCardDigits
  * @param {string|null} detectedBank
  * @returns {{ accountId: string, matchType: 'account_number' | 'institution' | 'fallback', matchedAccount: object | null }}
  */
-export function matchAccountForVoucher(accounts = [], cardLast4 = '', detectedBank = null) {
+export function matchAccountForVoucher(accounts = [], accountOrCardDigits = '', detectedBank = null) {
   if (!Array.isArray(accounts) || accounts.length === 0) {
     return { accountId: 'acc_bank', matchType: 'fallback', matchedAccount: null };
   }
 
-  // 1. Exact match by last 4 digits on account.accountNumber or account.name
-  if (cardLast4 && cardLast4.length >= 4) {
+  const cleanInputDigits = String(accountOrCardDigits || '').replace(/\D+/g, '');
+
+  // 1A. Exact full account number match first
+  if (cleanInputDigits.length >= 6) {
+    const byFullAccount = accounts.find((acc) => {
+      const accDigits = String(acc.accountNumber || '').replace(/\D+/g, '');
+      return accDigits && accDigits === cleanInputDigits;
+    });
+    if (byFullAccount) {
+      return {
+        accountId: byFullAccount.id,
+        matchType: 'account_number',
+        matchedAccount: byFullAccount,
+      };
+    }
+  }
+
+  // 1B. Match by last 4 digits on account.accountNumber or account.name
+  if (cleanInputDigits.length >= 4) {
+    const targetLast4 = cleanInputDigits.slice(-4);
     const byDigits = accounts.find((acc) => {
       const accLast4 = extractLast4Digits(acc.accountNumber);
-      if (accLast4 && accLast4 === cardLast4) return true;
+      if (accLast4 && accLast4 === targetLast4) return true;
       const nameDigits = extractLast4Digits(acc.name);
-      return nameDigits && nameDigits === cardLast4;
+      return nameDigits && nameDigits === targetLast4;
     });
     if (byDigits) {
       return { accountId: byDigits.id, matchType: 'account_number', matchedAccount: byDigits };
@@ -420,6 +624,7 @@ export function matchAccountForVoucher(accounts = [], cardLast4 = '', detectedBa
       return (
         (instNorm && (instNorm.includes(bankNorm) || bankNorm.includes(instNorm))) ||
         (nameNorm && (nameNorm.includes('bac') && bankNorm.includes('bac'))) ||
+        (nameNorm && (nameNorm.includes('atlantida') && bankNorm.includes('atlantida'))) ||
         (nameNorm && instNorm && nameNorm.includes(instNorm))
       );
     });
@@ -495,51 +700,48 @@ export function extractVoucherDate(rawText) {
 }
 
 /**
- * Parses a numeric amount string from OCR text, handling "L" vs "1" prefix ambiguity.
- * @param {string} rawNum
+ * Parses a numeric amount string from OCR text using `cleanAmount`
+ * (cleaning thousand-separator commas `,` BEFORE `parseFloat`).
+ * @param {string|number} rawNum
  * @returns {number}
  */
 function parseOcrNumber(rawNum) {
-  if (!rawNum) return 0;
-  const cleaned = String(rawNum)
-    .trim()
-    .replace(/^[LlI|]\s*/, '')
-    .replace(/\s+/g, '');
-
-  // Handle comma as thousand separator vs decimal separator
-  let normalized = cleaned;
-  if (/^\d{1,3}(,\d{3})+\.\d{2}$/.test(cleaned)) {
-    normalized = cleaned.replace(/,/g, '');
-  } else if (/^\d+,\d{2}$/.test(cleaned)) {
-    normalized = cleaned.replace(',', '.');
-  } else {
-    normalized = cleaned.replace(/,/g, '');
-  }
-
-  const val = Number.parseFloat(normalized);
-  return Number.isFinite(val) ? Money.fromCents(Money.toCents(val)) : 0;
+  return cleanAmount(rawNum);
 }
 
 /**
- * Extracts Amount, Subtotal/Tax breakdown, and Currency from voucher text.
- * Includes mathematical cross-check (MONTO + ISV - DEVOL.ISV = TOTAL) to automatically fix
- * OCR misreading the Honduran "L" symbol as a leading "1".
+ * Extracts Amount, Subtotal/Tax breakdown, and Currency from voucher or mobile banking text.
+ * - Cleans thousand-separator commas `,` BEFORE `parseFloat` (e.g. "3,901.33" -> 3901.33).
+ * - Maps "L" or "Lempiras" to `HNL`, and "$" or "USD"/"Dólares" to `USD`.
+ * - Includes mathematical cross-check (MONTO + ISV - DEVOL.ISV = TOTAL) for POS receipts.
+ *
  * @param {string} rawText
  * @param {string|null} currencySuffix
- * @returns {{ amount: number, currency: string, breakdown: { subtotal: number, isv: number, devolIsv: number } }}
+ * @returns {{ amount: number, currentBalance: number, currency: string, breakdown: { subtotal: number, isv: number, devolIsv: number } }}
  */
 export function extractAmountAndCurrency(rawText, currencySuffix = null) {
   const text = String(rawText || '');
 
-  // Detect currency
+  // Detect currency (Honduras Context: "L" / "Lempiras" -> HNL, "$" / "USD" / "Dólares" -> USD)
   let currency = 'USD';
   const hasHnlIndicators =
     currencySuffix === 'L' ||
-    /\b(?:HNL|LPS|LEMPIRAS?|ISV|DEVOL\.?\s*ISV|TEG|TEGUCIGALPA|SPS|HONDURAS)\b/i.test(text) ||
-    /(?:TOTAL|MONTO|ISV)\s*[:.]?\s*-?\s*L\s*\d/i.test(text);
+    /\b(?:HNL|LPS|LEMPIRAS?|ISV|DEVOL\.?\s*ISV|TEG|TEGUCIGALPA|SPS|HONDURAS|ATL[AÁ]NTIDA|FICOHSA|BANPA[IÍ]S)\b/i.test(
+      text
+    ) ||
+    /(?:^|\n|\s|[+-])L\.?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})\b/im.test(text) ||
+    /(?:TOTAL|MONTO|ISV|SALDO)\s*[:.]?\s*-?\s*L\.?\s*\d/i.test(text);
 
-  if (hasHnlIndicators && !/\b(?:USD|US\$|DOLARES)\b/i.test(text)) {
+  const hasExplicitUsdIndicators =
+    currencySuffix === 'D' ||
+    currencySuffix === '$' ||
+    /\b(?:USD|US\$|D[OÓ]LAR(?:ES)?)\b/i.test(text) ||
+    /(?:^|\n|\s|[+-])\$\s*\d{1,3}(?:,\d{3})*(?:\.\d{2})\b/im.test(text);
+
+  if (hasHnlIndicators && !/\b(?:USD|US\$|D[OÓ]LAR(?:ES)?)\b/i.test(text)) {
     currency = 'HNL';
+  } else if (hasExplicitUsdIndicators) {
+    currency = 'USD';
   } else if (/\bEUR\b|€/i.test(text)) {
     currency = 'EUR';
   } else if (/\bCRC\b|₡/i.test(text)) {
@@ -548,18 +750,37 @@ export function extractAmountAndCurrency(rawText, currencySuffix = null) {
     currency = 'MXN';
   }
 
+  const amountPattern = '(\\d{1,3}(?:,\\d{3})+\\.\\d{2}|\\d{1,9}[.,]\\d{2})';
+
   // Extract MONTO (Subtotal), ISV, DEVOL.ISV, and TOTAL
-  const montoMatch = text.match(/\bMONTO\s*[:.]?\s*(?:HNL|LPS|USD|L|\$)?\s*([0-9][0-9,.\s]*[.,]\d{2})/i);
-  const isvMatch = text.match(/(?:^|\n|\s)ISV\s*[:.]?\s*(?:HNL|LPS|USD|L|\$)?\s*([0-9][0-9,.\s]*[.,]\d{2})/i);
-  const devolMatch = text.match(/DEVOL\.?\s*ISV\s*[:.]?\s*-?\s*(?:HNL|LPS|USD|L|\$)?\s*-?\s*([0-9][0-9,.\s]*[.,]\d{2})/i);
-  const totalMatches = [...text.matchAll(/\bTOTAL\s*(?:A\s*PAGAR|PAGADO|GENERAL)?\s*[:.]?\s*(?:HNL|LPS|USD|US\$|L|\$)?\s*([0-9][0-9,.\s]*[.,]\d{2})/gi)];
+  const montoMatch = text.match(
+    new RegExp(`\\bMONTO\\s*[:.]?\\s*(?:HNL|LPS|USD|L\\.?|\\$)?\\s*${amountPattern}`, 'i')
+  );
+  const isvMatch = text.match(
+    new RegExp(`(?:^|\\n|\\s)ISV\\s*[:.]?\\s*(?:HNL|LPS|USD|L\\.?|\\$)?\\s*${amountPattern}`, 'i')
+  );
+  const devolMatch = text.match(
+    new RegExp(
+      `DEVOL\\.?\\s*ISV\\s*[:.]?\\s*-?\\s*(?:HNL|LPS|USD|L\\.?|\\$)?\\s*-?\\s*${amountPattern}`,
+      'i'
+    )
+  );
+  const totalMatches = [
+    ...text.matchAll(
+      new RegExp(
+        `\\bTOTAL\\s*(?:A\\s*PAGAR|PAGADO|GENERAL)?\\s*[:.]?\\s*(?:HNL|LPS|USD|US\\$|L\\.?|\\$)?\\s*${amountPattern}`,
+        'gi'
+      )
+    ),
+  ];
 
-  let subtotal = montoMatch ? parseOcrNumber(montoMatch[1]) : 0;
-  let isv = isvMatch ? parseOcrNumber(isvMatch[1]) : 0;
-  let devolIsv = devolMatch ? parseOcrNumber(devolMatch[1]) : 0;
-  let rawTotal = totalMatches.length > 0 ? parseOcrNumber(totalMatches[totalMatches.length - 1][1]) : 0;
+  let subtotal = montoMatch ? cleanAmount(montoMatch[1]) : 0;
+  let isv = isvMatch ? cleanAmount(isvMatch[1]) : 0;
+  let devolIsv = devolMatch ? cleanAmount(devolMatch[1]) : 0;
+  let rawTotal =
+    totalMatches.length > 0 ? cleanAmount(totalMatches[totalMatches.length - 1][1]) : 0;
 
-  // Helper to strip a false leading "1" caused by OCR reading "L252.29" as "1252.29"
+  // Helper to strip a false leading "1" caused by OCR reading "L252.29" as "1252.29" on POS receipts
   const stripLeadingOne = (num) => {
     const str = num.toFixed(2);
     if (str.length >= 6 && str.startsWith('1')) {
@@ -579,7 +800,9 @@ export function extractAmountAndCurrency(rawText, currencySuffix = null) {
     for (const s of candidatesSub) {
       for (const tax of candidatesIsv) {
         for (const dev of candidatesDevol) {
-          const expected = Money.fromCents(Money.toCents(s) + Money.toCents(tax) - Money.toCents(dev));
+          const expected = Money.fromCents(
+            Money.toCents(s) + Money.toCents(tax) - Money.toCents(dev)
+          );
           const expectedNoDev = Money.fromCents(Money.toCents(s) + Money.toCents(tax));
           for (const tot of candidatesTotal) {
             if (Math.abs(tot - expected) <= 0.05) {
@@ -601,22 +824,30 @@ export function extractAmountAndCurrency(rawText, currencySuffix = null) {
       devolIsv = matchedReconciliation.devolIsv;
       rawTotal = matchedReconciliation.total;
     } else if (rawTotal === 0) {
-      rawTotal = Money.fromCents(Money.toCents(subtotal) + Money.toCents(isv) - Money.toCents(devolIsv));
+      rawTotal = Money.fromCents(
+        Money.toCents(subtotal) + Money.toCents(isv) - Money.toCents(devolIsv)
+      );
     }
   }
 
-  // Fallback: largest decimal number in the receipt if TOTAL keyword was unreadable
-  if (rawTotal <= 0) {
-    const allDecimals = [...text.matchAll(/(?:L|\$|HNL|USD)?\s*(\d{1,6}[.,]\d{2})\b/g)]
-      .map((m) => parseOcrNumber(m[1]))
-      .filter((n) => n > 0 && n < 1000000);
-    if (allDecimals.length > 0) {
-      rawTotal = Math.max(...allDecimals);
-    }
+  // Fallback: match decimal amounts WITH thousand-separator commas intact before calling cleanAmount
+  // e.g. "3,901.33" -> cleanAmount("3,901.33") -> 3901.33 (never clipping the "3,"!)
+  const allDecimals = [
+    ...text.matchAll(
+      /(?:L\.?|\$|HNL|USD|LPS)?\s*(\d{1,3}(?:,\d{3})+\.\d{2}|\d{1,9}[.,]\d{2})\b/gi
+    ),
+  ]
+    .map((m) => cleanAmount(m[1]))
+    .filter((n) => n > 0 && n < 100000000);
+
+  const currentBalance = allDecimals.length > 0 ? Math.max(...allDecimals) : rawTotal;
+  if (rawTotal <= 0 && allDecimals.length > 0) {
+    rawTotal = Math.max(...allDecimals);
   }
 
   return {
     amount: rawTotal,
+    currentBalance,
     currency,
     breakdown: {
       subtotal,
@@ -627,8 +858,8 @@ export function extractAmountAndCurrency(rawText, currencySuffix = null) {
 }
 
 /**
- * Full deterministic parser that converts raw OCR / PDF text from a voucher or invoice
- * into a structured transaction proposal linked to the user's categories and accounts.
+ * Full deterministic parser that converts raw OCR / PDF text from a voucher or mobile banking screenshot
+ * into a structured transaction/account proposal linked to the user's categories and accounts.
  *
  * @param {string} rawText
  * @param {object} state
@@ -641,33 +872,50 @@ export function parseVoucherText(rawText, state = {}) {
     .filter(Boolean);
 
   const merchant = extractMerchantFromLines(lines);
+  const type = detectVoucherTransactionType(rawText, merchant);
   const { categoryId, confidence: categoryConfidence } = inferCategoryFromMerchant(
     merchant,
     rawText,
-    state.categories || []
+    state.categories || [],
+    type
   );
 
-  const { cardLast4, currencySuffix, detectedBank } = extractCardAndBankInfo(rawText);
-  const accountMatch = matchAccountForVoucher(state.accounts || [], cardLast4, detectedBank);
+  const { cardLast4, accountNumber, isCard, currencySuffix, detectedBank } =
+    extractCardAndBankInfo(rawText);
+  const resolvedAccountOrCard = accountNumber || cardLast4;
+  const accountMatch = matchAccountForVoucher(
+    state.accounts || [],
+    resolvedAccountOrCard,
+    detectedBank
+  );
   const date = extractVoucherDate(rawText);
-  const { amount, currency, breakdown } = extractAmountAndCurrency(rawText, currencySuffix);
+  const { amount, currentBalance, currency, breakdown } = extractAmountAndCurrency(
+    rawText,
+    currencySuffix
+  );
 
   // Extract optional Factura / Autorización reference numbers for the transaction note
   const factMatch = rawText.match(/\bFACT(?:URA)?\s*[:.#]?\s*(\d{3,12})\b/i);
   const autoMatch = rawText.match(/\bAUTO(?:RIZACION)?\s*[:.#]?\s*(\d{4,10})\b/i);
   const refParts = [merchant];
-  if (cardLast4) refParts.push(`Tarjeta *${cardLast4}`);
+  if (resolvedAccountOrCard) {
+    refParts.push(isCard ? `Tarjeta *${resolvedAccountOrCard}` : `Cuenta #${resolvedAccountOrCard}`);
+  }
   if (factMatch) refParts.push(`Fact #${factMatch[1]}`);
   else if (autoMatch) refParts.push(`Auto #${autoMatch[1]}`);
 
   return {
     merchant,
+    type,
     categoryId,
     categoryConfidence,
     date,
     amount,
+    currentBalance,
     currency,
-    cardLast4,
+    cardLast4: resolvedAccountOrCard,
+    accountNumber: resolvedAccountOrCard,
+    isCard,
     detectedBank,
     accountId: accountMatch.accountId,
     accountMatchType: accountMatch.matchType,
@@ -1444,4 +1692,48 @@ export async function decodeBankStatementPdf(pdfFile, state = {}, options = {}, 
   onProgress?.('Estado de cuenta procesado con éxito.', 100);
   return result;
 }
+
+/**
+ * Builds the system/user prompt for Gemini Vision (`gemini-1.5-flash`) when analyzing
+ * Mobile Banking Screenshots, Account Detail Views, or POS Vouchers.
+ *
+ * Enforces:
+ * 1. Amount Sanitization (`cleanAmount`): Strip thousand-separator commas `,` BEFORE converting to FLOAT
+ *    (e.g. "3,901.33" -> "3901.33" -> 3901.33; never clip the leading digit before the comma).
+ * 2. Account Number Extraction Rules:
+ *    - For Bank Accounts (Ahorro, Cheques, SOS, etc.), extract and store the FULL ACCOUNT NUMBER (e.g. "213130058771").
+ *    - Reserve the "last 4 digits" rule ONLY when a Credit / Debit Card is explicitly detected (e.g. "**** **** **** 0618").
+ * 3. Currency & Transaction Type Detection (Honduras Context):
+ *    - Map symbol "L" or word "Lempiras" to currency `HNL`.
+ *    - Map symbol "$" or words "USD" / "Dólares" to currency `USD`.
+ *    - If a movement has the label "Crédito" or "Depósito" (e.g. "DEPOSITO DE AHORRO CON T/D L 200.00"),
+ *      classify it automatically as an Income transaction (`type: "income"`).
+ * 4. UI / Status Bar Filtering (Clean Text):
+ *    - Ignore phone status bar elements (clock time `5:30`, battery/WiFi/signal icons) and navigation buttons ("Transferir", "Pagar").
+ *    - Take the "Comercio" or "Concepto" from the account description (e.g. "CUENTA DE AHORRO SOS")
+ *      or from the bottom transaction description (e.g. "DEPOSITO DE AHORRO CON T/D").
+ *
+ * @returns {string}
+ */
+export function buildGeminiVisionPrompt() {
+  return [
+    'Eres un extractor financiero experto en capturas de pantalla de banca móvil, detalles de cuenta y vouchers POS en Honduras y Latinoamérica.',
+    '',
+    'REGLAS ESTRICTAS DE EXTRACCIÓN:',
+    '1. PARSER DE MONTOS (Sin recortar dígitos antes de la coma):',
+    '   - Limpia todos los separadores de miles (comas `,`) ANTES de convertir a número FLOAT.',
+    '   - Ejemplo: "L 3,901.33" -> remover comas -> "3901.33" -> 3901.33 (NUNCA recortes el primer dígito dejando "901.33").',
+    '2. REGLAS DE EXTRACCIÓN DE NÚMERO DE CUENTA:',
+    '   - Para cuentas bancarias (Ahorro, Cheques, SOS, etc.), extrae y almacena el NÚMERO DE CUENTA COMPLETO (ej. "213130058771").',
+    '   - Reserva la regla de "últimos 4 dígitos" ÚNICAMENTE si se detecta explícitamente una Tarjeta de Crédito o Débito enmascarada (ej. "**** **** **** 0618" -> "0618").',
+    '3. DETECCIÓN DE MONEDA Y TIPO DE TRANSACCIÓN (Contexto Honduras):',
+    '   - Mapea el símbolo "L" o la palabra "Lempiras" a la moneda "HNL".',
+    '   - Mapea el símbolo "$" o las palabras "USD" / "Dólares" a la moneda "USD".',
+    '   - Si en el detalle de la pantalla aparece un movimiento con la etiqueta "Crédito" o "Depósito" (ej. "DEPOSITO DE AHORRO CON T/D L 200.00"), clasifícalo automáticamente como una Transacción de Ingreso (`type: "income"`). Si indica "Débito", "Retiro" o "Compra", clasifícalo como `type: "expense"`.',
+    '4. FILTRADO DE UI / BARRA DE ESTADO (Clean Text):',
+    '   - Ignora por completo los elementos de la interfaz del teléfono: hora de la barra de estado (ej. "5:30"), iconos de batería/WiFi/señal (4G, 5G, LTE) y botones de navegación ("Transferir", "Pagar", "Compartir", "Detalle de cuenta").',
+    '   - El "Comercio" o "Concepto" debe tomarse de la descripción de la cuenta (ej. "CUENTA DE AHORRO SOS") o de la descripción de la transacción inferior (ej. "DEPOSITO DE AHORRO CON T/D").',
+  ].join('\n');
+}
+
 
