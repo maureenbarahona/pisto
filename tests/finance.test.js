@@ -52,8 +52,6 @@ import {
   createUserProfile,
   buildWorkspaceTransactionIndex,
   filterTransactionsForUserView,
-} from '../public/js/services/authProfileService.ts';
-import {
   prepareTransactionForWorkspace,
   buildWorkspaceTransactionsQuery,
   fetchWorkspaceTransactions,
@@ -61,15 +59,25 @@ import {
   saveTransactionToWorkspace,
   getTransactionsByAccountId,
   deleteAccountAndTransactionsWriteBatch,
-} from '../src/services/transactions.ts';
-import {
   filterActiveAccounts,
   filterArchivedAccounts,
   filterAccountsForView,
   archiveAccount,
   unarchiveAccount,
   deleteAccountWithCascade,
-} from '../src/services/accounts.ts';
+  FIRESTORE_COLLECTIONS,
+  DUPLICATE_TRANSACTION_ACTIONS,
+  DUPLICATE_TRANSACTION_OPTION_LABELS,
+  normalizeFirestoreDocument,
+  queryCollectionWithCursor,
+  normalizeTransactionConcept,
+  isSimilarTransactionConcept,
+  formatDateDdMmYyyy,
+  formatDuplicateTransactionWarning,
+  findAccountDuplicateTransactions,
+  checkAccountTransactionDuplicate,
+  resolveDuplicateTransactionAction,
+} from '../src/js/services/firestore.js';
 import { DeleteAccountModal } from '../public/js/ui/deleteAccountModal.js';
 import {
   AccountsView,
@@ -81,6 +89,9 @@ import {
   setIsImportAccountModalOpen,
   sanitizeClickableAncestors,
   renderAccountsViewTemplate,
+  openImportModal,
+  bindImportAccountTriggerButtons,
+  persistImportedAccountAndTransactions,
 } from '../public/js/ui/accountsTab.js';
 import { handleRequest } from '../server/index.js';
 import http from 'node:http';
@@ -411,12 +422,16 @@ describe('Cloud Run HTTP Server Endpoints', () => {
       assert.ok(htmlText.includes('Pisto'));
       assert.ok(htmlText.includes('tab-btn-profile'));
 
-      // Also verify that TypeScript modules are transpiled and served as JavaScript
-      const tsRes = await fetch(`${baseUrl}/js/services/authProfileService.ts`);
-      assert.equal(tsRes.status, 200);
-      assert.ok((tsRes.headers.get('content-type') || '').includes('javascript'));
-      const tsBody = await tsRes.text();
-      assert.ok(tsBody.includes('FirebaseAuthProfileService'));
+      // Verify that Vanilla ESNext modules and CSS3 from /src/ are served with proper MIME types
+      const jsRes = await fetch(`${baseUrl}/src/js/services/firestore.js`);
+      assert.equal(jsRes.status, 200);
+      assert.ok((jsRes.headers.get('content-type') || '').includes('javascript'));
+      const jsBody = await jsRes.text();
+      assert.ok(jsBody.includes('checkAccountTransactionDuplicate'));
+
+      const cssRes = await fetch(`${baseUrl}/src/css/styles.css`);
+      assert.equal(cssRes.status, 200);
+      assert.ok((cssRes.headers.get('content-type') || '').includes('css'));
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -1493,7 +1508,7 @@ describe('AccountsView & ImportAccountModal Button Handler, Conditional Render &
       },
     });
 
-    assert.equal(IMPORT_ACCOUNT_BUTTON_ID, 'btn-import-account-media');
+    assert.equal(IMPORT_ACCOUNT_BUTTON_ID, 'btn-import-account');
     assert.equal(IMPORT_ACCOUNT_BUTTON_LABEL, '➕ Importar Cuenta desde Imagen/PDF');
     assert.equal(view.isImportAccountModalOpen, false);
 
@@ -1538,18 +1553,24 @@ describe('AccountsView & ImportAccountModal Button Handler, Conditional Render &
     assert.equal(getIsImportAccountModalOpen(), false);
     assert.equal(closedCalled, 1);
 
-    // 4. Verify anti-tree-shaking global registrations and zero console.log in component/modal files
+    // 4. Verify anti-tree-shaking global registrations and zero console.log in Vanilla Stack files
     assert.equal(globalThis.__PISTO_ACCOUNTS_VIEW__, AccountsView);
     assert.equal(globalThis.__PISTO_IMPORT_ACCOUNT_MODAL__, ImportAccountModal);
+    assert.equal(typeof openImportModal, 'function');
+    assert.equal(typeof bindImportAccountTriggerButtons, 'function');
 
     const filesToCheck = [
-      'src/components/AccountsView.tsx',
-      'src/components/ImportAccountModal.tsx',
+      'index.html',
+      'src/css/styles.css',
+      'src/js/app.js',
+      'src/js/services/firestore.js',
+      'src/js/components/ImportAccountModal.js',
       'public/js/ui/accountsTab.js',
       'public/js/ui/importAccountModal.js',
     ];
     for (const relPath of filesToCheck) {
       const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      assert.ok(content.trim().length > 0, `Expected non-empty file: ${relPath}`);
       const codeWithoutComments = content
         .replace(/\/\*[\s\S]*?\*\//g, '')
         .replace(/\/\/.*$/gm, '');
@@ -1559,6 +1580,264 @@ describe('AccountsView & ImportAccountModal Button Handler, Conditional Render &
         `Expected no console.log in ${relPath}`
       );
     }
+  });
+});
+
+describe('Smart Transaction Deduplication & Lightweight Firestore Cursor Pagination', () => {
+  it('detects duplicate transactions (same accountId + same date + same amount + similar concept) and formats warning banner', async () => {
+    const existingTransactions = [
+      {
+        id: 'tx_existing_colonia',
+        accountId: 'acc_atlantida_1',
+        date: '2026-10-21',
+        amount: 1250.5,
+        currency: 'HNL',
+        type: 'expense',
+        categoryId: 'cat_food',
+        note: 'POS SUPERMERCADO LA COLONIA #12 TEGUCIGALPA',
+      },
+    ];
+
+    assert.equal(
+      normalizeTransactionConcept('Compra POS en Supermercado La Colonia #12'),
+      'supermercado colonia 12'
+    );
+    assert.equal(
+      isSimilarTransactionConcept('SUPERMERCADO LA COLONIA', 'POS SUPERMERCADO LA COLONIA #12'),
+      true
+    );
+    assert.equal(formatDateDdMmYyyy('2026-10-21'), '21/10/2026');
+
+    const checkResult = await checkAccountTransactionDuplicate(
+      {
+        accountId: 'acc_atlantida_1',
+        date: '2026-10-21',
+        amount: 1250.5,
+        currency: 'HNL',
+        concept: 'Supermercado La Colonia',
+      },
+      {
+        accountId: 'acc_atlantida_1',
+        transactions: existingTransactions,
+      }
+    );
+
+    assert.equal(checkResult.isDuplicate, true);
+    assert.equal(checkResult.duplicateTransaction.id, 'tx_existing_colonia');
+    assert.equal(
+      checkResult.warningMessage,
+      '⚠️ Posible transacción duplicada detectada (Monto: L 1250.50, Fecha: 21/10/2026, Comercio: Supermercado La Colonia)'
+    );
+    assert.equal(
+      DUPLICATE_TRANSACTION_OPTION_LABELS.OVERWRITE,
+      '✏️ Sobreescribir / Actualizar Transacción Existente'
+    );
+    assert.equal(
+      DUPLICATE_TRANSACTION_OPTION_LABELS.CREATE_NEW,
+      '➕ Crear como Nueva Transacción'
+    );
+    assert.equal(DUPLICATE_TRANSACTION_OPTION_LABELS.SKIP, '🚫 Omitir');
+  });
+
+  it('executes all 3 user deduplication decisions (overwrite, create_new, skip) accurately in Firestore and local state', async () => {
+    const state = createSeedState();
+    const bankAcc = createAccount({
+      id: 'acc_bac_hnl',
+      name: 'BAC Credomatic — Ahorro',
+      institution: 'BAC Credomatic',
+      accountNumber: '99887766',
+      type: 'bank',
+      currency: 'HNL',
+      initialBalance: 5000,
+    });
+    state.accounts.push(bankAcc);
+
+    const existingTx = createTransaction({
+      id: 'tx_dup_target',
+      type: 'expense',
+      amount: 450.0,
+      currency: 'HNL',
+      accountId: 'acc_bac_hnl',
+      categoryId: 'cat_food',
+      date: '2026-10-15',
+      note: 'Espresso Americano',
+    });
+    state.transactions.push(existingTx);
+
+    // 1. Test "skip" ("🚫 Omitir")
+    const skipRes = await resolveDuplicateTransactionAction({
+      action: DUPLICATE_TRANSACTION_ACTIONS.SKIP,
+      candidateTx: {
+        type: 'expense',
+        amount: 450.0,
+        currency: 'HNL',
+        accountId: 'acc_bac_hnl',
+        categoryId: 'cat_food',
+        date: '2026-10-15',
+        note: 'Espresso Americano Mall',
+      },
+      existingTx,
+      state,
+    });
+    assert.equal(skipRes.skipped, true);
+    assert.equal(skipRes.savedTransaction, null);
+    assert.equal(state.transactions.filter((t) => t.accountId === 'acc_bac_hnl').length, 1);
+
+    // 2. Test "overwrite" ("✏️ Sobreescribir / Actualizar Transacción Existente")
+    const overwriteRes = await resolveDuplicateTransactionAction({
+      action: DUPLICATE_TRANSACTION_ACTIONS.OVERWRITE,
+      candidateTx: {
+        type: 'expense',
+        amount: 450.0,
+        currency: 'HNL',
+        accountId: 'acc_bac_hnl',
+        categoryId: 'cat_food',
+        date: '2026-10-15',
+        note: 'Espresso Americano Actualizado',
+      },
+      existingTx,
+      state,
+    });
+    assert.equal(overwriteRes.overwritten, true);
+    assert.equal(overwriteRes.savedTransaction.id, 'tx_dup_target');
+    assert.equal(
+      state.transactions.find((t) => t.id === 'tx_dup_target').note,
+      'Espresso Americano Actualizado'
+    );
+    assert.equal(state.transactions.filter((t) => t.accountId === 'acc_bac_hnl').length, 1);
+
+    // 3. Test "create_new" ("➕ Crear como Nueva Transacción")
+    const createNewRes = await resolveDuplicateTransactionAction({
+      action: DUPLICATE_TRANSACTION_ACTIONS.CREATE_NEW,
+      candidateTx: {
+        type: 'expense',
+        amount: 450.0,
+        currency: 'HNL',
+        accountId: 'acc_bac_hnl',
+        categoryId: 'cat_food',
+        date: '2026-10-15',
+        note: 'Espresso Americano Segunda Compra',
+      },
+      existingTx,
+      state,
+    });
+    assert.equal(createNewRes.action, DUPLICATE_TRANSACTION_ACTIONS.CREATE_NEW);
+    assert.equal(createNewRes.skipped, false);
+    assert.equal(createNewRes.overwritten, false);
+    assert.notEqual(createNewRes.savedTransaction.id, 'tx_dup_target');
+    assert.equal(state.transactions.filter((t) => t.accountId === 'acc_bac_hnl').length, 2);
+
+    // 4. Test batch import deduplication in persistImportedAccountAndTransactions
+    const importRes = await persistImportedAccountAndTransactions(
+      {
+        bankName: 'BAC Credomatic',
+        accountType: 'Ahorro',
+        accountNumber: '99887766',
+        currency: 'HNL',
+        currentBalance: 5000,
+        detectedTransactions: [
+          {
+            date: '2026-10-15',
+            concept: 'Espresso Americano Actualizado',
+            amount: 450.0,
+            type: 'expense',
+            duplicateId: 'tx_dup_target',
+            duplicateAction: DUPLICATE_TRANSACTION_ACTIONS.OVERWRITE,
+          },
+          {
+            date: '2026-10-15',
+            concept: 'Espresso Americano Segunda Compra',
+            amount: 450.0,
+            type: 'expense',
+            duplicateId: createNewRes.savedTransaction.id,
+            duplicateAction: DUPLICATE_TRANSACTION_ACTIONS.SKIP,
+          },
+        ],
+      },
+      {
+        appState: state,
+        workspaceId: 'ws_default',
+      }
+    );
+    assert.equal(importRes.accountUpdated, true);
+    assert.equal(importRes.overwrittenTransactions.length, 1);
+    assert.equal(importRes.skippedTransactions.length, 1);
+    assert.equal(importRes.createdTransactions.length, 0);
+  });
+
+  it('supports lightweight Firestore cursor pagination (limit + startAfter) and normalized document schema', async () => {
+    assert.deepEqual(FIRESTORE_COLLECTIONS, {
+      ACCOUNTS: 'accounts',
+      TRANSACTIONS: 'transactions',
+      WORKSPACES: 'workspaces',
+      USERS: 'users',
+    });
+
+    const normalized = normalizeFirestoreDocument(FIRESTORE_COLLECTIONS.TRANSACTIONS, {
+      id: 'tx_100',
+      accountId: 'acc_1',
+      categoryId: 'cat_food',
+      type: 'expense',
+      amount: 250.75,
+      currency: 'HNL',
+      date: '2026-10-21',
+      note: 'Supermercado',
+    });
+    assert.equal(normalized.id, 'tx_100');
+    assert.equal(normalized.amount, 250.75);
+    assert.equal(normalized.date, '2026-10-21');
+
+    const appliedConstraints = [];
+    const mockDocs = [
+      {
+        id: 'doc_1',
+        data: () => ({
+          accountId: 'acc_1',
+          categoryId: 'cat_food',
+          type: 'expense',
+          amount: 100,
+          currency: 'HNL',
+          date: '2026-10-21',
+        }),
+      },
+      {
+        id: 'doc_2',
+        data: () => ({
+          accountId: 'acc_1',
+          categoryId: 'cat_food',
+          type: 'expense',
+          amount: 200,
+          currency: 'HNL',
+          date: '2026-10-20',
+        }),
+      },
+    ];
+    const page = await queryCollectionWithCursor({
+      firestoreDb: { name: 'mock-db' },
+      firestoreModule: {
+        collection: (_db, col) => ({ col }),
+        where: (f, op, v) => ({ type: 'where', f, op, v }),
+        orderBy: (f, d) => ({ type: 'orderBy', f, d }),
+        startAfter: (cursor) => ({ type: 'startAfter', cursor }),
+        limit: (n) => ({ type: 'limit', n }),
+        query: (_ref, ...constraints) => {
+          appliedConstraints.push(...constraints);
+          return { constraints };
+        },
+        getDocs: async () => ({ docs: mockDocs }),
+      },
+      collectionName: FIRESTORE_COLLECTIONS.TRANSACTIONS,
+      workspaceId: 'ws_default',
+      accountId: 'acc_1',
+      pageSize: 2,
+      cursor: { id: 'doc_0' },
+    });
+
+    assert.equal(page.items.length, 2);
+    assert.equal(page.hasMore, true);
+    assert.equal(page.nextCursor, mockDocs[1]);
+    assert.ok(appliedConstraints.some((c) => c.type === 'startAfter'));
+    assert.ok(appliedConstraints.some((c) => c.type === 'limit' && c.n === 2));
   });
 });
 

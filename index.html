@@ -1,0 +1,1856 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
+  <title>Pisto — Open-Finance &amp; Control Financiero Personal, Familiar y Multidivisa con IA</title>
+  <meta
+    name="description"
+    content="Controlá tus cuentas, tarjetas, finanzas familiares compartidas y presupuesto de forma privada, rápida y con asistencia de IA en arquitectura Local-First."
+  />
+  <meta name="theme-color" content="#0b111e" />
+
+  <!-- Open Graph / Social Sharing -->
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="Pisto" />
+  <meta property="og:locale" content="es_HN" />
+  <meta property="og:title" content="Pisto — Tu pisto, bien contado | Finanzas Personales y Familiares con IA" />
+  <meta
+    property="og:description"
+    content="Controlá tus cuentas, tarjetas, finanzas familiares compartidas y presupuesto de forma privada, rápida y con asistencia de IA."
+  />
+  <meta property="og:image" content="/og-pisto-preview.svg" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="Dashboard financiero Pisto con tema oscuro y acentos esmeralda" />
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Pisto — Tu pisto, bien contado" />
+  <meta
+    name="twitter:description"
+    content="Controlá tus cuentas, tarjetas y presupuesto de forma privada, rápida y con asistencia de IA."
+  />
+  <meta name="twitter:image" content="/og-pisto-preview.svg" />
+
+  <!-- Prevent Flash of Unstyled Content (FOUC) on pinned theme -->
+  <script>
+    try {
+      const raw = localStorage.getItem('pisto_1money_state_v1');
+      const theme = raw ? (JSON.parse(raw).theme || 'dark') : 'dark';
+      if (theme === 'dark' || theme === 'light') {
+        document.documentElement.style.colorScheme = theme;
+        document.documentElement.dataset.theme = theme;
+      }
+    } catch {}
+  </script>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="/src/css/styles.css" />
+</head>
+<body>
+  <a href="#main-workspace" class="skip-to-content-link">Saltar al contenido principal</a>
+
+  <div class="app-shell">
+    <!-- Top Header & Global Controls -->
+    <header class="top-header" role="banner">
+      <div class="header-top-row">
+        <div class="brand-identity">
+          <div class="brand-logo" aria-hidden="true">1M</div>
+          <div>
+            <h1 class="brand-title">Pisto — Open-Finance &amp; Control Financiero Personal</h1>
+            <p class="brand-subtitle">Controlá tus cuentas, tarjetas y presupuesto de forma privada, rápida y con asistencia de IA.</p>
+          </div>
+        </div>
+
+        <div class="header-primary-actions">
+          <button
+            type="button"
+            id="btn-toggle-mobile-filters"
+            class="btn-secondary header-filter-toggle-btn"
+            aria-expanded="false"
+            aria-controls="header-filters-drawer"
+            aria-label="Mostrar u ocultar filtros de período, moneda y tema"
+          >
+            <span aria-hidden="true">⚙️</span>
+            <span>Filtros</span>
+          </button>
+
+          <button
+            type="button"
+            id="header-quick-add-btn"
+            class="btn-primary header-register-btn"
+            data-action="open-keypad"
+            aria-label="Registrar nuevo movimiento financiero"
+            title="Registrar gasto, ingreso o transferencia"
+          >
+            <span aria-hidden="true">＋</span>
+            <span>Registrar</span>
+          </button>
+
+          <button
+            type="button"
+            id="header-auth-btn"
+            class="btn-primary header-user-pill"
+            data-action="open-profile-or-auth"
+            aria-haspopup="dialog"
+            aria-controls="auth-dialog"
+            aria-label="Iniciar sesión o abrir perfil de usuario"
+            title="Autenticación Firebase y Perfil de Usuario"
+          >
+            <span aria-hidden="true">🔐</span>
+            <span>Iniciar Sesión</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="header-filters-drawer" class="header-controls" role="region" aria-label="Filtros globales del Dashboard">
+        <button
+          type="button"
+          id="header-token-telemetry"
+          class="token-telemetry-pill"
+          popovertarget="telemetry-popover"
+          aria-label="Ver auditoría de ahorro de tokens Genkit"
+          title="Ver auditoría de optimización de tokens Genkit"
+        >
+          <span class="telemetry-dot" aria-hidden="true"></span>
+          <span>Modo 0-Tokens: <strong>0 tok</strong></span>
+        </button>
+
+        <label for="period-filter-select" class="sr-only">Período de análisis</label>
+        <select id="period-filter-select" class="control-select" aria-label="Período de análisis">
+          <option value="today">Hoy</option>
+          <option value="week">Últimos 7 días</option>
+          <option value="month" selected>Este Mes</option>
+          <option value="all">Todo el Historial</option>
+          <option value="custom">Rango Personalizado</option>
+        </select>
+
+        <div
+          id="global-date-range-group"
+          class="date-range-inline-group is-hidden"
+          title="Filtrar Dashboard y Transacciones por rango de fechas"
+        >
+          <label for="global-start-date" class="date-range-label">Desde</label>
+          <input
+            type="date"
+            id="global-start-date"
+            class="control-date-input"
+            aria-label="Fecha inicial del filtro"
+          />
+          <label for="global-end-date" class="date-range-label">Hasta</label>
+          <input
+            type="date"
+            id="global-end-date"
+            class="control-date-input"
+            aria-label="Fecha final del filtro"
+          />
+          <button
+            type="button"
+            id="btn-clear-global-dates"
+            class="btn-secondary btn-sm is-hidden"
+            aria-label="Limpiar filtro de fechas y ver todo el historial"
+            title="Limpiar filtro de fechas y ver todo"
+          >
+            ✕ Todo
+          </button>
+        </div>
+
+        <label for="base-currency-select" class="sr-only">Moneda base</label>
+        <select id="base-currency-select" class="control-select" aria-label="Moneda base">
+          <option value="HNL">HNL (L)</option>
+          <option value="USD">USD ($)</option>
+          <option value="EUR">EUR (€)</option>
+          <option value="CRC">CRC (₡)</option>
+          <option value="MXN">MXN ($)</option>
+          <option value="COP">COP ($)</option>
+          <option value="CLP">CLP ($)</option>
+          <option value="ARS">ARS ($)</option>
+        </select>
+
+        <label for="theme-select" class="sr-only">Tema visual</label>
+        <select id="theme-select" class="control-select" aria-label="Tema visual">
+          <option value="system">Tema: Auto</option>
+          <option value="dark">Tema: Oscuro</option>
+          <option value="light">Tema: Claro</option>
+        </select>
+      </div>
+    </header>
+
+    <!-- Native HTML5 Popover for Token Optimization Explanation -->
+    <div id="telemetry-popover" popover class="modal-dialog" role="dialog" aria-label="Política de Ahorro Extremo de Tokens">
+      <div class="modal-header">
+        <h2>Política de Ahorro Extremo de Tokens</h2>
+      </div>
+      <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 0.75rem;">
+        Esta aplicación ejecuta el <strong>100% de la contabilidad, gráficas y categorización común de forma determinista en tu navegador (0 tokens)</strong>.
+        Firebase Genkit (<code>gemini-2.5-flash</code>) solo se invoca cuando lo solicitas explícitamente, enviando un <em>micro-payload</em> comprimido con caché SHA-256.
+      </p>
+      <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+        <button type="button" class="btn-secondary btn-sm" data-action="export-csv" id="btn-export-csv" aria-label="Exportar transacciones en formato CSV">Exportar CSV</button>
+        <button type="button" class="btn-secondary btn-sm" data-action="export-json" id="btn-export-json" aria-label="Descargar copia de respaldo en JSON">Backup JSON</button>
+        <button type="button" class="btn-secondary btn-sm" data-action="reset-demo" id="btn-reset-demo" aria-label="Restaurar datos de demostración">Restaurar Demo</button>
+      </div>
+    </div>
+
+    <!-- Global Financial KPI Strip -->
+    <section class="kpi-strip" aria-label="Resumen financiero general">
+      <article class="kpi-card">
+        <span class="kpi-label">Patrimonio en Cuentas</span>
+        <strong class="kpi-value" id="kpi-total-balance">$0.00</strong>
+      </article>
+      <article class="kpi-card">
+        <span class="kpi-label">Ingresos del Período</span>
+        <strong class="kpi-value text-income" id="kpi-period-income">+$0.00</strong>
+      </article>
+      <article class="kpi-card">
+        <span class="kpi-label">Gastos del Período</span>
+        <strong class="kpi-value text-expense" id="kpi-period-expense">-$0.00</strong>
+      </article>
+      <article class="kpi-card">
+        <span class="kpi-label">Tasa de Ahorro</span>
+        <strong class="kpi-value" id="kpi-savings-rate">0%</strong>
+      </article>
+    </section>
+
+    <!-- Active Profile / Currency / Personal View Mode Filter Banner -->
+    <div id="active-profile-filter-bar" class="profile-filter-banner is-hidden" role="status"></div>
+
+    <!-- Pisto 5-Tab Navigation Bar -->
+    <nav class="nav-tabs" role="tablist" aria-label="Secciones de Pisto">
+      <button
+        type="button"
+        role="tab"
+        id="tab-btn-categories"
+        class="nav-tab-btn is-active"
+        data-tab-target="categories"
+        aria-selected="true"
+        aria-controls="panel-categories"
+      >
+        Categorías
+      </button>
+      <button
+        type="button"
+        role="tab"
+        id="tab-btn-accounts"
+        class="nav-tab-btn"
+        data-tab-target="accounts"
+        aria-selected="false"
+        aria-controls="panel-accounts"
+      >
+        Cuentas y Metas
+      </button>
+      <button
+        type="button"
+        role="tab"
+        id="tab-btn-transactions"
+        class="nav-tab-btn"
+        data-tab-target="transactions"
+        aria-selected="false"
+        aria-controls="panel-transactions"
+      >
+        Transacciones
+      </button>
+      <button
+        type="button"
+        role="tab"
+        id="tab-btn-budgets"
+        class="nav-tab-btn"
+        data-tab-target="budgets"
+        aria-selected="false"
+        aria-controls="panel-budgets"
+      >
+        Presupuestos y Genkit IA
+      </button>
+      <button
+        type="button"
+        role="tab"
+        id="tab-btn-profile"
+        class="nav-tab-btn"
+        data-tab-target="profile"
+        aria-selected="false"
+        aria-controls="panel-profile"
+      >
+        👤 Perfil
+      </button>
+    </nav>
+
+    <main id="main-workspace" class="app-main-workspace">
+      <!-- ================================================================== -->
+      <!-- TAB 1: CATEGORÍAS (Pisto Signature Donut + Category Grid)         -->
+      <!-- ================================================================== -->
+      <section id="panel-categories" data-tab-panel="categories" role="tabpanel" aria-labelledby="tab-btn-categories">
+        <div class="categories-workspace">
+          <aside class="donut-panel" aria-label="Gráfico circular de gastos por categoría">
+            <div id="donut-chart-mount"></div>
+            <p style="font-size: 0.875rem; color: var(--text-secondary);">
+              Pulsa cualquier categoría o anillo para registrar un gasto o ingreso al instante con la calculadora de Pisto.
+            </p>
+          </aside>
+
+          <div class="categories-grid-section">
+            <div class="section-toolbar" style="margin-bottom: 0.85rem;">
+              <h2 style="margin: 0;">Categorías de Gastos (1 Clic para Registrar)</h2>
+              <button
+                type="button"
+                id="btn-new-category"
+                class="btn-primary btn-sm"
+                data-action="open-category-modal"
+                aria-label="Crear nueva categoría"
+              >
+                + Nueva Categoría
+              </button>
+            </div>
+            <div id="expense-categories-grid" class="categories-grid"></div>
+
+            <h2>Categorías de Ingresos</h2>
+            <div id="income-categories-grid" class="categories-grid"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================================================================== -->
+      <!-- TAB 2: CUENTAS, METAS DE AHORRO Y DEUDAS                           -->
+      <!-- ================================================================== -->
+      <section id="panel-accounts" data-tab-panel="accounts" role="tabpanel" aria-labelledby="tab-btn-accounts" class="is-hidden">
+        <div class="section-toolbar">
+          <div>
+            <h2>Cuentas, Billeteras, Ahorros y Deudas</h2>
+            <p style="font-size: 0.875rem; color: var(--text-secondary);">
+              Gestiona múltiples divisas, transfiere fondos entre cuentas y monitorea metas de ahorro.
+            </p>
+          </div>
+          <div class="toolbar-action-group" style="display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap;">
+            <label
+              for="toggle-show-archived-accounts"
+              class="archived-toggle-pill"
+              style="display: inline-flex; align-items: center; gap: 0.45rem; font-size: 0.8125rem; color: var(--text-secondary); background: var(--bg-elevated); border: 1px solid var(--surface-border); border-radius: 999px; padding: 0.38rem 0.8rem; cursor: pointer;"
+              title="Mostrar u ocultar cuentas archivadas para poder desarchivarlas o reactivarlas"
+            >
+              <input
+                type="checkbox"
+                id="toggle-show-archived-accounts"
+                aria-label="Mostrar Cuentas Archivadas"
+                style="margin: 0; accent-color: var(--color-brand);"
+              />
+              <span>📦 Mostrar Cuentas Archivadas <small id="archived-accounts-count-badge">(0)</small></span>
+            </label>
+            <button
+              type="button"
+              id="btn-new-transfer"
+              class="btn-secondary"
+              data-action="open-keypad"
+              data-tx-type="transfer"
+              aria-label="Registrar nueva transferencia entre cuentas"
+            >
+              ⇄ Nueva Transferencia
+            </button>
+            <button
+              type="button"
+              id="btn-import-account"
+              class="btn-primary"
+              data-action="open-import-account-modal"
+              commandfor="import-account-dialog"
+              command="show-modal"
+              aria-label="Importar cuenta y movimientos desde imagen o PDF"
+            >
+              ➕ Importar Cuenta desde Imagen/PDF
+            </button>
+            <button
+              type="button"
+              id="btn-new-account"
+              class="btn-primary"
+              data-action="open-account-modal"
+              aria-label="Crear nueva cuenta bancaria o meta de ahorro"
+            >
+              + Nueva Cuenta / Meta
+            </button>
+          </div>
+        </div>
+
+        <div id="accounts-grid" class="accounts-grid"></div>
+      </section>
+
+      <!-- ================================================================== -->
+      <!-- TAB 3: TRANSACCIONES + REGISTRO RÁPIDO NLP + ESCÁNER VOUCHER OCR   -->
+      <!-- ================================================================== -->
+      <section id="panel-transactions" data-tab-panel="transactions" role="tabpanel" aria-labelledby="tab-btn-transactions" class="is-hidden">
+        <div class="smart-nlp-box">
+          <div class="voucher-scanner-banner">
+            <div class="voucher-banner-info">
+              <strong>📷 Escáner de Voucher POS &amp; 📄 Estado de Cuenta PDF (Open-Source ML · 0 Tokens)</strong>
+              <span>Decodifica fotos de vouchers o estados de cuenta bancarios en PDF (fecha, concepto, monto en Lempiras/Dólares) con detección automática de duplicados.</span>
+            </div>
+            <div class="voucher-banner-actions">
+              <input
+                type="file"
+                id="voucher-file-input"
+                accept="image/*,application/pdf"
+                capture="environment"
+                class="sr-only"
+              />
+              <input
+                type="file"
+                id="statement-file-input"
+                accept="application/pdf,image/*"
+                class="sr-only"
+              />
+              <button
+                type="button"
+                id="btn-scan-voucher"
+                class="btn-primary"
+                data-action="trigger-voucher-upload"
+                aria-label="Escanear foto o PDF de voucher POS"
+              >
+                📷 Escanear Voucher
+              </button>
+              <button
+                type="button"
+                id="btn-upload-statement"
+                class="btn-secondary"
+                data-action="trigger-statement-upload"
+                aria-label="Subir estado de cuenta bancario en formato PDF"
+              >
+                📄 Subir Estado de Cuenta PDF
+              </button>
+            </div>
+          </div>
+
+          <form id="quick-nlp-form" class="smart-nlp-form">
+            <label for="quick-nlp-input" class="sr-only">Entrada rápida en lenguaje natural</label>
+            <input
+              type="text"
+              id="quick-nlp-input"
+              class="smart-nlp-input"
+              placeholder="Ej: 24.50 almuerzo restaurante con tarjeta (0 tokens)..."
+              autocomplete="off"
+            />
+            <button type="submit" id="btn-quick-local-submit" class="btn-secondary" aria-label="Registrar movimiento en texto localmente sin usar tokens">
+              ⚡ Registrar Texto (0 Tokens)
+            </button>
+            <button
+              type="button"
+              id="btn-quick-ai-parse"
+              class="btn-ai"
+              data-action="smart-parse-ai"
+              aria-label="Desglosar gasto con inteligencia artificial Firebase Genkit"
+              title="Usa Firebase Genkit solo para desglosar frases complejas o múltiples gastos"
+            >
+              ✨ Genkit IA
+            </button>
+          </form>
+          <div id="quick-nlp-preview" class="smart-nlp-preview">
+            <span>💡 Ejemplo: <code>25.50 almuerzo con tarjeta</code> (0 tokens) o sube la foto/PDF de tu voucher POS.</span>
+          </div>
+        </div>
+
+        <div class="ledger-filters-bar">
+          <label for="ledger-search-input" class="sr-only">Buscar transacciones</label>
+          <input
+            type="search"
+            id="ledger-search-input"
+            class="smart-nlp-input"
+            placeholder="Buscar por nota, comercio, categoría, cuenta o monto..."
+          />
+          <label for="ledger-account-select" class="sr-only">Filtrar por cuenta</label>
+          <select id="ledger-account-select" class="control-select" aria-label="Filtrar por cuenta">
+            <option value="all">Todas las cuentas</option>
+          </select>
+          <label for="ledger-type-select" class="sr-only">Filtrar por tipo</label>
+          <select id="ledger-type-select" class="control-select" aria-label="Filtrar por tipo de movimiento">
+            <option value="all">Todos los tipos</option>
+            <option value="expense">Solo Gastos</option>
+            <option value="income">Solo Ingresos</option>
+            <option value="transfer">Solo Transferencias</option>
+          </select>
+          <label for="ledger-currency-select" class="sr-only">Filtrar por moneda</label>
+          <select id="ledger-currency-select" class="control-select" aria-label="Filtrar por moneda">
+            <option value="all">Todas las monedas</option>
+            <option value="HNL">Solo HNL (L)</option>
+            <option value="USD">Solo USD ($)</option>
+            <option value="EUR">Solo EUR (€)</option>
+            <option value="CRC">Solo CRC (₡)</option>
+            <option value="MXN">Solo MXN ($)</option>
+            <option value="COP">Solo COP ($)</option>
+            <option value="CLP">Solo CLP ($)</option>
+            <option value="ARS">Solo ARS ($)</option>
+          </select>
+        </div>
+
+        <div id="ledger-groups-mount"></div>
+      </section>
+
+      <!-- ================================================================== -->
+      <!-- TAB 4: PRESUPUESTOS Y COACH FINANCIERO FIREBASE GENKIT             -->
+      <!-- ================================================================== -->
+      <section id="panel-budgets" data-tab-panel="budgets" role="tabpanel" aria-labelledby="tab-btn-budgets" class="is-hidden">
+        <div class="budgets-ai-grid">
+          <div>
+            <h2 style="margin-bottom: 0.35rem;">Límites de Presupuesto Mensual</h2>
+            <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 1rem;">
+              Ajusta el tope de cada categoría para recibir alertas tempranas antes de excederte.
+            </p>
+            <div id="budgets-list-mount" class="budgets-list"></div>
+          </div>
+
+          <aside class="ai-coach-panel" aria-label="Coach Financiero con Inteligencia Artificial">
+            <div>
+              <h2>Coach Financiero Firebase Genkit</h2>
+              <p style="font-size: 0.875rem; color: var(--text-secondary);">
+                Compresión extrema de contexto: en lugar de enviar tu historial completo al modelo, se resume localmente en un micro-payload de menos de 75 tokens.
+              </p>
+            </div>
+
+            <div id="token-compression-stats" class="token-stats-grid"></div>
+
+            <div>
+              <span style="font-size: 0.8125rem; font-weight: 600; color: var(--text-secondary);">
+                Micro-Payload enviado a Genkit (<code>gemini-2.5-flash</code>):
+              </span>
+              <pre id="micro-payload-preview" class="micro-payload-box"></pre>
+            </div>
+
+            <button
+              type="button"
+              id="btn-generate-ai-insights"
+              class="btn-ai"
+              data-action="generate-ai-insights"
+              aria-label="Generar diagnóstico financiero con Firebase Genkit"
+            >
+              ✨ Generar Diagnóstico con Genkit
+            </button>
+
+            <div id="ai-insights-result-mount"></div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ================================================================== -->
+      <!-- TAB 5: PERFIL DE USUARIO, FIREBASE AUTH & FIRESTORE (users/{uid})  -->
+      <!-- ================================================================== -->
+      <section id="panel-profile" data-tab-panel="profile" role="tabpanel" aria-labelledby="tab-btn-profile" class="is-hidden">
+        <div class="profile-workspace">
+          <!-- Left Card: Auth Identity & Firestore Document Status -->
+          <article class="profile-identity-card">
+            <div class="profile-identity-header">
+              <div class="brand-logo" aria-hidden="true">👤</div>
+              <div>
+                <h2 style="font-size: 1.1rem; margin: 0;">Cuenta y Espacio Pisto</h2>
+                <span id="profile-user-email" style="font-size: 0.85rem; color: var(--text-secondary);">
+                  Modo sin cuenta (Inicia sesión con Google o Correo)
+                </span>
+              </div>
+            </div>
+
+            <div class="profile-meta-list">
+              <div class="profile-meta-row">
+                <span>Estado Firebase Auth:</span>
+                <span id="profile-auth-status-badge" class="stmt-badge-dup">Sesión Local</span>
+              </div>
+              <div class="profile-meta-row">
+                <span>Documento Firestore:</span>
+                <code id="profile-firestore-path" class="firestore-path-pill">users/local_default_user</code>
+              </div>
+              <div class="profile-meta-row">
+                <span>Espacio Familiar:</span>
+                <code id="profile-workspace-id-badge" class="firestore-path-pill">ws_default</code>
+              </div>
+              <div class="profile-meta-row">
+                <span>Google AI Studio Key:</span>
+                <span id="profile-gemini-key-status" class="voucher-pill">⚪ No configurada</span>
+              </div>
+            </div>
+
+            <div style="display: flex; flex-direction: column; gap: 0.55rem; margin-top: 0.5rem;">
+              <button
+                type="button"
+                id="btn-profile-open-auth"
+                class="btn-primary"
+                data-action="open-auth-modal"
+                aria-label="Abrir modal de inicio de sesión o registro"
+              >
+                🔐 Iniciar Sesión / Crear Cuenta (Google o Correo)
+              </button>
+              <button
+                type="button"
+                id="btn-profile-signout"
+                class="btn-danger is-hidden"
+                aria-label="Cerrar sesión y limpiar claves locales sensibles"
+              >
+                Cerrar Sesión
+              </button>
+            </div>
+
+            <details class="firebase-config-accordion">
+              <summary>⚙️ Conexión Firebase Cloud (Opcional · Free Tier)</summary>
+              <p style="font-size: 0.8125rem; color: var(--text-secondary); margin: 0.45rem 0;">
+                Pisto funciona al 100% con su motor Local-First incluido. Si deseas conectar tu propio proyecto de Firebase Auth y Firestore en la nube, ingresa tus credenciales web (se limpian automáticamente al cerrar sesión):
+              </p>
+              <div class="field">
+                <label for="profile-fb-apikey-input">Firebase Web API Key</label>
+                <input
+                  type="text"
+                  id="profile-fb-apikey-input"
+                  placeholder="AIzaSy..."
+                  autocomplete="off"
+                />
+              </div>
+              <div class="field">
+                <label for="profile-fb-projectid-input">Firebase Project ID</label>
+                <input
+                  type="text"
+                  id="profile-fb-projectid-input"
+                  placeholder="mi-pisto-hn"
+                  autocomplete="off"
+                />
+              </div>
+              <div class="field" style="margin-bottom: 0;">
+                <label for="profile-fb-authdomain-input">Auth Domain (opcional)</label>
+                <input
+                  type="text"
+                  id="profile-fb-authdomain-input"
+                  placeholder="mi-pisto-hn.firebaseapp.com"
+                  autocomplete="off"
+                />
+              </div>
+            </details>
+          </article>
+
+          <!-- Right Card: Editable Profile Form persisted to users/{uid} & Shared Family Workspace -->
+          <article class="profile-form-card">
+            <div style="margin-bottom: 1.1rem;">
+              <h2>Preferencias de Perfil y Moneda</h2>
+              <p style="font-size: 0.875rem; color: var(--text-secondary);">
+                Tus preferencias se persisten en la colección <code>users/{uid}</code> de Firestore y ajustan automáticamente el Dashboard al iniciar sesión.
+              </p>
+            </div>
+
+            <form id="profile-settings-form" novalidate>
+              <div class="form-grid-2">
+                <div class="field">
+                  <label for="profile-name-input">Nombre completo o apodo</label>
+                  <span id="profile-name-hint" class="hint">Visible en tu perfil y en transacciones familiares</span>
+                  <input
+                    type="text"
+                    id="profile-name-input"
+                    name="name"
+                    required
+                    minlength="2"
+                    maxlength="80"
+                    aria-describedby="profile-name-hint"
+                    placeholder="Ej. Carlos Morazán"
+                  />
+                </div>
+
+                <div class="field">
+                  <label for="profile-country-select">País de residencia</label>
+                  <span class="hint">Configura bancos y contexto regional</span>
+                  <select id="profile-country-select" name="country">
+                    <option value="HN">🇭🇳 Honduras (HNL)</option>
+                    <option value="US">🇺🇸 Estados Unidos (USD)</option>
+                    <option value="CR">🇨🇷 Costa Rica (CRC)</option>
+                    <option value="MX">🇲🇽 México (MXN)</option>
+                    <option value="GT">🇬🇹 Guatemala (USD)</option>
+                    <option value="SV">🇸🇻 El Salvador (USD)</option>
+                    <option value="NI">🇳🇮 Nicaragua (USD)</option>
+                    <option value="PA">🇵🇦 Panamá (USD)</option>
+                    <option value="CO">🇨🇴 Colombia (COP)</option>
+                    <option value="CL">🇨🇱 Chile (CLP)</option>
+                    <option value="AR">🇦🇷 Argentina (ARS)</option>
+                    <option value="ES">🇪🇸 España (EUR)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="field">
+                <label for="profile-currency-select">Moneda por defecto (Filtra automáticamente las transacciones del Dashboard al iniciar sesión)</label>
+                <span class="hint">Al iniciar sesión, el Dashboard y el Libro Mayor se filtrarán en esta divisa por defecto.</span>
+                <select id="profile-currency-select" name="defaultCurrency">
+                  <option value="HNL">HNL (L) — Lempira hondureño</option>
+                  <option value="USD">USD ($) — Dólar estadounidense</option>
+                  <option value="EUR">EUR (€) — Euro</option>
+                  <option value="CRC">CRC (₡) — Colón costarricense</option>
+                  <option value="MXN">MXN ($) — Peso mexicano</option>
+                  <option value="COP">COP ($) — Peso colombiano</option>
+                  <option value="CLP">CLP ($) — Peso chileno</option>
+                  <option value="ARS">ARS ($) — Peso argentino</option>
+                </select>
+              </div>
+
+              <div class="field">
+                <label for="profile-gemini-key-input">Gemini API Key — Google AI Studio (Opcional · Solo en localStorage)</label>
+                <span class="hint">
+                  🔒 Se guarda exclusivamente en <code>localStorage</code> de tu navegador para ejecutar llamadas de Firebase Genkit AI sin costo de backend. Nunca se sube a Firestore y se limpia automáticamente al cerrar sesión.
+                </span>
+                <div class="gemini-key-input-row">
+                  <input
+                    type="password"
+                    id="profile-gemini-key-input"
+                    name="geminiApiKey"
+                    placeholder="AIzaSy... (Tu API Key personal de Google AI Studio)"
+                    autocomplete="off"
+                    style="flex: 1;"
+                  />
+                  <button
+                    type="button"
+                    id="btn-toggle-gemini-key-visibility"
+                    class="btn-secondary btn-sm"
+                    aria-label="Mostrar Gemini API Key"
+                    title="Mostrar u ocultar API Key"
+                  >
+                    👁️ Mostrar
+                  </button>
+                  <button
+                    type="button"
+                    id="btn-clear-gemini-key"
+                    class="btn-secondary btn-sm"
+                    aria-label="Borrar Gemini API Key del almacenamiento local"
+                    title="Borrar API Key del navegador"
+                  >
+                    Limpiar
+                  </button>
+                </div>
+              </div>
+
+              <div class="field profile-checkbox-card">
+                <div style="display: flex; align-items: flex-start; gap: 0.65rem;">
+                  <input
+                    type="checkbox"
+                    id="profile-personal-view-checkbox"
+                    name="personalViewMode"
+                    style="margin-top: 0.25rem; width: 18px; height: 18px;"
+                  />
+                  <div>
+                    <label for="profile-personal-view-checkbox" style="margin: 0; font-weight: 700; cursor: pointer;">
+                      Modo Vista Personal (Filtrar solo mis transacciones incluso en un espacio familiar)
+                    </label>
+                    <p style="font-size: 0.8125rem; color: var(--text-secondary); margin-top: 0.2rem;">
+                      Cuando está activo, muestra únicamente las transacciones donde <code>createdByUid === currentUser.uid</code>. Cuando está inactivo, muestra todas las transacciones del <code>workspaceId</code> familiar actual.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div style="display: flex; justify-content: flex-end; gap: 0.75rem; margin-top: 1rem;">
+                <button type="submit" id="btn-save-profile" class="btn-primary">
+                  💾 Guardar Perfil en Firestore (users/{uid})
+                </button>
+              </div>
+            </form>
+
+            <!-- Shared Family Finances Section ("Compartir Finanzas") -->
+            <div class="shared-finances-box">
+              <div style="margin-bottom: 0.75rem;">
+                <h3 style="font-size: 1rem; display: flex; align-items: center; gap: 0.45rem;">
+                  <span>👨‍👩‍👧‍👦 Compartir Finanzas (Espacio Familiar)</span>
+                </h3>
+                <p style="font-size: 0.85rem; color: var(--text-secondary); margin-top: 0.15rem;">
+                  Ingresa el correo electrónico de otro usuario registrado para vincular su <code>workspaceId</code> y llevar el presupuesto familiar en conjunto.
+                </p>
+              </div>
+
+              <div class="share-workspace-form-row">
+                <label for="profile-share-email-input" class="sr-only">Correo del miembro familiar a vincular</label>
+                <input
+                  type="email"
+                  id="profile-share-email-input"
+                  placeholder="familiar@ejemplo.hn"
+                  autocomplete="email"
+                  style="flex: 1;"
+                />
+                <button
+                  type="button"
+                  id="btn-share-workspace"
+                  class="btn-primary btn-sm"
+                  aria-label="Vincular correo electrónico al espacio familiar"
+                >
+                  🔗 Vincular Espacio Familiar
+                </button>
+              </div>
+
+              <div id="profile-shared-members-list" class="shared-members-list"></div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <!-- Semantic HTML5 Footer with Privacy & Local-First Transparency -->
+    <footer class="app-footer" role="contentinfo">
+      <div class="app-footer-info">
+        <strong>Pisto — Arquitectura Local-First &amp; Privacidad</strong>
+        <span>
+          Tus cuentas y movimientos operan localmente en tu navegador (<code>IndexedDB</code> + <code>localStorage</code>) sin cookies de rastreo de terceros. Las claves sensibles (Gemini API Key y Firebase personalizado) se aíslan en tu navegador y se limpian automáticamente al cerrar sesión.
+        </span>
+      </div>
+      <div class="app-footer-actions">
+        <button
+          type="button"
+          id="btn-open-privacy-banner"
+          class="btn-secondary btn-sm"
+          aria-label="Ver detalles de privacidad y almacenamiento local"
+        >
+          🛡️ Privacidad y LocalStorage
+        </button>
+        <button
+          type="button"
+          id="btn-footer-clear-sensitive"
+          class="btn-secondary btn-sm"
+          aria-label="Limpiar API Keys y configuración sensible de localStorage"
+        >
+          🧹 Limpiar Claves Locales
+        </button>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Discrete, Non-Invasive Privacy & LocalStorage Notice Banner -->
+  <aside
+    id="privacy-consent-banner"
+    class="privacy-consent-banner is-hidden"
+    role="region"
+    aria-label="Aviso de privacidad, cookies y almacenamiento local"
+  >
+    <div class="privacy-banner-content">
+      <div class="privacy-banner-text">
+        <strong>🛡️ Aviso de Privacidad y Almacenamiento Local (Local-First)</strong>
+        <p>
+          Pisto no utiliza cookies publicitarias ni rastreadores. Utilizamos <code>localStorage</code> e <code>IndexedDB</code> estrictamente para guardar tu contabilidad Local-First y aislar opcionalmente tu <strong>Gemini API Key</strong> o configuración <strong>Firebase</strong> en tu navegador, las cuales se eliminan automáticamente al cerrar sesión.
+        </p>
+      </div>
+      <div class="privacy-banner-actions">
+        <button
+          type="button"
+          id="btn-privacy-clear-sensitive"
+          class="btn-secondary btn-sm"
+          aria-label="Limpiar claves sensibles guardadas en el navegador"
+        >
+          Limpiar Claves
+        </button>
+        <button
+          type="button"
+          id="btn-accept-privacy-banner"
+          class="btn-primary btn-sm"
+          aria-label="Aceptar aviso de privacidad y almacenamiento local"
+        >
+          Entendido
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Floating Quick-Add Button (Pisto Signature FAB) -->
+  <button
+    type="button"
+    id="fab-open-keypad"
+    class="fab-add-tx"
+    data-action="open-keypad"
+    aria-label="Registrar transacción rápida"
+    title="Registrar movimiento"
+  >
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+      <line x1="12" y1="5" x2="12" y2="19"></line>
+      <line x1="5" y1="12" x2="19" y2="12"></line>
+    </svg>
+  </button>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 1: Pisto CALCULATOR & INSTANT TRANSACTION KEYPAD              -->
+  <!-- ==================================================================== -->
+  <dialog id="tx-dialog" class="modal-dialog" closedby="any" aria-labelledby="tx-dialog-title">
+    <div class="modal-header">
+      <h2 id="tx-dialog-title">Registrar Movimiento</h2>
+      <form method="dialog">
+        <button type="submit" class="btn-secondary btn-sm" id="btn-close-tx-dialog" aria-label="Cerrar modal de registro de movimiento">Cerrar</button>
+      </form>
+    </div>
+
+    <form id="tx-modal-form" novalidate>
+      <div class="tx-type-switcher" role="tablist" aria-label="Tipo de movimiento">
+        <button type="button" class="tx-type-btn is-active" data-tx-type="expense" aria-selected="true">Gasto</button>
+        <button type="button" class="tx-type-btn" data-tx-type="income" aria-selected="false">Ingreso</button>
+        <button type="button" class="tx-type-btn" data-tx-type="transfer" aria-selected="false">Transferir</button>
+      </div>
+
+      <div class="form-grid-2">
+        <div class="field">
+          <label for="tx-account-select">Cuenta origen</label>
+          <select id="tx-account-select" name="accountId" required></select>
+        </div>
+
+        <div class="field" id="tx-category-group">
+          <label for="tx-category-select">Categoría</label>
+          <select id="tx-category-select" name="categoryId"></select>
+        </div>
+
+        <div class="field is-hidden" id="tx-to-account-group">
+          <label for="tx-to-account-select">Cuenta destino</label>
+          <select id="tx-to-account-select" name="toAccountId"></select>
+        </div>
+      </div>
+
+      <!-- Pisto Calculator Display -->
+      <div class="keypad-screen" aria-live="polite">
+        <span id="keypad-expression" class="keypad-expression">0</span>
+        <span id="keypad-evaluated" class="keypad-evaluated">= $0.00</span>
+      </div>
+      <p id="keypad-error-msg" class="error-msg is-hidden" style="display: block; margin-bottom: 0.6rem;"></p>
+
+      <!-- Pisto Calculator Keypad Grid -->
+      <div class="keypad-grid" role="group" aria-label="Calculadora de monto">
+        <button type="button" class="key-btn" data-key="7" aria-label="Número 7">7</button>
+        <button type="button" class="key-btn" data-key="8" aria-label="Número 8">8</button>
+        <button type="button" class="key-btn" data-key="9" aria-label="Número 9">9</button>
+        <button type="button" class="key-btn key-op" data-key="÷" aria-label="Dividir">÷</button>
+
+        <button type="button" class="key-btn" data-key="4" aria-label="Número 4">4</button>
+        <button type="button" class="key-btn" data-key="5" aria-label="Número 5">5</button>
+        <button type="button" class="key-btn" data-key="6" aria-label="Número 6">6</button>
+        <button type="button" class="key-btn key-op" data-key="×" aria-label="Multiplicar">×</button>
+
+        <button type="button" class="key-btn" data-key="1" aria-label="Número 1">1</button>
+        <button type="button" class="key-btn" data-key="2" aria-label="Número 2">2</button>
+        <button type="button" class="key-btn" data-key="3" aria-label="Número 3">3</button>
+        <button type="button" class="key-btn key-op" data-key="-" aria-label="Restar">−</button>
+
+        <button type="button" class="key-btn" data-key="." aria-label="Punto decimal">.</button>
+        <button type="button" class="key-btn" data-key="0" aria-label="Número 0">0</button>
+        <button type="button" class="key-btn" data-key="BACK" aria-label="Borrar último dígito">⌫</button>
+        <button type="button" class="key-btn key-op" data-key="+" aria-label="Sumar">+</button>
+
+        <button type="button" class="key-btn" data-key="C" aria-label="Limpiar calculadora" style="grid-column: span 2;">Limpiar (C)</button>
+        <button type="button" class="key-btn key-op" data-key="=" aria-label="Calcular resultado" style="grid-column: span 2;">Calcular (=)</button>
+      </div>
+
+      <div class="form-grid-3">
+        <div class="field">
+          <label for="tx-amount-input">Monto</label>
+          <input
+            type="number"
+            id="tx-amount-input"
+            name="amount"
+            step="0.01"
+            min="0.01"
+            placeholder="0.00"
+          />
+        </div>
+        <div class="field">
+          <label for="tx-currency-select">Moneda</label>
+          <select id="tx-currency-select" name="currency">
+            <option value="USD">USD ($)</option>
+            <option value="HNL">HNL (L)</option>
+            <option value="EUR">EUR (€)</option>
+            <option value="CRC">CRC (₡)</option>
+            <option value="MXN">MXN ($)</option>
+            <option value="COP">COP ($)</option>
+            <option value="CLP">CLP ($)</option>
+            <option value="ARS">ARS ($)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="tx-date-input">Fecha</label>
+          <input type="date" id="tx-date-input" name="date" required />
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="tx-note-input">Concepto, comercio o nota (opcional)</label>
+        <input
+          type="text"
+          id="tx-note-input"
+          name="note"
+          maxlength="160"
+          placeholder="Ej. Compra quincenal en supermercado..."
+        />
+      </div>
+
+      <div style="display: flex; gap: 0.65rem; flex-wrap: wrap;">
+        <button
+          type="button"
+          id="btn-delete-tx-modal"
+          class="btn-danger is-hidden"
+          style="flex: 0 0 auto;"
+          aria-label="Eliminar esta transacción"
+          title="Eliminar esta transacción"
+        >
+          Eliminar
+        </button>
+        <button type="submit" id="btn-save-transaction" class="btn-primary" style="flex: 1;">
+          Guardar Movimiento
+        </button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 2: CREAR / MODIFICAR CUENTA, META DE AHORRO O DEUDA            -->
+  <!-- ==================================================================== -->
+  <dialog id="account-dialog" class="modal-dialog" closedby="any" aria-labelledby="account-dialog-title">
+    <div class="modal-header">
+      <h2 id="account-dialog-title">Nueva Cuenta o Meta</h2>
+      <form method="dialog">
+        <button type="submit" class="btn-secondary btn-sm" id="btn-close-account-dialog" aria-label="Cerrar modal de cuenta o meta">Cerrar</button>
+      </form>
+    </div>
+
+    <form id="account-modal-form">
+      <input type="hidden" id="acc-id-input" name="id" value="" />
+
+      <div class="field">
+        <label for="acc-name-input">Nombre de la cuenta o meta</label>
+        <span id="acc-name-hint" class="hint">Mínimo 2 caracteres (ej. BAC Lempiras, Efectivo, Viaje)</span>
+        <input
+          type="text"
+          id="acc-name-input"
+          name="name"
+          required
+          minlength="2"
+          maxlength="48"
+          aria-describedby="acc-name-hint"
+          aria-errormessage="acc-name-error"
+          placeholder="Ej. Cuenta de Ahorros"
+        />
+        <div id="acc-name-error" class="error-msg">
+          <span aria-hidden="true">❌</span> Ingrese un nombre válido (al menos 2 caracteres).
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="acc-institution-select">Entidad Bancaria</label>
+        <select id="acc-institution-select" name="institution">
+          <option value="">— Ninguna / Efectivo / Otra —</option>
+          <optgroup label="Bancos de Honduras (CNBS)">
+            <option value="Banco Atlántida">Banco Atlántida</option>
+            <option value="BAC Credomatic Honduras">BAC Credomatic Honduras</option>
+            <option value="Banco Ficohsa">Banco Ficohsa</option>
+            <option value="Banpaís (Banco del País)">Banpaís (Banco del País)</option>
+            <option value="Banco de Occidente">Banco de Occidente</option>
+            <option value="Banco Davivienda Honduras">Banco Davivienda Honduras</option>
+            <option value="Banco Lafise Honduras">Banco Lafise Honduras</option>
+            <option value="Banco Promerica Honduras">Banco Promerica Honduras</option>
+            <option value="Ficensa (Banco Financiera Comercial Hondureña)">Ficensa (Banco Financiera Comercial Hondureña)</option>
+            <option value="Banco Azteca Honduras">Banco Azteca Honduras</option>
+            <option value="Banrural Honduras">Banrural Honduras</option>
+            <option value="Banco Popular">Banco Popular</option>
+            <option value="Banco Hondureño del Café (Banhcafé)">Banco Hondureño del Café (Banhcafé)</option>
+            <option value="Banco de los Trabajadores (Bantrab)">Banco de los Trabajadores (Bantrab)</option>
+            <option value="Banhprovi (Banco Hondureño para la Producción y la Vivienda)">Banhprovi (Banco Hondureño para la Producción y la Vivienda)</option>
+            <option value="Banadesa (Banco Nacional de Desarrollo Agrícola)">Banadesa (Banco Nacional de Desarrollo Agrícola)</option>
+          </optgroup>
+          <optgroup label="Cooperativas de Ahorro y Crédito de Honduras (CONSUCOOP)">
+            <option value="Cooperativa Sagrada Familia">Cooperativa Sagrada Familia</option>
+            <option value="Cooperativa ELGA">Cooperativa ELGA</option>
+            <option value="Cooperativa Chorotega">Cooperativa Chorotega</option>
+            <option value="Cooperativa Guadalupe">Cooperativa Guadalupe</option>
+            <option value="Cooperativa Ceibeña">Cooperativa Ceibeña</option>
+            <option value="Cooperativa CACEENP">Cooperativa CACEENP</option>
+            <option value="Cooperativa Arsenault">Cooperativa Arsenault</option>
+            <option value="Cooperativa Juticalpa">Cooperativa Juticalpa</option>
+            <option value="Cooperativa San Marqueña">Cooperativa San Marqueña</option>
+            <option value="Cooperativa COMIXMUL">Cooperativa COMIXMUL</option>
+            <option value="Cooperativa CACIL">Cooperativa CACIL</option>
+            <option value="Cooperativa COACEHL (Educadores de Honduras)">Cooperativa COACEHL (Educadores de Honduras)</option>
+            <option value="Cooperativa Taulabé">Cooperativa Taulabé</option>
+            <option value="Cooperativa Apaguiz">Cooperativa Apaguiz</option>
+            <option value="Cooperativa Ocotepeque">Cooperativa Ocotepeque</option>
+            <option value="Cooperativa Fe y Esperanza">Cooperativa Fe y Esperanza</option>
+            <option value="Cooperativa Maya">Cooperativa Maya</option>
+            <option value="Cooperativa Fraternidad Pespirense">Cooperativa Fraternidad Pespirense</option>
+            <option value="Cooperativa Sonaguera">Cooperativa Sonaguera</option>
+            <option value="Cooperativa Talanga (COOPETALANGA)">Cooperativa Talanga (COOPETALANGA)</option>
+            <option value="Cooperativa Río Grande">Cooperativa Río Grande</option>
+            <option value="Cooperativa La Paz">Cooperativa La Paz</option>
+            <option value="Cooperativa Pinalejo">Cooperativa Pinalejo</option>
+            <option value="Cooperativa Usula">Cooperativa Usula</option>
+            <option value="Cooperativa San Antonio María Claret">Cooperativa San Antonio María Claret</option>
+            <option value="Cooperativa El Negrito">Cooperativa El Negrito</option>
+            <option value="Cooperativa Nueva Vida">Cooperativa Nueva Vida</option>
+            <option value="Cooperativa San José Obrero">Cooperativa San José Obrero</option>
+            <option value="Cooperativa Mixta Lempira">Cooperativa Mixta Lempira</option>
+          </optgroup>
+          <optgroup label="Financieras y Billeteras Digitales (Honduras)">
+            <option value="Financiera FINSOL (Financiera Solidaria)">Financiera FINSOL (Financiera Solidaria)</option>
+            <option value="Financiera FINCA Honduras">Financiera FINCA Honduras</option>
+            <option value="Financiera CODIMERSA">Financiera CODIMERSA</option>
+            <option value="Financiera CrediQ">Financiera CrediQ</option>
+            <option value="ODEF Financiera">ODEF Financiera</option>
+            <option value="Tigo Money Honduras">Tigo Money Honduras</option>
+            <option value="Tengo (Billetera Digital)">Tengo (Billetera Digital)</option>
+            <option value="Dilo (Billetera Digital)">Dilo (Billetera Digital)</option>
+            <option value="Kash Honduras">Kash Honduras</option>
+          </optgroup>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="acc-number-input">Número de Cuenta / Últimos 4 dígitos de Tarjeta</label>
+        <span id="acc-number-hint" class="hint">Permite asociar automáticamente los vouchers escaneados (ej. 0618 o 200-010-0618)</span>
+        <input
+          type="text"
+          id="acc-number-input"
+          name="accountNumber"
+          maxlength="34"
+          aria-describedby="acc-number-hint"
+          placeholder="Ej. 0618 o número de cuenta bancaria"
+        />
+      </div>
+
+      <div class="form-grid-2">
+        <div class="field">
+          <label for="acc-type-select">Tipo</label>
+          <select id="acc-type-select" name="type">
+            <option value="bank">Cuenta Bancaria</option>
+            <option value="cash">Efectivo</option>
+            <option value="card">Tarjeta de Crédito</option>
+            <option value="savings">Meta de Ahorro</option>
+            <option value="debt">Deuda / Préstamo</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="acc-currency-select">Moneda</label>
+          <select id="acc-currency-select" name="currency">
+            <option value="USD">USD ($)</option>
+            <option value="HNL">HNL (L)</option>
+            <option value="EUR">EUR (€)</option>
+            <option value="CRC">CRC (₡)</option>
+            <option value="MXN">MXN ($)</option>
+            <option value="COP">COP ($)</option>
+            <option value="CLP">CLP ($)</option>
+            <option value="ARS">ARS ($)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-grid-2">
+        <div class="field">
+          <label for="acc-initial-balance">Saldo inicial</label>
+          <input type="number" id="acc-initial-balance" name="initialBalance" step="0.01" value="0" required />
+        </div>
+        <div class="field">
+          <label for="acc-target-amount">Meta (opcional)</label>
+          <input type="number" id="acc-target-amount" name="targetAmount" step="0.01" min="0" value="0" />
+        </div>
+      </div>
+
+      <div class="form-grid-color">
+        <div class="field">
+          <label for="acc-icon-select">Icono</label>
+          <select id="acc-icon-select" name="icon">
+            <option value="bank">Banco / Institución</option>
+            <option value="cash">Efectivo / Billetes</option>
+            <option value="card">Tarjeta de Crédito / Débito</option>
+            <option value="piggy">Alcancía / Meta de Ahorro</option>
+            <option value="wallet">Billetera</option>
+            <option value="debt">Deuda / Préstamo</option>
+            <option value="trending">Inversiones</option>
+            <option value="home">Vivienda / Propiedad</option>
+            <option value="car">Vehículo</option>
+            <option value="briefcase">Negocio / Trabajo</option>
+            <option value="gift">Fondo Especial</option>
+            <option value="sparkles">Meta Personal</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="acc-color-input">Color</label>
+          <input type="color" id="acc-color-input" name="color" value="#10b981" class="color-picker-input" />
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="hint">Paleta rápida de color para la cuenta o meta:</span>
+        <div class="color-swatches-row" id="acc-color-swatches" role="group" aria-label="Colores sugeridos para cuenta o meta">
+          <button type="button" class="color-swatch-btn" data-color-target="acc-color-input" data-color-value="#10b981" style="--swatch-color: #10b981;" title="Esmeralda (#10b981)" aria-label="Color Esmeralda"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="acc-color-input" data-color-value="#3b82f6" style="--swatch-color: #3b82f6;" title="Azul (#3b82f6)" aria-label="Color Azul"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="acc-color-input" data-color-value="#06b6d4" style="--swatch-color: #06b6d4;" title="Cian (#06b6d4)" aria-label="Color Cian"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="acc-color-input" data-color-value="#8b5cf6" style="--swatch-color: #8b5cf6;" title="Violeta (#8b5cf6)" aria-label="Color Violeta"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="acc-color-input" data-color-value="#f59e0b" style="--swatch-color: #f59e0b;" title="Ámbar (#f59e0b)" aria-label="Color Ámbar"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="acc-color-input" data-color-value="#f43f5e" style="--swatch-color: #f43f5e;" title="Rosa Coral (#f43f5e)" aria-label="Color Rosa Coral"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="acc-color-input" data-color-value="#ec4899" style="--swatch-color: #ec4899;" title="Magenta (#ec4899)" aria-label="Color Magenta"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="acc-color-input" data-color-value="#6366f1" style="--swatch-color: #6366f1;" title="Índigo (#6366f1)" aria-label="Color Índigo"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="acc-color-input" data-color-value="#14b8a6" style="--swatch-color: #14b8a6;" title="Turquesa (#14b8a6)" aria-label="Color Turquesa"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="acc-color-input" data-color-value="#eab308" style="--swatch-color: #eab308;" title="Dorado (#eab308)" aria-label="Color Dorado"></button>
+        </div>
+      </div>
+
+      <div class="field" style="flex-direction: row; align-items: center; gap: 0.5rem;">
+        <input type="checkbox" id="acc-include-checkbox" name="includeInTotal" checked />
+        <label for="acc-include-checkbox" style="margin: 0;">Incluir saldo en el Patrimonio Total</label>
+      </div>
+
+      <button type="submit" id="btn-submit-new-account" class="btn-primary" style="width: 100%;">
+        Guardar Cuenta
+      </button>
+    </form>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 3: CREAR / MODIFICAR CATEGORÍA                                 -->
+  <!-- ==================================================================== -->
+  <dialog id="category-dialog" class="modal-dialog" closedby="any" aria-labelledby="category-dialog-title">
+    <div class="modal-header">
+      <h2 id="category-dialog-title">Nueva Categoría</h2>
+      <form method="dialog">
+        <button type="submit" class="btn-secondary btn-sm" id="btn-close-category-dialog" aria-label="Cerrar modal de categoría">Cerrar</button>
+      </form>
+    </div>
+
+    <form id="category-modal-form">
+      <input type="hidden" id="cat-id-input" name="id" value="" />
+
+      <div class="field">
+        <label for="cat-name-input">Nombre de la categoría</label>
+        <span id="cat-name-hint" class="hint">Mínimo 2 caracteres (ej. Supermercado, Remesas, Mascotas)</span>
+        <input
+          type="text"
+          id="cat-name-input"
+          name="name"
+          required
+          minlength="2"
+          maxlength="40"
+          aria-describedby="cat-name-hint"
+          aria-errormessage="cat-name-error"
+          placeholder="Ej. Café y Postres"
+        />
+        <div id="cat-name-error" class="error-msg">
+          <span aria-hidden="true">❌</span> Ingrese un nombre válido (al menos 2 caracteres).
+        </div>
+      </div>
+
+      <div class="form-grid-2">
+        <div class="field">
+          <label for="cat-type-select">Tipo de categoría</label>
+          <select id="cat-type-select" name="type">
+            <option value="expense">Gasto</option>
+            <option value="income">Ingreso</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="cat-icon-select">Icono</label>
+          <select id="cat-icon-select" name="icon">
+            <option value="cart">Carrito / Supermercado</option>
+            <option value="utensils">Restaurante / Comida</option>
+            <option value="car">Auto / Transporte</option>
+            <option value="home">Hogar / Vivienda</option>
+            <option value="bolt">Servicios / Energía</option>
+            <option value="heart">Salud / Deporte</option>
+            <option value="film">Ocio / Streaming</option>
+            <option value="bag">Compras / Tienda</option>
+            <option value="book">Educación / Libros</option>
+            <option value="sparkles">Familia / Especial</option>
+            <option value="briefcase">Salario / Trabajo</option>
+            <option value="laptop">Freelance / Tecnología</option>
+            <option value="trending">Inversiones</option>
+            <option value="gift">Regalos / Extras</option>
+            <option value="piggy">Ahorro</option>
+            <option value="wallet">Billetera</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-grid-color">
+        <div class="field" id="cat-budget-field">
+          <label for="cat-budget-input">Presupuesto mensual (en moneda base)</label>
+          <input type="number" id="cat-budget-input" name="defaultBudget" min="0" step="10" value="150" />
+        </div>
+        <div class="field">
+          <label for="cat-color-input">Color</label>
+          <input type="color" id="cat-color-input" name="color" value="#10b981" class="color-picker-input" />
+        </div>
+      </div>
+
+      <div class="field">
+        <span class="hint">Paleta rápida de color para la categoría:</span>
+        <div class="color-swatches-row" id="cat-color-swatches" role="group" aria-label="Colores sugeridos para categoría">
+          <button type="button" class="color-swatch-btn" data-color-target="cat-color-input" data-color-value="#10b981" style="--swatch-color: #10b981;" title="Esmeralda (#10b981)" aria-label="Color Esmeralda"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="cat-color-input" data-color-value="#3b82f6" style="--swatch-color: #3b82f6;" title="Azul (#3b82f6)" aria-label="Color Azul"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="cat-color-input" data-color-value="#06b6d4" style="--swatch-color: #06b6d4;" title="Cian (#06b6d4)" aria-label="Color Cian"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="cat-color-input" data-color-value="#8b5cf6" style="--swatch-color: #8b5cf6;" title="Violeta (#8b5cf6)" aria-label="Color Violeta"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="cat-color-input" data-color-value="#f59e0b" style="--swatch-color: #f59e0b;" title="Ámbar (#f59e0b)" aria-label="Color Ámbar"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="cat-color-input" data-color-value="#f43f5e" style="--swatch-color: #f43f5e;" title="Rosa Coral (#f43f5e)" aria-label="Color Rosa Coral"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="cat-color-input" data-color-value="#ec4899" style="--swatch-color: #ec4899;" title="Magenta (#ec4899)" aria-label="Color Magenta"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="cat-color-input" data-color-value="#6366f1" style="--swatch-color: #6366f1;" title="Índigo (#6366f1)" aria-label="Color Índigo"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="cat-color-input" data-color-value="#14b8a6" style="--swatch-color: #14b8a6;" title="Turquesa (#14b8a6)" aria-label="Color Turquesa"></button>
+          <button type="button" class="color-swatch-btn" data-color-target="cat-color-input" data-color-value="#eab308" style="--swatch-color: #eab308;" title="Dorado (#eab308)" aria-label="Color Dorado"></button>
+        </div>
+      </div>
+
+      <button type="submit" id="btn-submit-category" class="btn-primary" style="width: 100%;">
+        Guardar Categoría
+      </button>
+    </form>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 4: MODAL DE CONFIRMACIÓN DE ELIMINACIÓN / ARCHIVADO DE CUENTA  -->
+  <!-- (`DeleteAccountModal` — Integridad Relacional & Eliminación Cascada) -->
+  <!-- ==================================================================== -->
+  <dialog id="delete-warning-dialog" class="modal-dialog modal-dialog-wide" closedby="any" aria-labelledby="delete-warning-title">
+    <div class="modal-header">
+      <h2 id="delete-warning-title" style="display: flex; align-items: center; gap: 0.5rem; color: #f59e0b; font-size: 1.1rem;">
+        <span aria-hidden="true">⚠️</span> Gestión de Cuenta e Integridad Relacional
+      </h2>
+      <form method="dialog">
+        <button type="submit" class="btn-secondary btn-sm" id="btn-close-delete-warning" aria-label="Cerrar modal de confirmación de eliminación">Cerrar</button>
+      </form>
+    </div>
+
+    <div class="delete-warning-body">
+      <div class="warning-alert-banner">
+        <strong id="delete-warning-target-name">¿Deseas archivar o eliminar esta cuenta?</strong>
+        <p id="delete-warning-description" style="margin-top: 0.2rem;">
+          Revisa el saldo actual y el número de transacciones asociadas antes de continuar:
+        </p>
+        <div style="display: flex; flex-wrap: wrap; gap: 0.65rem; margin-top: 0.55rem;">
+          <span class="voucher-pill">
+            💰 Saldo actual: <strong id="delete-account-balance-badge" style="font-variant-numeric: tabular-nums;">$0.00</strong>
+          </span>
+          <span class="voucher-pill">
+            📋 Movimientos asociados: <strong id="delete-account-tx-count-badge">0 transacción(es)</strong>
+          </span>
+        </div>
+      </div>
+
+      <!-- Opción A: Archivar Cuenta (Recomendado) -->
+      <div style="background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.35); border-left: 4px solid #10b981; border-radius: var(--radius-sm); padding: 0.9rem 1rem; margin-bottom: 0.95rem;">
+        <div style="font-weight: 700; font-size: 0.92rem; color: var(--text-primary); margin-bottom: 0.25rem;">
+          Opción A — Preservar Historial Financiero
+        </div>
+        <p style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.45; margin: 0 0 0.7rem 0;">
+          Oculta la cuenta de la lista activa y de los selectores de nuevos movimientos (<code>isArchived: true</code>), manteniendo intactas todas las transacciones históricas, presupuestos y reportes del Dashboard.
+        </p>
+        <button
+          type="button"
+          id="btn-archive-account-option"
+          class="btn-primary"
+          style="width: 100%; justify-content: center;"
+          aria-label="Opción A: Archivar Cuenta (Recomendado)"
+        >
+          📦 Archivar Cuenta (Recomendado)
+        </button>
+      </div>
+
+      <!-- Opción B: Borrar Cuenta y Transacciones (Eliminar en Cascada) -->
+      <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.45); border-left: 4px solid #ef4444; border-radius: var(--radius-sm); padding: 0.9rem 1rem; margin-bottom: 1rem;">
+        <div style="font-weight: 700; font-size: 0.92rem; color: #ef4444; margin-bottom: 0.25rem;">
+          Opción B — Eliminación Permanente en Cascada (Firestore writeBatch)
+        </div>
+        <p
+          id="delete-cascade-red-alert"
+          role="alert"
+          style="font-size: 0.83rem; color: #f87171; font-weight: 600; line-height: 1.45; margin: 0 0 0.75rem 0;"
+        >
+          Esta acción eliminará la cuenta Y TODAS las 0 transacciones/movimientos asociados permanentemente. Esta acción no se puede deshacer.
+        </p>
+        <button
+          type="button"
+          id="btn-confirm-delete-warning"
+          class="btn-danger"
+          style="width: 100%; justify-content: center;"
+          aria-label="Opción B: Borrar Cuenta y Transacciones (Eliminar en Cascada)"
+        >
+          ⚠️ Borrar Cuenta y Transacciones (Eliminar en Cascada)
+        </button>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end;">
+        <button type="button" id="btn-cancel-delete-warning" class="btn-secondary" aria-label="Cancelar y mantener la cuenta sin cambios">
+          Cancelar
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 5: ESCÁNER DE VOUCHER / FACTURA PDF (OPEN-SOURCE ML OCR)       -->
+  <!-- ==================================================================== -->
+  <dialog id="voucher-scanner-dialog" class="modal-dialog modal-dialog-wide" closedby="any" aria-labelledby="voucher-dialog-title">
+    <div class="modal-header">
+      <h2 id="voucher-dialog-title">📷 Escáner ML de Voucher / Factura</h2>
+      <form method="dialog">
+        <button type="submit" class="btn-secondary btn-sm" id="btn-close-voucher-dialog" aria-label="Cerrar modal de escáner de voucher">Cerrar</button>
+      </form>
+    </div>
+
+    <div id="voucher-progress-box" class="voucher-progress-box is-hidden">
+      <div class="voucher-progress-labels">
+        <span id="voucher-progress-status">Preprocesando imagen con Visión Computacional...</span>
+        <strong id="voucher-progress-pct">15%</strong>
+      </div>
+      <progress id="voucher-progress-bar" class="native-progress" max="100" value="15"></progress>
+    </div>
+
+    <form id="voucher-confirm-form">
+      <div class="voucher-preview-grid">
+        <div class="voucher-image-column">
+          <img
+            id="voucher-preview-img"
+            class="voucher-preview-img"
+            alt="Vista previa del voucher escaneado"
+          />
+          <div id="voucher-match-badges" class="voucher-match-badges"></div>
+        </div>
+
+        <div class="voucher-fields-column">
+          <div class="field">
+            <label for="voucher-merchant-input">Comercio detectado</label>
+            <input
+              type="text"
+              id="voucher-merchant-input"
+              name="merchant"
+              required
+              placeholder="Ej. PRICE SMART TEG"
+            />
+          </div>
+
+          <div class="form-grid-2">
+            <div class="field">
+              <label for="voucher-amount-input">Monto Total</label>
+              <input
+                type="number"
+                id="voucher-amount-input"
+                name="amount"
+                step="0.01"
+                min="0.01"
+                required
+              />
+            </div>
+
+            <div class="field">
+              <label for="voucher-currency-select">Moneda</label>
+              <select id="voucher-currency-select" name="currency">
+                <option value="HNL">HNL (L)</option>
+                <option value="USD">USD ($)</option>
+                <option value="EUR">EUR (€)</option>
+                <option value="CRC">CRC (₡)</option>
+                <option value="MXN">MXN ($)</option>
+                <option value="COP">COP ($)</option>
+                <option value="CLP">CLP ($)</option>
+                <option value="ARS">ARS ($)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-grid-2">
+            <div class="field">
+              <label for="voucher-date-input">Fecha del Voucher</label>
+              <input type="date" id="voucher-date-input" name="date" required />
+            </div>
+
+            <div class="field">
+              <label for="voucher-card-last4-input">Últimos 4 dígitos tarjeta</label>
+              <input
+                type="text"
+                id="voucher-card-last4-input"
+                name="cardLast4"
+                maxlength="8"
+                placeholder="Ej. 0618"
+              />
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="voucher-category-select">Categoría asociada</label>
+            <select id="voucher-category-select" name="categoryId" required></select>
+          </div>
+
+          <div class="field">
+            <label for="voucher-account-select">Cuenta asociada (por N.º de Cuenta / Tarjeta)</label>
+            <select id="voucher-account-select" name="accountId" required></select>
+          </div>
+
+          <div id="voucher-link-digits-row" class="field" style="flex-direction: row; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+            <input type="checkbox" id="voucher-save-digits-checkbox" name="saveDigitsToAccount" checked />
+            <label for="voucher-save-digits-checkbox" id="voucher-save-digits-label" style="margin: 0; font-size: 0.8125rem;">
+              Vincular últimos dígitos detectados al Número de Cuenta seleccionado
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div id="voucher-tax-summary" class="voucher-tax-summary is-hidden"></div>
+
+      <div style="display: flex; gap: 0.6rem; margin-top: 0.75rem; flex-wrap: wrap;">
+        <button
+          type="button"
+          class="btn-secondary"
+          data-action="trigger-voucher-upload"
+          style="flex: 0 0 auto;"
+          aria-label="Seleccionar otra foto o PDF de voucher"
+        >
+          📷 Otra Foto/PDF
+        </button>
+        <button type="submit" id="btn-save-voucher-tx" class="btn-primary" style="flex: 1;">
+          Guardar Transacción del Voucher
+        </button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 6: IMPORTADOR DE ESTADO DE CUENTA PDF Y CONCILIACIÓN DUPLICADOS -->
+  <!-- ==================================================================== -->
+  <dialog id="statement-import-dialog" class="modal-dialog modal-dialog-xl" closedby="any" aria-labelledby="statement-dialog-title">
+    <div class="modal-header">
+      <div>
+        <h2 id="statement-dialog-title">📄 Conciliación de Estado de Cuenta PDF</h2>
+        <p id="statement-institution-subtitle" style="font-size: 0.85rem; color: var(--text-secondary); margin: 0.15rem 0 0 0;">
+          Detalle por fecha, concepto y moneda (Lempiras / Dólares) con detección anti-duplicados de vouchers.
+        </p>
+      </div>
+      <form method="dialog">
+        <button type="submit" class="btn-secondary btn-sm" id="btn-close-statement-dialog" aria-label="Cerrar modal de estado de cuenta">Cerrar</button>
+      </form>
+    </div>
+
+    <div id="statement-progress-box" class="voucher-progress-box is-hidden">
+      <div class="voucher-progress-labels">
+        <span id="statement-progress-status">Analizando páginas del Estado de Cuenta PDF...</span>
+        <strong id="statement-progress-pct">20%</strong>
+      </div>
+      <progress id="statement-progress-bar" class="native-progress" max="100" value="20"></progress>
+    </div>
+
+    <form id="statement-import-form">
+      <div class="statement-controls-bar">
+        <div class="field" style="margin: 0; flex: 1; min-width: 220px;">
+          <label for="statement-account-select">Cuenta o Tarjeta asociada al Estado de Cuenta</label>
+          <select id="statement-account-select" name="accountId" required></select>
+        </div>
+
+        <div class="field" style="margin: 0; width: 135px;">
+          <label for="statement-year-select">Año de Corte</label>
+          <select id="statement-year-select" name="year">
+            <option value="2026" selected>2026</option>
+            <option value="2025">2025</option>
+            <option value="2024">2024</option>
+          </select>
+        </div>
+
+        <div class="statement-bulk-toggles">
+          <button type="button" class="btn-secondary btn-sm" id="btn-stmt-select-new" aria-label="Seleccionar solo movimientos nuevos sin duplicados">
+            Solo Nuevos (Sin Duplicados)
+          </button>
+          <button type="button" class="btn-secondary btn-sm" id="btn-stmt-select-all" aria-label="Seleccionar todos los movimientos del estado de cuenta">
+            Marcar Todos
+          </button>
+        </div>
+      </div>
+
+      <!-- KPI Summary of Statement & Duplicate Detection -->
+      <div id="statement-summary-strip" class="statement-summary-strip"></div>
+
+      <!-- Scrollable Reconciliation Table -->
+      <div class="statement-table-wrapper">
+        <table class="statement-table" aria-label="Detalle de transacciones del estado de cuenta">
+          <thead>
+            <tr>
+              <th scope="col" style="width: 42px;">Imp.</th>
+              <th scope="col">Estado / Conciliación</th>
+              <th scope="col">Fecha</th>
+              <th scope="col">Concepto / Comercio</th>
+              <th scope="col">Categoría</th>
+              <th scope="col" class="num-col">Lempiras (HNL)</th>
+              <th scope="col" class="num-col">Dólares (USD)</th>
+            </tr>
+          </thead>
+          <tbody id="statement-items-tbody"></tbody>
+        </table>
+      </div>
+
+      <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; margin-top: 0.9rem; flex-wrap: wrap;">
+        <button
+          type="button"
+          class="btn-secondary"
+          data-action="trigger-statement-upload"
+          aria-label="Subir otro archivo PDF de estado de cuenta"
+        >
+          📄 Subir Otro PDF
+        </button>
+        <button type="submit" id="btn-confirm-statement-import" class="btn-primary" style="flex: 1; max-width: 420px;">
+          Importar Movimientos Seleccionados
+        </button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 7: DETALLE DE CUENTA Y HISTORIAL DE TRANSACCIONES POR FECHAS   -->
+  <!-- ==================================================================== -->
+  <dialog id="account-detail-dialog" class="modal-dialog modal-dialog-xl" closedby="any" aria-labelledby="account-detail-title">
+    <div class="modal-header">
+      <div>
+        <h2 id="account-detail-title">Detalle de Cuenta</h2>
+        <p id="account-detail-subtitle" style="font-size: 0.85rem; color: var(--text-secondary); margin: 0.15rem 0 0 0;">
+          Historial de movimientos asociados y segmentación por rango de fechas.
+        </p>
+      </div>
+      <div style="display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+        <button type="button" class="btn-secondary btn-sm" id="btn-acc-detail-edit-account" aria-label="Editar nombre, icono o color de esta cuenta">
+          🎨 Editar Cuenta / Color
+        </button>
+        <form method="dialog">
+          <button type="submit" class="btn-secondary btn-sm" id="btn-close-account-detail" aria-label="Cerrar modal de detalle de cuenta">Cerrar</button>
+        </form>
+      </div>
+    </div>
+
+    <!-- Account KPI Strip -->
+    <div id="account-detail-kpis" class="statement-summary-strip"></div>
+
+    <!-- Internal Date Range & Search Filter Bar -->
+    <div class="statement-controls-bar" style="align-items: center;">
+      <div class="date-range-inline-group">
+        <label for="acc-detail-start-date" class="date-range-label">Desde</label>
+        <input
+          type="date"
+          id="acc-detail-start-date"
+          class="control-date-input"
+          aria-label="Fecha inicial en cuenta"
+        />
+        <label for="acc-detail-end-date" class="date-range-label">Hasta</label>
+        <input
+          type="date"
+          id="acc-detail-end-date"
+          class="control-date-input"
+          aria-label="Fecha final en cuenta"
+        />
+      </div>
+
+      <div class="statement-bulk-toggles">
+        <button type="button" class="btn-secondary btn-sm" id="btn-acc-detail-all" aria-label="Ver todo el historial de la cuenta">
+          Todo el Historial
+        </button>
+        <button type="button" class="btn-secondary btn-sm" id="btn-acc-detail-month" aria-label="Filtrar movimientos de este mes en la cuenta">
+          Este Mes
+        </button>
+        <button
+          type="button"
+          class="btn-secondary btn-sm"
+          id="btn-acc-detail-sync-dashboard"
+          aria-label="Aplicar este rango de fechas a todo el Dashboard"
+          title="Aplicar este mismo rango de fechas a todo el Dashboard"
+        >
+          ⇄ Aplicar Rango al Dashboard
+        </button>
+      </div>
+
+      <div style="flex: 1; min-width: 190px;">
+        <label for="acc-detail-search-input" class="sr-only">Buscar en esta cuenta</label>
+        <input
+          type="search"
+          id="acc-detail-search-input"
+          class="smart-nlp-input"
+          style="width: 100%; padding: 0.45rem 0.75rem; font-size: 0.875rem;"
+          placeholder="Buscar comercio, concepto o monto..."
+        />
+      </div>
+    </div>
+
+    <!-- Account Transactions Table -->
+    <div class="statement-table-wrapper">
+      <table class="statement-table" aria-label="Transacciones asociadas a la cuenta">
+        <thead>
+          <tr>
+            <th scope="col">Fecha</th>
+            <th scope="col">Categoría</th>
+            <th scope="col">Concepto / Comercio / Referencia</th>
+            <th scope="col" class="num-col">Monto Original</th>
+            <th scope="col" class="num-col">En Moneda de Cuenta</th>
+            <th scope="col" style="width: 50px; text-align: center;">Acción</th>
+          </tr>
+        </thead>
+        <tbody id="account-detail-tx-tbody"></tbody>
+      </table>
+    </div>
+
+    <div style="display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; margin-top: 0.9rem; flex-wrap: wrap;">
+      <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+        <button
+          type="button"
+          class="btn-secondary btn-sm"
+          id="btn-acc-detail-upload-stmt"
+          aria-label="Subir estado de cuenta PDF para esta cuenta"
+        >
+          📄 Subir Estado de Cuenta PDF a esta Cuenta
+        </button>
+        <button
+          type="button"
+          class="btn-primary btn-sm"
+          id="btn-acc-detail-add-tx"
+          aria-label="Registrar nuevo movimiento en esta cuenta"
+        >
+          + Registrar Movimiento en esta Cuenta
+        </button>
+      </div>
+      <button
+        type="button"
+        class="btn-secondary btn-sm"
+        id="btn-acc-detail-view-in-ledger"
+        aria-label="Ver movimientos de esta cuenta en la pestaña Transacciones"
+      >
+        Ver en Pestaña Transacciones →
+      </button>
+    </div>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 8: FIREBASE AUTH (GOOGLE SIGN-IN + CORREO Y CONTRASEÑA)        -->
+  <!-- ==================================================================== -->
+  <dialog id="auth-dialog" class="modal-dialog" closedby="any" aria-labelledby="auth-dialog-title">
+    <div class="modal-header">
+      <div>
+        <h2 id="auth-dialog-title">🔐 Autenticación Pisto</h2>
+        <p style="font-size: 0.8125rem; color: var(--text-secondary); margin-top: 0.15rem;">
+          Inicia sesión con Google o Correo/Contraseña para sincronizar tu perfil en <code>users/{uid}</code>.
+        </p>
+      </div>
+      <form method="dialog">
+        <button type="submit" class="btn-secondary btn-sm" id="btn-close-auth-dialog" aria-label="Cerrar modal de autenticación">Cerrar</button>
+      </form>
+    </div>
+
+    <div class="auth-modal-body">
+      <button type="button" id="btn-auth-google" class="btn-google-oauth" aria-label="Continuar e iniciar sesión con Google">
+        <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="#EA4335" d="M12 5c1.6 0 3 .6 4.1 1.7l3.1-3.1C17.3 1.8 14.8 1 12 1 7.4 1 3.5 3.6 1.6 7.4l3.7 2.8C6.2 7.2 8.9 5 12 5z"/>
+          <path fill="#4285F4" d="M23.5 12.3c0-.8-.1-1.6-.2-2.3H12v4.5h6.5c-.3 1.5-1.1 2.8-2.4 3.6l3.7 2.9c2.2-2 3.7-5 3.7-8.7z"/>
+          <path fill="#FBBC05" d="M5.3 14.8c-.2-.8-.4-1.6-.4-2.5s.2-1.7.4-2.5L1.6 7C.6 9 0 11.2 0 13.5s.6 4.5 1.6 6.5l3.7-2.9z"/>
+          <path fill="#34A853" d="M12 24c3.2 0 6-1.1 8-3l-3.7-2.9c-1.1.7-2.5 1.2-4.3 1.2-3.1 0-5.8-2.1-6.7-5l-3.7 2.8C3.5 21.4 7.4 24 12 24z"/>
+        </svg>
+        <span>Continuar con Google</span>
+      </button>
+
+      <div class="auth-divider">
+        <span>o con tu correo electrónico</span>
+      </div>
+
+      <div class="tx-type-switcher" role="tablist" aria-label="Modo de autenticación" style="grid-template-columns: 1fr 1fr;">
+        <button type="button" class="tx-type-btn is-active" data-auth-mode="login" aria-selected="true">
+          Iniciar Sesión
+        </button>
+        <button type="button" class="tx-type-btn" data-auth-mode="register" aria-selected="false">
+          Crear Cuenta
+        </button>
+      </div>
+
+      <div id="auth-modal-error" class="error-msg is-hidden" role="alert" style="display: block; margin-bottom: 0.75rem;"></div>
+
+      <form id="auth-email-form" novalidate>
+        <div class="field is-hidden" id="auth-register-name-group">
+          <label for="auth-name-input">Tu Nombre</label>
+          <input
+            type="text"
+            id="auth-name-input"
+            name="name"
+            placeholder="Ej. María Barahona"
+            autocomplete="name"
+          />
+        </div>
+
+        <div class="field">
+          <label for="auth-email-input">Correo Electrónico</label>
+          <input
+            type="email"
+            id="auth-email-input"
+            name="email"
+            required
+            placeholder="tu-correo@ejemplo.hn"
+            autocomplete="email"
+          />
+        </div>
+
+        <div class="field">
+          <label for="auth-password-input">Contraseña</label>
+          <span class="hint">Mínimo 6 caracteres</span>
+          <input
+            type="password"
+            id="auth-password-input"
+            name="password"
+            required
+            minlength="6"
+            placeholder="••••••••"
+            autocomplete="current-password"
+          />
+        </div>
+
+        <button type="submit" id="btn-auth-submit" class="btn-primary" style="width: 100%; margin-top: 0.5rem;">
+          Iniciar Sesión con Correo
+        </button>
+      </form>
+
+      <div class="auth-demo-mode-box" style="margin-top: 0.9rem; padding-top: 0.85rem; border-top: 1px dashed var(--border-subtle); text-align: center;">
+        <button
+          type="button"
+          id="btn-auth-demo-mode"
+          class="btn-secondary btn-sm"
+          style="width: 100%; justify-content: center;"
+          aria-label="Probar modo de demostración sin autenticarse"
+        >
+          🚀 Probar Modo Demo
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- MODAL 9: ADVERTENCIA DE TRANSACCIÓN DUPLICADA (DEDUPLICACIÓN)        -->
+  <!-- ==================================================================== -->
+  <dialog id="duplicate-tx-warning-dialog" class="modal-dialog" closedby="any" aria-labelledby="duplicate-tx-warning-title">
+    <div class="modal-header">
+      <div>
+        <h2 id="duplicate-tx-warning-title">⚠️ Transacción Duplicada Detectada</h2>
+        <p style="font-size: 0.85rem; color: var(--text-secondary); margin: 0.15rem 0 0 0;">
+          Se encontró un movimiento coincidente en esta misma cuenta bancaria.
+        </p>
+      </div>
+    </div>
+    <div class="modal-body" style="display: flex; flex-direction: column; gap: 1rem;">
+      <div
+        id="duplicate-tx-warning-banner"
+        class="duplicate-tx-warning-banner"
+        role="alert"
+      >
+        ⚠️ Posible transacción duplicada detectada (Monto: L 0.00, Fecha: DD/MM/YYYY, Comercio: —)
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 0.6rem;">
+        <button
+          type="button"
+          id="btn-dup-tx-overwrite"
+          class="btn-primary"
+          data-dup-action="overwrite"
+        >✏️ Sobreescribir / Actualizar Transacción Existente</button>
+        <button
+          type="button"
+          id="btn-dup-tx-create-new"
+          class="btn-secondary"
+          data-dup-action="create_new"
+        >➕ Crear como Nueva Transacción</button>
+        <button
+          type="button"
+          id="btn-dup-tx-skip"
+          class="btn-secondary"
+          data-dup-action="skip"
+        >🚫 Omitir</button>
+      </div>
+    </div>
+  </dialog>
+
+  <div id="app-toast" class="app-toast" role="status" aria-live="polite"></div>
+
+  <script type="module">
+    if (!('commandForElement' in HTMLButtonElement.prototype)) {
+      import('https://esm.run/invokers-polyfill').catch(() => {});
+    }
+  </script>
+  <script type="module" src="/src/js/app.js"></script>
+  <script type="module" src="/js/ui/accountsTab.js"></script>
+</body>
+</html>

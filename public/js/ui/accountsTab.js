@@ -24,6 +24,8 @@ import {
   HONDURAS_BANKS_LIST,
   cleanBankName,
   cleanAccountType,
+  openImportModal,
+  bindImportAccountTriggerButtons,
 } from './importAccountModal.js';
 import { persistImportedAccountAndTransactions } from '../services/accountExtractor.js';
 
@@ -32,10 +34,13 @@ export {
   HONDURAS_BANKS_LIST,
   cleanBankName,
   cleanAccountType,
+  openImportModal,
+  bindImportAccountTriggerButtons,
   persistImportedAccountAndTransactions,
 };
 
-export const IMPORT_ACCOUNT_BUTTON_ID = 'btn-import-account-media';
+export const IMPORT_ACCOUNT_BUTTON_ID = 'btn-import-account';
+export const LEGACY_IMPORT_ACCOUNT_BUTTON_ID = 'btn-import-account-media';
 export const IMPORT_ACCOUNT_BUTTON_LABEL = '➕ Importar Cuenta desde Imagen/PDF';
 
 const BLOCKING_CSS_CLASSES = ['pointer-events-none', 'select-none', 'is-disabled'];
@@ -286,7 +291,9 @@ export class AccountsView {
       sanitizeClickableAncestors(actionContainer);
     }
 
-    let button = document.getElementById(IMPORT_ACCOUNT_BUTTON_ID);
+    let button =
+      document.getElementById(IMPORT_ACCOUNT_BUTTON_ID) ||
+      document.getElementById(LEGACY_IMPORT_ACCOUNT_BUTTON_ID);
     if (!button && actionContainer) {
       button = document.createElement('button');
       button.type = 'button';
@@ -298,8 +305,10 @@ export class AccountsView {
       actionContainer.insertBefore(button, actionContainer.firstChild);
     }
 
+    document.getElementById('btn-import-account')?.addEventListener('click', openImportModal);
+
     const buttons = document.querySelectorAll(
-      `#${IMPORT_ACCOUNT_BUTTON_ID}, [data-action="open-import-account-modal"]`
+      `#${IMPORT_ACCOUNT_BUTTON_ID}, #${LEGACY_IMPORT_ACCOUNT_BUTTON_ID}, [data-action="open-import-account-modal"]`
     );
 
     buttons.forEach((btn) => {

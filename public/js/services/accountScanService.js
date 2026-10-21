@@ -183,8 +183,8 @@ export async function analyzeAccountScreenshotWithGemini(imageInput, options = {
           };
         }
       }
-    } catch (err) {
-      console.warn('[AccountScanService] Gemini 1.5 Flash direct call fallback to server:', err);
+    } catch {
+      // Fallback to server Genkit scan
     }
   }
 
@@ -215,8 +215,8 @@ export async function analyzeAccountScreenshotWithGemini(imageInput, options = {
           };
         }
       }
-    } catch (err) {
-      console.warn('[AccountScanService] Server Genkit scan fallback:', err);
+    } catch {
+      // Fallback when server scan is unavailable
     }
   }
 
@@ -384,8 +384,8 @@ export async function createScannedAccountAndTransactionsAtomically(
         }
         batchCommitted = true;
       }
-    } catch (err) {
-      console.warn('[AccountScanService] Guardado atómico en caché local (Firestore offline):', err);
+    } catch {
+      // Fallback to local workspace storage when Firestore is offline
     }
   }
 

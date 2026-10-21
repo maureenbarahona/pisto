@@ -59,8 +59,7 @@ async function getGenkitRuntime(userApiKey) {
     const runtime = { ai, googleAI, z, flows };
     genkitRuntimeCache.set(effectiveKey, runtime);
     return runtime;
-  } catch (error) {
-    console.warn('[Genkit] Running in 0-token local mode (Genkit packages or API key unavailable):', error.message);
+  } catch {
     return null;
   }
 }
@@ -243,8 +242,8 @@ export async function executeSmartParse({ text, categories = [], apiKey }) {
       };
       setCachedResponse(cacheKey, result, tokensUsed);
       return result;
-    } catch (error) {
-      console.warn('[Genkit] parseTransactionsFlow fallback triggered:', error.message);
+    } catch {
+      // Fallback to local deterministic parser
     }
   }
 
@@ -291,8 +290,8 @@ export async function executeFinancialInsights({ compactPayload, lang = 'es', ap
       };
       setCachedResponse(cacheKey, result, tokensUsed);
       return result;
-    } catch (error) {
-      console.warn('[Genkit] financialInsightsFlow fallback triggered:', error.message);
+    } catch {
+      // Fallback to local deterministic advisor
     }
   }
 

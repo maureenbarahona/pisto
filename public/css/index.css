@@ -2442,3 +2442,25 @@ dialog[open]::backdrop,
   gap: 0.5rem;
 }
 
+/* Smart Transaction Deduplication Warning Banner & Modal */
+.duplicate-tx-warning-banner {
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  color: #fbbf24;
+  font-size: 0.875rem;
+  line-height: 1.45;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.duplicate-tx-inline-alert {
+  padding: 0.45rem 0.6rem;
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+

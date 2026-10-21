@@ -60,11 +60,6 @@ export class ProfileViewController {
           typeof err?.message === 'string' && err.message.includes(errorCode)
             ? err.message
             : `[${errorCode}] ${rawMessage}`;
-        console.error('[AuthModal - Google Sign-In Error]', {
-          code: errorCode,
-          message: rawMessage,
-          error: err,
-        });
         this.showAuthModalError(formattedMessage);
         this.callbacks.showToast(`⚠️ Error Google Auth (${errorCode}): ${rawMessage}`);
       } finally {

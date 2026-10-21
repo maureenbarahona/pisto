@@ -15,6 +15,8 @@ COPY package*.json ./
 RUN npm install --omit=dev && npm cache clean --force
 
 # Copy application source code
+COPY index.html ./index.html
+COPY src ./src
 COPY server ./server
 COPY public ./public
 

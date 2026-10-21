@@ -71,8 +71,8 @@ export async function saveAccountToFirestore(accountInput, context = {}) {
     try {
       const accRef = context.firestoreModule.doc(context.firestoreDb, 'accounts', normalized.id);
       await context.firestoreModule.setDoc(accRef, normalized, { merge: true });
-    } catch (err) {
-      console.warn('[AccountsService] Guardado local de cuenta (Firestore offline):', err);
+    } catch {
+      // Fallback to local state when Firestore is offline
     }
   }
 
@@ -125,8 +125,8 @@ export async function archiveAccount(accountId, state, context = {}) {
         },
         { merge: true }
       );
-    } catch (err) {
-      console.warn('[AccountsService] Cuenta archivada localmente (Firestore offline):', err);
+    } catch {
+      // Fallback to local state when Firestore is offline
     }
   }
 
@@ -183,8 +183,8 @@ export async function unarchiveAccount(accountId, state, context = {}) {
         },
         { merge: true }
       );
-    } catch (err) {
-      console.warn('[AccountsService] Cuenta reactivada localmente (Firestore offline):', err);
+    } catch {
+      // Fallback to local state when Firestore is offline
     }
   }
 
