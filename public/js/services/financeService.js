@@ -15,6 +15,37 @@ import {
   DEFAULT_CATEGORIES,
   isAccountArchived,
 } from '../domain/models.js';
+import {
+  DEMO_SEED_ACCOUNT_IDS,
+  ZERO_DASHBOARD_METRICS,
+  isDemoOrResidualTransaction,
+  isDemoOrResidualAccount,
+  filterCleanUserTransactions,
+  filterCleanUserAccounts,
+  calculateSafeSavingsRate,
+  formatDashboardKpiLabels,
+  renderDashboardMetricsToDom,
+  recalculateDashboardMetrics,
+  purgeResidualTransactionsFromWorkspace,
+  resetGlobalDashboardMetricsToZero,
+  initializeDashboardStateForNewUser,
+} from './dashboard.js';
+
+export {
+  DEMO_SEED_ACCOUNT_IDS,
+  ZERO_DASHBOARD_METRICS,
+  isDemoOrResidualTransaction,
+  isDemoOrResidualAccount,
+  filterCleanUserTransactions,
+  filterCleanUserAccounts,
+  calculateSafeSavingsRate,
+  formatDashboardKpiLabels,
+  renderDashboardMetricsToDom,
+  recalculateDashboardMetrics,
+  purgeResidualTransactionsFromWorkspace,
+  resetGlobalDashboardMetricsToZero,
+  initializeDashboardStateForNewUser,
+};
 
 function resolveTransactionCategory(tx, categoryMap, stateCategories = []) {
   if (tx.type === TRANSACTION_TYPES.TRANSFER) {
@@ -99,24 +130,40 @@ export function isDateInPeriod(
 export function computeAccountsSummary(state, options = {}) {
   const baseCurrency = state.settings?.baseCurrency || 'USD';
   const period = options.period || state.settings?.periodFilter || 'month';
+  const workspaceId = options.workspaceId ?? state.settings?.workspaceId ?? 'ws_default';
+  const currentUid = options.currentUid ?? state.settings?.currentUid ?? null;
+  const personalViewMode = Boolean(
+    options.personalViewMode ?? state.settings?.personalViewMode ?? false
+  );
   const startDate =
     options.startDate !== undefined ? options.startDate : (state.settings?.startDate || '');
   const endDate =
     options.endDate !== undefined ? options.endDate : (state.settings?.endDate || '');
 
+  const visibleAccounts = filterCleanUserAccounts(state.accounts || [], {
+    workspaceId,
+    currentUid,
+  });
+  const visibleTransactions = filterCleanUserTransactions(state.transactions || [], {
+    workspaceId,
+    currentUid,
+  }).filter((tx) =>
+    isTransactionVisibleInWorkspace(tx, { workspaceId, personalViewMode, currentUid })
+  );
+
   const balanceCentsByAccount = new Map();
   const txCountByAccount = new Map();
   const periodTxCountByAccount = new Map();
 
-  for (const acc of state.accounts) {
+  for (const acc of visibleAccounts) {
     balanceCentsByAccount.set(acc.id, Money.toCents(acc.initialBalance));
     txCountByAccount.set(acc.id, 0);
     periodTxCountByAccount.set(acc.id, 0);
   }
 
-  for (const tx of state.transactions) {
+  for (const tx of visibleTransactions) {
     const inPeriod = isDateInPeriod(tx.date, period, new Date(), { startDate, endDate });
-    const originAccount = state.accounts.find((a) => a.id === tx.accountId);
+    const originAccount = visibleAccounts.find((a) => a.id === tx.accountId);
     if (originAccount) {
       const amountInOrigin = Money.convert(tx.amount, tx.currency, originAccount.currency);
       const centsOrigin = Money.toCents(amountInOrigin);
@@ -138,7 +185,7 @@ export function computeAccountsSummary(state, options = {}) {
     }
 
     if (tx.type === TRANSACTION_TYPES.TRANSFER && tx.toAccountId) {
-      const destAccount = state.accounts.find((a) => a.id === tx.toAccountId);
+      const destAccount = visibleAccounts.find((a) => a.id === tx.toAccountId);
       if (destAccount) {
         const amountInDest = Money.convert(tx.amount, tx.currency, destAccount.currency);
         const centsDest = Money.toCents(amountInDest);
@@ -159,7 +206,7 @@ export function computeAccountsSummary(state, options = {}) {
   let totalSavingsCents = 0;
   let totalDebtCents = 0;
 
-  const accountsWithBalance = state.accounts.map((acc) => {
+  const accountsWithBalance = visibleAccounts.map((acc) => {
     const currentBalance = Money.fromCents(balanceCentsByAccount.get(acc.id) || 0);
     const balanceInBase = Money.convert(currentBalance, acc.currency, baseCurrency);
 
@@ -255,7 +302,10 @@ export function computePeriodAnalytics(state, options = {}) {
   const endDate =
     options.endDate !== undefined ? options.endDate : (state.settings?.endDate || '');
 
-  const periodTransactions = state.transactions.filter((tx) => {
+  const periodTransactions = filterCleanUserTransactions(state.transactions || [], {
+    workspaceId,
+    currentUid,
+  }).filter((tx) => {
     if (!isDateInPeriod(tx.date, period, new Date(), { startDate, endDate })) return false;
     if (accountFilter !== 'all' && tx.accountId !== accountFilter && tx.toAccountId !== accountFilter) {
       return false;
@@ -289,12 +339,15 @@ export function computePeriodAnalytics(state, options = {}) {
     }
   }
 
-  const totalIncome = Money.fromCents(totalIncomeCents);
-  const totalExpense = Money.fromCents(totalExpenseCents);
-  const netCashflow = Money.fromCents(totalIncomeCents - totalExpenseCents);
-  const savingsRatePct = totalIncome > 0
-    ? Math.round(((totalIncome - totalExpense) / totalIncome) * 100)
-    : 0;
+  const hasTransactions = periodTransactions.length > 0;
+  const totalIncome = hasTransactions ? Money.fromCents(totalIncomeCents) : 0;
+  const totalExpenses = hasTransactions ? Money.fromCents(totalExpenseCents) : 0;
+  const totalExpense = totalExpenses;
+  const netCashflow = hasTransactions ? Money.fromCents(totalIncomeCents - totalExpenseCents) : 0;
+
+  // Guardián matemático simple para Tasa de Ahorro:
+  const savingsRate = totalIncome > 0 ? ((totalIncome - totalExpenses) / totalIncome) * 100 : 0;
+  const savingsRatePct = calculateSafeSavingsRate(totalIncome, totalExpenses, hasTransactions);
 
   const expenseCategories = state.categories
     .filter((c) => c.type === TRANSACTION_TYPES.EXPENSE)
@@ -349,8 +402,11 @@ export function computePeriodAnalytics(state, options = {}) {
     workspaceId,
     totalIncome,
     totalExpense,
+    totalExpenses,
     netCashflow,
+    savingsRate: savingsRatePct,
     savingsRatePct,
+    rawSavingsRate: Number.isFinite(savingsRate) ? savingsRate : 0,
     totalBudgetLimit,
     expenseCategories,
     incomeCategories,

@@ -314,19 +314,6 @@ p {
   }
 }
 
-.header-filter-toggle-btn {
-  display: inline-flex;
-  min-height: 42px;
-  font-size: 0.875rem;
-  padding: 0.5rem 0.85rem;
-}
-
-@media (min-width: 769px) {
-  .header-filter-toggle-btn {
-    display: none;
-  }
-}
-
 .header-register-btn {
   min-height: 42px;
   font-size: 0.9rem;
@@ -348,12 +335,9 @@ p {
 
 @media (max-width: 768px) {
   .header-controls {
-    display: none;
+    display: flex;
     flex-direction: column;
     align-items: stretch;
-  }
-  .header-controls.is-mobile-open {
-    display: flex;
   }
   .header-controls .control-select,
   .header-controls .token-telemetry-pill,
@@ -2092,18 +2076,63 @@ dialog[open]::backdrop,
   place-items: center;
 }
 
-.profile-filter-banner {
-  display: flex;
+.header-logout-btn {
+  position: relative;
+  z-index: 20;
+  pointer-events: auto !important;
+  cursor: pointer !important;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 0.65rem;
-  padding: 0.65rem 1rem;
-  margin-bottom: 1rem;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--color-brand) 11%, var(--bg-surface));
-  border: 1px solid color-mix(in srgb, var(--color-brand) 38%, var(--surface-border));
-  font-size: 0.82rem;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.55rem 0.95rem;
+  min-height: 42px;
+  font-size: 0.86rem;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  border-radius: 12px;
+  background: rgba(239, 68, 68, 0.1);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.36);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.header-logout-btn > * {
+  pointer-events: none;
+}
+
+.header-logout-btn:hover {
+  background: rgba(239, 68, 68, 0.22);
+  border-color: rgba(248, 113, 113, 0.75);
+  color: #fecaca;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(239, 68, 68, 0.28);
+}
+
+.header-logout-btn:active {
+  transform: translateY(0);
+}
+
+.header-logout-btn:focus-visible {
+  outline: 2px solid #f87171;
+  outline-offset: 2px;
+}
+
+.btn-remove-extracted-account {
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.btn-remove-extracted-account:hover {
+  background: rgba(239, 68, 68, 0.25) !important;
+  border-color: rgba(248, 113, 113, 0.8) !important;
+  color: #fecaca !important;
 }
 
 .profile-workspace {
@@ -2758,6 +2787,262 @@ dialog[open]::backdrop,
   .onboarding-finish-btn,
   .onboarding-empty-state-actions,
   .onboarding-cta-highlight {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+/* ==========================================================================
+   Batch Accounts Confirmation Modal (Importación Masiva en Lote)
+   ========================================================================== */
+.batch-accounts-modal {
+  max-width: min(1040px, 96vw);
+  width: 100%;
+  container-type: inline-size;
+  container-name: batch-modal;
+}
+
+.batch-accounts-subtitle {
+  margin: 0.2rem 0 0 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.batch-accounts-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.batch-accounts-bank-bar {
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--surface-border);
+}
+
+.batch-accounts-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.7rem 0.95rem;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--surface-border);
+}
+
+.batch-select-all-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-weight: 700;
+  font-size: 0.88rem;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.batch-select-all-label input[type='checkbox'],
+.batch-row-checkbox,
+.batch-row-card-checkbox {
+  width: 1.1rem;
+  height: 1.1rem;
+  accent-color: var(--color-brand);
+  cursor: pointer;
+}
+
+.batch-accounts-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+
+.batch-accounts-count-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.7rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.78rem;
+  font-weight: 700;
+  background: rgba(16, 185, 129, 0.14);
+  color: var(--color-brand);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.batch-accounts-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--surface-border);
+  background: var(--bg-surface);
+}
+
+.batch-accounts-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+
+.batch-accounts-table thead th {
+  text-align: left;
+  padding: 0.75rem 0.8rem;
+  font-size: 0.76rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--surface-border);
+}
+
+.batch-col-check {
+  width: 48px;
+  text-align: center !important;
+}
+
+.batch-col-number {
+  width: 170px;
+}
+
+.batch-col-currency {
+  width: 120px;
+}
+
+.batch-col-balance {
+  width: 155px;
+  text-align: right !important;
+}
+
+.batch-col-card {
+  width: 140px;
+}
+
+.batch-account-row {
+  border-bottom: 1px solid var(--surface-border);
+  transition: background-color 0.15s ease;
+}
+
+.batch-account-row:last-child {
+  border-bottom: none;
+}
+
+.batch-account-row.is-selected {
+  background: rgba(16, 185, 129, 0.04);
+}
+
+.batch-account-row.is-duplicate {
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.batch-account-row td {
+  padding: 0.65rem 0.75rem;
+  vertical-align: middle;
+}
+
+.batch-cell-check {
+  text-align: center;
+}
+
+.batch-row-summary-pill {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 0.35rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.batch-duplicate-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.12rem 0.5rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.7rem;
+  font-weight: 700;
+  background: rgba(245, 158, 11, 0.18);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.batch-row-input,
+.batch-row-select {
+  width: 100%;
+  padding: 0.48rem 0.65rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--surface-border);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-family: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.batch-row-input:focus,
+.batch-row-select:focus {
+  border-color: var(--color-brand);
+  box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
+}
+
+.batch-row-input:user-invalid {
+  border-color: var(--color-danger);
+}
+
+.batch-row-input:user-valid {
+  border-color: var(--surface-border);
+}
+
+.batch-balance-input {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.batch-card-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.batch-empty-cell {
+  text-align: center;
+  padding: 1.25rem !important;
+  color: var(--text-secondary);
+}
+
+.batch-accounts-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 0.65rem;
+  padding-top: 0.35rem;
+  flex-wrap: wrap;
+}
+
+@container batch-modal (max-width: 680px) {
+  .batch-accounts-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .batch-accounts-toolbar-actions {
+    justify-content: space-between;
+  }
+
+  .batch-accounts-footer {
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .batch-accounts-footer button {
     width: 100%;
     justify-content: center;
   }

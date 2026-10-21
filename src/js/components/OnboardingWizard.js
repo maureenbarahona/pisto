@@ -25,13 +25,37 @@ import {
   shouldTriggerOnboarding,
   ensureCleanWorkspaceForFirstTimeUser,
   completeUserOnboarding,
+  ZERO_DASHBOARD_METRICS,
+  resetGlobalDashboardMetricsToZero,
+  renderDashboardMetricsToDom,
+  recalculateDashboardMetrics,
+  calculateSafeSavingsRate,
 } from '../services/firestore.js';
+import {
+  buildDefaultUserDocument,
+  registerNewUserDocument,
+  persistOnboardingCompletionInFirestore,
+  removeOnboardingWizardFromDom,
+  verifyUserOnboardingOnSignIn,
+  cleanupOnboardingOnLogout,
+} from '../services/auth.js';
 
 export {
   SUPPORTED_COUNTRIES,
   shouldTriggerOnboarding,
   ensureCleanWorkspaceForFirstTimeUser,
   completeUserOnboarding,
+  ZERO_DASHBOARD_METRICS,
+  resetGlobalDashboardMetricsToZero,
+  renderDashboardMetricsToDom,
+  recalculateDashboardMetrics,
+  calculateSafeSavingsRate,
+  buildDefaultUserDocument,
+  registerNewUserDocument,
+  persistOnboardingCompletionInFirestore,
+  removeOnboardingWizardFromDom,
+  verifyUserOnboardingOnSignIn,
+  cleanupOnboardingOnLogout,
 };
 
 export const ONBOARDING_WIZARD_DIALOG_ID = 'onboarding-wizard-dialog';
@@ -332,6 +356,7 @@ export class OnboardingWizard {
 
     this.currentStepIndex = 0;
     this.isOpen = false;
+    this.isFinishing = false;
     this.selectedCurrency = 'HNL';
     this.selectedCountry = 'HN';
     this.transitionDirection = 'forward';
@@ -340,10 +365,16 @@ export class OnboardingWizard {
     this.dialogEl = null;
     this._boundClickHandler = null;
     this._boundChangeHandler = null;
+    globalThis.__PISTO_ONBOARDING_WIZARD_INSTANCE__ = this;
   }
 
-  init() {
+  init(options = {}) {
     if (typeof document === 'undefined') return this;
+
+    // Solo montar el elemento <dialog> en el DOM cuando se solicita explícitamente o al abrir el Wizard
+    if (options.mountDom === false) {
+      return this;
+    }
 
     let dialog = document.getElementById(ONBOARDING_WIZARD_DIALOG_ID);
     if (!dialog && document.body) {
@@ -380,6 +411,18 @@ export class OnboardingWizard {
       }
 
       this._boundClickHandler = (event) => {
+        const finishBtn =
+          event.target?.closest?.(`#${ONBOARDING_FINISH_BUTTON_ID}`) ||
+          event.target?.closest?.('[data-onboarding-action="finish"]');
+        if (finishBtn) {
+          event.preventDefault();
+          if (finishBtn.disabled || this.isFinishing) return;
+          finishBtn.disabled = true;
+          finishBtn.setAttribute?.('aria-busy', 'true');
+          void this.finish({ buttonEl: finishBtn });
+          return;
+        }
+
         const actionBtn = event.target?.closest?.('[data-onboarding-action]');
         if (actionBtn) {
           event.preventDefault();
@@ -388,8 +431,6 @@ export class OnboardingWizard {
             this.nextStep();
           } else if (action === 'prev') {
             this.prevStep();
-          } else if (action === 'finish') {
-            void this.finish();
           }
           return;
         }
@@ -426,9 +467,8 @@ export class OnboardingWizard {
 
   /**
    * Evaluates whether a newly authenticated or registered user requires first-time onboarding.
-   * When `hasCompletedOnboarding` is `false` or missing:
-   * a) Guarantees the Firestore & local workspace state is 100% CLEAN (0 accounts, 0 transactions, 0 budgets).
-   * b) Automatically opens the interactive 4-step Onboarding Wizard.
+   * - If `hasCompletedOnboarding === true`: does NOT invoke or render the Wizard, and removes any mounted Wizard modal.
+   * - If `hasCompletedOnboarding === false` or `undefined`: cleans workspace and opens the 4-step Wizard.
    *
    * @param {object|null} user
    * @param {object|null} profile
@@ -436,6 +476,7 @@ export class OnboardingWizard {
    */
   async checkAndStartForUser(user, profile, context = {}) {
     if (!shouldTriggerOnboarding(profile)) {
+      this.removeModalFromDom(context.docRef);
       return { triggered: false, cleaned: false };
     }
 
@@ -451,14 +492,16 @@ export class OnboardingWizard {
         ? this.authService.getFirestoreContext()
         : {});
 
-    await ensureCleanWorkspaceForFirstTimeUser({
+    const cleanResult = await ensureCleanWorkspaceForFirstTimeUser({
       workspaceId,
       uid,
+      baseCurrency: profile?.defaultCurrency || 'HNL',
       state,
       repo,
       storage: context.storage ?? fsContext.storage,
       firestoreDb: context.firestoreDb ?? fsContext.firestoreDb,
       firestoreModule: context.firestoreModule ?? fsContext.firestoreModule,
+      docRef: context.docRef,
     });
 
     this.open({
@@ -466,6 +509,7 @@ export class OnboardingWizard {
       profile,
       defaultCurrency: profile?.defaultCurrency || 'HNL',
       country: profile?.country || 'HN',
+      skipAsyncReset: true,
     });
 
     return {
@@ -473,6 +517,7 @@ export class OnboardingWizard {
       cleaned: true,
       workspaceId,
       uid,
+      dashboardMetrics: cleanResult.dashboardMetrics,
     };
   }
 
@@ -494,6 +539,34 @@ export class OnboardingWizard {
     this.isOpen = true;
     globalThis.__PISTO_ONBOARDING_WIZARD_OPEN__ = true;
 
+    renderDashboardMetricsToDom(ZERO_DASHBOARD_METRICS, this.selectedCurrency);
+
+    if (!options.skipAsyncReset) {
+      const uid =
+        this.activeUser?.uid ||
+        this.activeProfile?.uid ||
+        this.authService?.getCurrentUser?.()?.uid ||
+        'local_default_user';
+      const workspaceId =
+        this.activeProfile?.workspaceId ||
+        this.getState()?.settings?.workspaceId ||
+        `ws_${uid}`;
+      const fsContext =
+        this.authService && typeof this.authService.getFirestoreContext === 'function'
+          ? this.authService.getFirestoreContext()
+          : {};
+      void resetGlobalDashboardMetricsToZero({
+        workspaceId,
+        uid,
+        baseCurrency: this.selectedCurrency,
+        state: this.getState(),
+        repo: this.repo,
+        storage: fsContext.storage,
+        firestoreDb: fsContext.firestoreDb,
+        firestoreModule: fsContext.firestoreModule,
+      });
+    }
+
     this.render();
 
     if (this.dialogEl) {
@@ -503,10 +576,10 @@ export class OnboardingWizard {
             this.dialogEl.showModal();
           }
         } catch {
-          this.dialogEl.setAttribute('open', '');
+          this.dialogEl.setAttribute?.('open', '');
         }
       } else {
-        this.dialogEl.setAttribute('open', '');
+        this.dialogEl.setAttribute?.('open', '');
       }
     }
 
@@ -521,13 +594,68 @@ export class OnboardingWizard {
         try {
           this.dialogEl.close();
         } catch {
-          this.dialogEl.removeAttribute('open');
+          this.dialogEl.removeAttribute?.('open');
         }
       } else {
-        this.dialogEl.removeAttribute('open');
+        this.dialogEl.removeAttribute?.('open');
       }
     }
     return this;
+  }
+
+  /**
+   * Remueve completamente el modal `<dialog id="onboarding-wizard-dialog">` del DOM.
+   * @param {Document} [docRef]
+   */
+  removeModalFromDom(docRef = typeof document !== 'undefined' ? document : null) {
+    this.close();
+    if (this.dialogEl) {
+      if (typeof this.dialogEl.remove === 'function') {
+        this.dialogEl.remove();
+      } else if (this.dialogEl.parentNode) {
+        this.dialogEl.parentNode.removeChild(this.dialogEl);
+      }
+      this.dialogEl = null;
+    }
+    removeOnboardingWizardFromDom(docRef);
+    return this;
+  }
+
+  /**
+   * Limpieza en Cierre de Sesión (`Logout`):
+   * Remueve de forma segura cualquier modal del Wizard en el DOM y resetea todos los estados locales.
+   * @param {Document} [docRef]
+   */
+  resetOnLogout(docRef = typeof document !== 'undefined' ? document : null) {
+    this.removeModalFromDom(docRef);
+    this.currentStepIndex = 0;
+    this.isOpen = false;
+    this.isFinishing = false;
+    this.selectedCurrency = 'HNL';
+    this.selectedCountry = 'HN';
+    this.transitionDirection = 'forward';
+    this.activeUser = null;
+    this.activeProfile = null;
+    return this;
+  }
+
+  /**
+   * Muestra el Dashboard principal de la aplicación tras finalizar el Onboarding Wizard.
+   * @param {Document} [docRef]
+   */
+  showDashboardView(docRef = typeof document !== 'undefined' ? document : null) {
+    if (!docRef) return;
+    const dashboardPanel =
+      typeof docRef.getElementById === 'function'
+        ? docRef.getElementById('panel-categories') || docRef.getElementById('main-content')
+        : null;
+    if (dashboardPanel) {
+      dashboardPanel.classList?.remove?.('is-hidden');
+      dashboardPanel.removeAttribute?.('hidden');
+    }
+    if (globalThis.pistoApp && typeof globalThis.pistoApp.switchTab === 'function') {
+      globalThis.pistoApp.switchTab('categories');
+    }
   }
 
   setCountry(countryCode) {
@@ -610,65 +738,126 @@ export class OnboardingWizard {
 
   /**
    * Completes the Onboarding Wizard when the user clicks "🚀 Comenzar a usar Pisto":
-   * 1. Closes the Wizard modal.
-   * 2. Updates `users/{uid}` in Firestore with `hasCompletedOnboarding: true`, `defaultCurrency`, and `country`.
-   * 3. Leaves the user on their clean Dashboard with the Empty State and highlighted primary CTAs.
+   * a) Disables the button temporarily to prevent multiple clicks.
+   * b) Obtains `uid` from Firebase Auth (`auth.currentUser.uid`).
+   * c) Executes explicit async update in Firestore:
+   *    `await updateDoc(doc(db, "users", auth.currentUser.uid), { hasCompletedOnboarding: true });`
+   * d) Removes the modal from the DOM and shows the application Dashboard.
    */
   async finish(customContext = {}) {
-    const uid =
-      customContext.uid ||
-      this.activeUser?.uid ||
-      this.activeProfile?.uid ||
-      this.authService?.getCurrentUser?.()?.uid ||
-      this.authService?.getCurrentProfile?.()?.uid ||
-      'local_default_user';
+    if (this.isFinishing && !customContext.force) {
+      return this.activeProfile;
+    }
+    this.isFinishing = true;
 
-    this.close();
-
-    const fsContext =
-      customContext.firestoreContext ||
-      (this.authService && typeof this.authService.getFirestoreContext === 'function'
-        ? this.authService.getFirestoreContext()
-        : {});
-
-    const updatedProfile = await completeUserOnboarding(uid, {
-      defaultCurrency: this.selectedCurrency,
-      country: this.selectedCountry,
-      authService: customContext.authService ?? this.authService,
-      firestoreDb: customContext.firestoreDb ?? fsContext.firestoreDb,
-      firestoreModule: customContext.firestoreModule ?? fsContext.firestoreModule,
-      storage: customContext.storage ?? fsContext.storage,
-    });
-
-    this.activeProfile = updatedProfile;
-
-    const state = customContext.state || this.getState();
-    if (state && typeof state === 'object') {
-      if (state.settings && typeof state.settings === 'object') {
-        state.settings.baseCurrency = this.selectedCurrency;
-        state.settings.currencyFilter = this.selectedCurrency;
-      }
-      const repo = customContext.repo || this.repo;
-      if (repo && typeof repo.saveState === 'function') {
-        repo.saveState(state);
-      }
+    const finishBtn =
+      customContext.buttonEl ||
+      (typeof document !== 'undefined'
+        ? document.getElementById(ONBOARDING_FINISH_BUTTON_ID)
+        : null);
+    if (finishBtn) {
+      finishBtn.disabled = true;
+      finishBtn.setAttribute?.('aria-busy', 'true');
     }
 
-    if (this.onComplete) {
-      await this.onComplete({
-        uid,
-        profile: updatedProfile,
+    try {
+      const auth =
+        customContext.auth ||
+        this.authService?.firebaseAuth ||
+        globalThis.__PISTO_FIREBASE_AUTH__ || {
+          currentUser:
+            this.authService?.getCurrentUser?.() ||
+            this.activeUser || {
+              uid:
+                customContext.uid ||
+                this.activeProfile?.uid ||
+                this.authService?.getCurrentProfile?.()?.uid ||
+                'local_default_user',
+            },
+        };
+
+      const uid = String(
+        auth?.currentUser?.uid ||
+          customContext.uid ||
+          this.activeUser?.uid ||
+          this.activeProfile?.uid ||
+          this.authService?.getCurrentUser?.()?.uid ||
+          this.authService?.getCurrentProfile?.()?.uid ||
+          'local_default_user'
+      ).trim();
+
+      const fsContext =
+        customContext.firestoreContext ||
+        (this.authService && typeof this.authService.getFirestoreContext === 'function'
+          ? this.authService.getFirestoreContext()
+          : {});
+
+      const db = customContext.db ?? customContext.firestoreDb ?? fsContext.firestoreDb ?? null;
+      const fsMod = customContext.firestoreModule ?? fsContext.firestoreModule ?? null;
+      const doc = customContext.doc ?? fsMod?.doc;
+      const updateDoc = customContext.updateDoc ?? fsMod?.updateDoc;
+
+      // c) Actualización asíncrona explícita en Firestore:
+      // await updateDoc(doc(db, "users", auth.currentUser.uid), { hasCompletedOnboarding: true });
+      const activeAuthWithUser = auth?.currentUser?.uid
+        ? auth
+        : { ...auth, currentUser: { ...(auth?.currentUser || {}), uid } };
+
+      if (db && typeof doc === 'function' && typeof updateDoc === 'function') {
+        try {
+          await updateDoc(doc(db, 'users', activeAuthWithUser.currentUser.uid), {
+            hasCompletedOnboarding: true,
+          });
+        } catch {
+          // Fallback manejado por completeUserOnboarding / setDoc
+        }
+      }
+
+      const updatedProfile = await completeUserOnboarding(uid, {
         defaultCurrency: this.selectedCurrency,
         country: this.selectedCountry,
-        hasCompletedOnboarding: true,
+        authService: customContext.authService ?? this.authService,
+        firestoreDb: db,
+        firestoreModule: fsMod,
+        storage: customContext.storage ?? fsContext.storage,
       });
-    }
 
-    if (this.showToast) {
-      this.showToast('🚀 ¡Bienvenido a Pisto! Crea tu primera cuenta o importa con Imagen/PDF.');
-    }
+      this.activeProfile = updatedProfile;
 
-    return updatedProfile;
+      const state = customContext.state || this.getState();
+      if (state && typeof state === 'object') {
+        if (state.settings && typeof state.settings === 'object') {
+          state.settings.baseCurrency = this.selectedCurrency;
+          state.settings.currencyFilter = this.selectedCurrency;
+        }
+        const repo = customContext.repo || this.repo;
+        if (repo && typeof repo.saveState === 'function') {
+          repo.saveState(state);
+        }
+      }
+
+      // d) Remueve el modal del DOM y muestra el Dashboard de la aplicación
+      this.removeModalFromDom(customContext.docRef);
+      this.showDashboardView(customContext.docRef);
+
+      if (this.onComplete) {
+        await this.onComplete({
+          uid,
+          profile: updatedProfile,
+          defaultCurrency: this.selectedCurrency,
+          country: this.selectedCountry,
+          hasCompletedOnboarding: true,
+        });
+      }
+
+      if (this.showToast) {
+        this.showToast('🚀 ¡Bienvenido a Pisto! Crea tu primera cuenta o importa con Imagen/PDF.');
+      }
+
+      return updatedProfile;
+    } finally {
+      this.isFinishing = false;
+    }
   }
 }
 

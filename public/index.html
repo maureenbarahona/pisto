@@ -72,18 +72,6 @@
         <div class="header-primary-actions">
           <button
             type="button"
-            id="btn-toggle-mobile-filters"
-            class="btn-secondary header-filter-toggle-btn"
-            aria-expanded="false"
-            aria-controls="header-filters-drawer"
-            aria-label="Mostrar u ocultar filtros de período, moneda y tema"
-          >
-            <span aria-hidden="true">⚙️</span>
-            <span>Filtros</span>
-          </button>
-
-          <button
-            type="button"
             id="header-quick-add-btn"
             class="btn-primary header-register-btn"
             data-action="open-keypad"
@@ -106,6 +94,18 @@
           >
             <span aria-hidden="true">🔐</span>
             <span>Iniciar Sesión</span>
+          </button>
+
+          <button
+            type="button"
+            id="btn-profile-signout"
+            class="header-logout-btn"
+            data-action="logout"
+            aria-label="Cerrar sesión y limpiar claves locales sensibles"
+            title="Cerrar sesión activa"
+          >
+            <span aria-hidden="true">⏻</span>
+            <span>Cerrar Sesión</span>
           </button>
         </div>
       </div>
@@ -203,24 +203,21 @@
     <section class="kpi-strip" aria-label="Resumen financiero general">
       <article class="kpi-card">
         <span class="kpi-label">Patrimonio en Cuentas</span>
-        <strong class="kpi-value" id="kpi-total-balance">$0.00</strong>
+        <strong class="kpi-value" id="kpi-total-balance">L 0.00</strong>
       </article>
       <article class="kpi-card">
         <span class="kpi-label">Ingresos del Período</span>
-        <strong class="kpi-value text-income" id="kpi-period-income">+$0.00</strong>
+        <strong class="kpi-value text-income" id="kpi-period-income">+ L 0.00</strong>
       </article>
       <article class="kpi-card">
         <span class="kpi-label">Gastos del Período</span>
-        <strong class="kpi-value text-expense" id="kpi-period-expense">-$0.00</strong>
+        <strong class="kpi-value text-expense" id="kpi-period-expense">- L 0.00</strong>
       </article>
       <article class="kpi-card">
         <span class="kpi-label">Tasa de Ahorro</span>
         <strong class="kpi-value" id="kpi-savings-rate">0%</strong>
       </article>
     </section>
-
-    <!-- Active Profile / Currency / Personal View Mode Filter Banner -->
-    <div id="active-profile-filter-bar" class="profile-filter-banner is-hidden" role="status"></div>
 
     <!-- Pisto 5-Tab Navigation Bar -->
     <nav class="nav-tabs" role="tablist" aria-label="Secciones de Pisto">
@@ -577,14 +574,6 @@
                 aria-label="Abrir modal de inicio de sesión o registro"
               >
                 🔐 Iniciar Sesión / Crear Cuenta (Google o Correo)
-              </button>
-              <button
-                type="button"
-                id="btn-profile-signout"
-                class="btn-danger is-hidden"
-                aria-label="Cerrar sesión y limpiar claves locales sensibles"
-              >
-                Cerrar Sesión
               </button>
             </div>
 

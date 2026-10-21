@@ -2081,4 +2081,845 @@ describe('Primer Inicio / Onboarding Wizard & Clean Database Initialization (Van
   });
 });
 
+describe('Dashboard Global Metrics Zero Reset, Residual Cleanup & Safe Savings Rate (src/js/services/dashboard.js)', () => {
+  it('initializes Dashboard KPIs in strict zero (L 0.00, + L 0.00, - L 0.00, 0%) in Firestore and UI, purges residual transactions, and prevents division-by-zero (-4397%)', async () => {
+    const fs = await import('node:fs/promises');
+    const {
+      ZERO_DASHBOARD_METRICS,
+      calculateSafeSavingsRate,
+      recalculateDashboardMetrics,
+      resetGlobalDashboardMetricsToZero,
+      initializeDashboardStateForNewUser,
+      purgeResidualTransactionsFromWorkspace,
+    } = await import('../src/js/services/dashboard.js');
 
+    // 1. Safe Savings Rate guard: totalIncome === 0 must strictly return 0 (never -4397% or -Infinity)
+    assert.equal(calculateSafeSavingsRate(0, 0, false), 0);
+    assert.equal(calculateSafeSavingsRate(0, 4397, true), 0);
+    assert.equal(calculateSafeSavingsRate(0, 1250.5, true), 0);
+    assert.equal(calculateSafeSavingsRate(-100, 500, true), 0);
+    assert.equal(calculateSafeSavingsRate(10000, 2500, true), 75);
+
+    // 2. Recalculate metrics when state still holds demo seed records for an authenticated workspace
+    const dirtyState = createSeedState();
+    dirtyState.settings.workspaceId = 'ws_uid_nuevo_usuario';
+    dirtyState.settings.currentUid = 'uid_nuevo_usuario';
+    dirtyState.settings.baseCurrency = 'HNL';
+
+    const recalcBeforeCleanup = recalculateDashboardMetrics(dirtyState, {
+      workspaceId: 'ws_uid_nuevo_usuario',
+      currentUid: 'uid_nuevo_usuario',
+      baseCurrency: 'HNL',
+    });
+    assert.equal(recalcBeforeCleanup.totalIncludedBalance, 0);
+    assert.equal(recalcBeforeCleanup.totalIncome, 0);
+    assert.equal(recalcBeforeCleanup.totalExpenses, 0);
+    assert.equal(recalcBeforeCleanup.savingsRate, 0);
+    assert.equal(recalcBeforeCleanup.savingsRatePct, 0);
+    assert.equal(recalcBeforeCleanup.patrimonioLabel, 'L 0.00');
+    assert.equal(recalcBeforeCleanup.ingresosLabel, '+ L 0.00');
+    assert.equal(recalcBeforeCleanup.gastosLabel, '- L 0.00');
+    assert.equal(recalcBeforeCleanup.tasaAhorroLabel, '0%');
+
+    // Also verify computeAccountsSummary & computePeriodAnalytics in financeService.js
+    const summaryFromFinance = computeAccountsSummary(dirtyState);
+    const analyticsFromFinance = computePeriodAnalytics(dirtyState);
+    assert.equal(summaryFromFinance.totalIncludedBalance, 0);
+    assert.equal(analyticsFromFinance.totalIncome, 0);
+    assert.equal(analyticsFromFinance.totalExpense, 0);
+    assert.equal(analyticsFromFinance.savingsRatePct, 0);
+
+    // Verify computePeriodAnalytics when user has an expense but 0 income (e.g. L 43.97 expense, L 0.00 income)
+    const expenseOnlyState = {
+      settings: {
+        baseCurrency: 'HNL',
+        periodFilter: 'all',
+        workspaceId: 'ws_uid_nuevo_usuario',
+        currentUid: 'uid_nuevo_usuario',
+      },
+      accounts: [
+        createAccount({
+          id: 'acc_user_real_1',
+          name: 'Cuenta BAC',
+          type: 'bank',
+          currency: 'HNL',
+          initialBalance: 0,
+          workspaceId: 'ws_uid_nuevo_usuario',
+          createdByUid: 'uid_nuevo_usuario',
+        }),
+      ],
+      categories: dirtyState.categories,
+      budgets: {},
+      transactions: [
+        createTransaction({
+          id: 'tx_user_real_1',
+          type: 'expense',
+          amount: 4397,
+          currency: 'HNL',
+          categoryId: 'cat_food',
+          accountId: 'acc_user_real_1',
+          date: '2026-10-21',
+          note: 'Supermercado',
+          workspaceId: 'ws_uid_nuevo_usuario',
+          createdByUid: 'uid_nuevo_usuario',
+        }),
+      ],
+    };
+    const expenseOnlyAnalytics = computePeriodAnalytics(expenseOnlyState);
+    const expenseOnlyRecalc = recalculateDashboardMetrics(expenseOnlyState);
+    assert.equal(expenseOnlyAnalytics.totalIncome, 0);
+    assert.equal(expenseOnlyAnalytics.totalExpense, 4397);
+    assert.equal(expenseOnlyAnalytics.savingsRatePct, 0);
+    assert.equal(expenseOnlyRecalc.savingsRate, 0);
+    assert.equal(expenseOnlyRecalc.tasaAhorroLabel, '0%');
+
+    // 3. Verify resetGlobalDashboardMetricsToZero / initializeDashboardStateForNewUser in Firestore & DOM
+    const domElements = {
+      'kpi-total-balance': { textContent: '$999.99' },
+      'kpi-period-income': { textContent: '+$500.00' },
+      'kpi-period-expense': { textContent: '-$250.00' },
+      'kpi-savings-rate': { textContent: '-4397%' },
+    };
+    const mockDoc = {
+      getElementById(id) {
+        return domElements[id] || null;
+      },
+    };
+
+    const firestoreStores = {
+      users: new Map(),
+      workspaces: new Map(),
+      accounts: new Map([
+        ['acc_seed_residual', { id: 'acc_seed_residual', workspaceId: 'ws_uid_nuevo_usuario' }],
+      ]),
+      transactions: new Map([
+        ['tx_seed_1', { id: 'tx_seed_1', workspaceId: 'ws_uid_nuevo_usuario', amount: 1850 }],
+      ]),
+      budgets: new Map(),
+    };
+
+    const mockFirestoreModule = {
+      doc: (_db, col, id) => ({ col, id }),
+      getDoc: async (ref) => ({
+        exists: () => firestoreStores[ref.col]?.has(ref.id) || false,
+        data: () => firestoreStores[ref.col]?.get(ref.id) || null,
+      }),
+      setDoc: async (ref, data, opts) => {
+        const prev = opts?.merge ? firestoreStores[ref.col]?.get(ref.id) || {} : {};
+        firestoreStores[ref.col]?.set(ref.id, { ...prev, ...data });
+      },
+      collection: (_db, col) => ({ col }),
+      where: (field, op, val) => ({ field, op, val }),
+      query: (colRef, ...conds) => ({ col: colRef.col, conds }),
+      getDocs: async (q) => {
+        const store = firestoreStores[q.col] || new Map();
+        const docs = [];
+        for (const [id, data] of store.entries()) {
+          const matches = (q.conds || []).every((c) => data[c.field] === c.val);
+          if (matches) {
+            docs.push({
+              id,
+              ref: { col: q.col, id },
+              data: () => data,
+            });
+          }
+        }
+        return { empty: docs.length === 0, docs };
+      },
+      writeBatch: () => {
+        const ops = [];
+        return {
+          delete: (ref) => ops.push(ref),
+          commit: async () => {
+            for (const r of ops) {
+              firestoreStores[r.col]?.delete(r.id);
+            }
+          },
+        };
+      },
+    };
+
+    const resetMetrics = await initializeDashboardStateForNewUser({
+      workspaceId: 'ws_uid_nuevo_usuario',
+      uid: 'uid_nuevo_usuario',
+      baseCurrency: 'HNL',
+      state: dirtyState,
+      firestoreDb: {},
+      firestoreModule: mockFirestoreModule,
+      docRef: mockDoc,
+    });
+
+    assert.equal(resetMetrics.patrimonioLabel, ZERO_DASHBOARD_METRICS.patrimonioLabel);
+    assert.equal(resetMetrics.ingresosLabel, ZERO_DASHBOARD_METRICS.ingresosLabel);
+    assert.equal(resetMetrics.gastosLabel, ZERO_DASHBOARD_METRICS.gastosLabel);
+    assert.equal(resetMetrics.tasaAhorroLabel, ZERO_DASHBOARD_METRICS.tasaAhorroLabel);
+
+    // Check strict UI strings:
+    assert.equal(domElements['kpi-total-balance'].textContent, 'L 0.00');
+    assert.equal(domElements['kpi-period-income'].textContent, '+ L 0.00');
+    assert.equal(domElements['kpi-period-expense'].textContent, '- L 0.00');
+    assert.equal(domElements['kpi-savings-rate'].textContent, '0%');
+
+    // Check Firestore persistence of zero metrics and residual transaction cleanup:
+    assert.equal(firestoreStores.transactions.size, 0);
+    assert.equal(firestoreStores.accounts.size, 0);
+    const wsDoc = firestoreStores.workspaces.get('ws_uid_nuevo_usuario');
+    assert.ok(wsDoc?.dashboardMetrics);
+    assert.equal(wsDoc.dashboardMetrics.patrimonioEnCuentas, 'L 0.00');
+    assert.equal(wsDoc.dashboardMetrics.ingresosDelPeriodo, '+ L 0.00');
+    assert.equal(wsDoc.dashboardMetrics.gastosDelPeriodo, '- L 0.00');
+    assert.equal(wsDoc.dashboardMetrics.tasaDeAhorro, '0%');
+
+    // Check zero console.log in dashboard service files
+    for (const relPath of [
+      'src/js/services/dashboard.js',
+      'public/js/services/dashboard.js',
+      'public/js/services/financeService.js',
+      'public/js/app.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Expected zero console.log in ${relPath}`
+      );
+    }
+  });
+});
+
+describe('22. Extracción e Importación Masiva en Lote (Array/Batch) de Cuentas y Tarjetas', () => {
+  it('valida el esquema Genkit/Gemini Vision (accountsArray), sanitiza comas y normaliza LPS -> HNL / USD', async () => {
+    const {
+      ACCOUNT_EXTRACTOR_SYSTEM_PROMPT,
+      EXTRACTED_ACCOUNT_JSON_SCHEMA,
+      BATCH_DEMO_PRODUCTS_SUMMARY,
+      validateExtractedAccount,
+      parseBatchAccountsFromTextFallback,
+      ExtractedBatchAccountsSchema,
+    } = await import('../src/js/services/accountExtractor.js');
+
+    assert.ok(ACCOUNT_EXTRACTOR_SYSTEM_PROMPT.includes('accountsArray'));
+    assert.ok(EXTRACTED_ACCOUNT_JSON_SCHEMA.properties.accountsArray);
+    assert.ok(EXTRACTED_ACCOUNT_JSON_SCHEMA.required.includes('accountsArray'));
+
+    const parsed = ExtractedBatchAccountsSchema.parse({
+      bankName: 'BAC Credomatic',
+      accountsArray: [
+        {
+          accountType: 'HN - CUENTA BANCARIA',
+          accountNumber: '726935871',
+          currency: 'LPS',
+          currentBalance: '401.28',
+          isCreditCard: false,
+        },
+        {
+          accountType: 'HN - CUENTA BANCARIA',
+          accountNumber: '751666931',
+          currency: '$',
+          currentBalance: '3,705.95',
+          isCreditCard: false,
+        },
+        {
+          accountType: 'HN - Negocio Lempiras',
+          accountNumber: '758886371',
+          currency: 'LPS',
+          currentBalance: '5,963.18',
+          isCreditCard: false,
+        },
+        {
+          accountType: 'AMERICAN EXPRESS',
+          accountNumber: '3244',
+          currency: 'LPS',
+          currentBalance: '8,154.03',
+          isCreditCard: true,
+        },
+      ],
+    });
+
+    assert.equal(parsed.bankName, 'BAC Credomatic');
+    assert.equal(parsed.accountsArray.length, 4);
+    assert.equal(parsed.accountsArray[0].currency, 'HNL');
+    assert.equal(parsed.accountsArray[0].currentBalance, 401.28);
+    assert.equal(parsed.accountsArray[1].currency, 'USD');
+    assert.equal(parsed.accountsArray[1].currentBalance, 3705.95);
+    assert.equal(parsed.accountsArray[2].currentBalance, 5963.18);
+    assert.equal(parsed.accountsArray[3].isCreditCard, true);
+    assert.equal(parsed.accountsArray[3].accountNumber, '3244');
+    assert.equal(parsed.accountsArray[3].currentBalance, 8154.03);
+
+    assert.equal(BATCH_DEMO_PRODUCTS_SUMMARY.accountsArray.length, 4);
+
+    const ocrBatch = parseBatchAccountsFromTextFallback(`
+      BAC Credomatic - Resumen de Productos
+      Cuentas Bancarias
+      HN - CUENTA BANCARIA 726935871 LPS 401.28
+      HN - CUENTA BANCARIA 751666931 USD 3,705.95
+      HN - Negocio Lempiras 758886371 LPS 5,963.18
+      Tarjetas de crédito
+      AMERICAN EXPRESS *3244 LPS 8,154.03
+    `);
+    const validatedOcr = validateExtractedAccount(ocrBatch);
+    assert.equal(validatedOcr.bankName, 'BAC Credomatic');
+    assert.equal(validatedOcr.accountsArray.length, 4);
+    assert.equal(validatedOcr.accountsArray[1].currency, 'USD');
+    assert.equal(validatedOcr.accountsArray[1].currentBalance, 3705.95);
+    assert.equal(validatedOcr.accountsArray[3].isCreditCard, true);
+  });
+
+  it('renderiza filas editables con checkboxes y Seleccionar / Deseleccionar todas en BatchAccountsModal', async () => {
+    const {
+      BatchAccountsModal,
+      formatBatchAccountRowSummary,
+      renderBatchAccountsRowsMarkup,
+    } = await import('../src/js/components/BatchAccountsModal.js');
+    const { BATCH_DEMO_PRODUCTS_SUMMARY } = await import('../src/js/services/accountExtractor.js');
+
+    const summaries = BATCH_DEMO_PRODUCTS_SUMMARY.accountsArray.map((item) =>
+      formatBatchAccountRowSummary(item)
+    );
+    assert.deepEqual(summaries, [
+      '[x] HN - CUENTA BANCARIA | N.° 726935871 | 401.28 HNL',
+      '[x] HN - CUENTA BANCARIA | N.° 751666931 | 3,705.95 USD',
+      '[x] HN - Negocio Lempiras | N.° 758886371 | 5,963.18 HNL',
+      '[x] AMERICAN EXPRESS | N.° 3244 | 8,154.03 HNL',
+    ]);
+
+    const modal = new BatchAccountsModal({
+      getState: () => ({
+        accounts: [{ id: 'acc_existing', accountNumber: '726935871' }],
+      }),
+    });
+
+    modal.loadBatchPayload(BATCH_DEMO_PRODUCTS_SUMMARY);
+    assert.equal(modal.rows.length, 4);
+    assert.equal(modal.rows[0].alreadyExists, true);
+    assert.equal(modal.rows[1].alreadyExists, false);
+
+    // Edit row 1 fields before confirming
+    modal.updateRowField(1, 'accountType', 'HN - Cuenta Dólares');
+    modal.updateRowField(1, 'currentBalance', '4,250.50');
+    assert.equal(modal.rows[1].accountType, 'HN - Cuenta Dólares');
+    assert.equal(modal.rows[1].currentBalance, 4250.5);
+
+    // Toggle Select / Deselect All
+    modal.toggleSelectAll(false);
+    assert.equal(modal.rows.every((r) => r.selected === false), true);
+    modal.toggleSelectAll(true);
+    assert.equal(modal.rows.every((r) => r.selected === true), true);
+
+    const htmlMarkup = renderBatchAccountsRowsMarkup(modal.rows);
+    assert.ok(htmlMarkup.includes('data-batch-row-type="0"'));
+    assert.ok(htmlMarkup.includes('data-batch-row-number="1"'));
+    assert.ok(htmlMarkup.includes('data-batch-row-currency="2"'));
+    assert.ok(htmlMarkup.includes('data-batch-row-balance="3"'));
+  });
+
+  it('ejecuta writeBatch atómico en Firestore, omite números de cuenta duplicados y muestra el toast exacto', async () => {
+    const fs = await import('node:fs/promises');
+    const {
+      saveBatchAccountsToFirestore,
+      formatBatchAccountsToastMessage,
+      BATCH_DEMO_PRODUCTS_SUMMARY,
+    } = await import('../src/js/services/accountExtractor.js');
+
+    const firestoreAccountsStore = new Map([
+      [
+        'acc_dup_726935871',
+        {
+          id: 'acc_dup_726935871',
+          workspaceId: 'ws_batch_test',
+          accountNumber: '726935871',
+          name: 'BAC Credomatic - HN - CUENTA BANCARIA',
+          currency: 'HNL',
+        },
+      ],
+    ]);
+
+    let writeBatchCommitCalls = 0;
+    const mockFirestoreModule = {
+      collection: (_db, col) => ({ col }),
+      where: (field, op, val) => ({ field, op, val }),
+      query: (colRef, ...conds) => ({ col: colRef.col, conds }),
+      getDocs: async (q) => {
+        const docs = [];
+        for (const [id, data] of firestoreAccountsStore.entries()) {
+          const matches = (q.conds || []).every((c) => data[c.field] === c.val);
+          if (matches) {
+            docs.push({ id, data: () => data });
+          }
+        }
+        return { empty: docs.length === 0, docs };
+      },
+      doc: (_db, col, id) => ({ col, id }),
+      writeBatch: () => {
+        const stagedWrites = [];
+        return {
+          set: (ref, payload) => {
+            stagedWrites.push({ ref, payload });
+          },
+          commit: async () => {
+            writeBatchCommitCalls += 1;
+            for (const op of stagedWrites) {
+              firestoreAccountsStore.set(op.ref.id, op.payload);
+            }
+          },
+        };
+      },
+    };
+
+    const localState = {
+      userProfile: { uid: 'uid_batch_user', workspaceId: 'ws_batch_test' },
+      accounts: [
+        {
+          id: 'acc_dup_726935871',
+          workspaceId: 'ws_batch_test',
+          accountNumber: '726935871',
+          name: 'BAC Credomatic - HN - CUENTA BANCARIA',
+          currency: 'HNL',
+          initialBalanceCents: 40128,
+        },
+      ],
+    };
+
+    const batchResult = await saveBatchAccountsToFirestore(
+      {
+        bankName: 'BAC Credomatic',
+        accountsArray: BATCH_DEMO_PRODUCTS_SUMMARY.accountsArray,
+      },
+      {
+        state: localState,
+        workspaceId: 'ws_batch_test',
+        uid: 'uid_batch_user',
+        firestoreDb: {},
+        firestoreModule: mockFirestoreModule,
+      }
+    );
+
+    assert.equal(writeBatchCommitCalls, 1);
+    assert.equal(batchResult.savedCount, 3);
+    assert.equal(batchResult.skippedDuplicatesCount, 1);
+    assert.equal(
+      batchResult.toastMessage,
+      '🎉 Se registraron 3 cuentas exitosamente (y se omitieron 1 duplicadas).'
+    );
+    assert.equal(
+      formatBatchAccountsToastMessage(3, 1),
+      '🎉 Se registraron 3 cuentas exitosamente (y se omitieron 1 duplicadas).'
+    );
+    assert.equal(firestoreAccountsStore.size, 4);
+    assert.equal(localState.accounts.length, 4);
+
+    // Verify credit card classification & balance on AMERICAN EXPRESS 3244
+    const amexAccount = batchResult.createdAccounts.find((a) => a.accountNumber === '3244');
+    assert.ok(amexAccount);
+    assert.equal(amexAccount.type, 'card');
+    assert.equal(amexAccount.isCreditCard, true);
+    assert.equal(amexAccount.currentBalance, 8154.03);
+
+    // Verify zero console.log in new/updated batch modules
+    for (const relPath of [
+      'src/js/services/accountExtractor.js',
+      'public/js/services/accountExtractor.js',
+      'src/js/components/BatchAccountsModal.js',
+      'src/js/components/ImportAccountModal.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Expected zero console.log in ${relPath}`
+      );
+    }
+  });
+});
+
+describe('23. Persistencia del Onboarding Wizard en Firestore (users/{uid}), Verificación en Login y Limpieza en Logout', () => {
+  it('deshabilita el botón final, ejecuta updateDoc(doc(db, "users", auth.currentUser.uid), { hasCompletedOnboarding: true }), remueve el modal del DOM y muestra el Dashboard', async () => {
+    const fs = await import('node:fs/promises');
+    const {
+      OnboardingWizard,
+      ONBOARDING_WIZARD_DIALOG_ID,
+      ONBOARDING_FINISH_BUTTON_ID,
+    } = await import('../src/js/components/OnboardingWizard.js');
+    const {
+      buildDefaultUserDocument,
+      registerNewUserDocument,
+      verifyUserOnboardingOnSignIn,
+      cleanupOnboardingOnLogout,
+    } = await import('../src/js/services/auth.js');
+
+    // 1. Verificar que todo nuevo documento en `users` incluya `hasCompletedOnboarding: false` por defecto
+    const defaultDoc = buildDefaultUserDocument({
+      uid: 'uid_catracho_onboarding',
+      email: 'nuevo@pisto.hn',
+      displayName: 'Catracho Nuevo',
+    });
+    assert.equal(defaultDoc.hasCompletedOnboarding, false);
+
+    const usersFirestoreMap = new Map();
+    const updateDocCalls = [];
+
+    const mockFirestoreModule = {
+      doc: (_db, col, id) => ({ col, id }),
+      getDoc: async (ref) => ({
+        exists: () => usersFirestoreMap.has(ref.id),
+        data: () => usersFirestoreMap.get(ref.id) || null,
+      }),
+      setDoc: async (ref, data, opts) => {
+        const prev = opts?.merge ? usersFirestoreMap.get(ref.id) || {} : {};
+        usersFirestoreMap.set(ref.id, { ...prev, ...data });
+      },
+      updateDoc: async (ref, updates) => {
+        updateDocCalls.push({ ref, updates });
+        const prev = usersFirestoreMap.get(ref.id) || { uid: ref.id };
+        usersFirestoreMap.set(ref.id, { ...prev, ...updates });
+      },
+    };
+
+    const registeredDoc = await registerNewUserDocument(
+      { uid: 'uid_catracho_onboarding', email: 'nuevo@pisto.hn', displayName: 'Catracho Nuevo' },
+      { db: {}, firestoreModule: mockFirestoreModule }
+    );
+    assert.equal(registeredDoc.hasCompletedOnboarding, false);
+    assert.equal(usersFirestoreMap.get('uid_catracho_onboarding').hasCompletedOnboarding, false);
+
+    // 2. Al iniciar sesión con hasCompletedOnboarding: false, inicializa el Wizard
+    let dialogRemoved = false;
+    const mockDialogEl = {
+      id: ONBOARDING_WIZARD_DIALOG_ID,
+      open: true,
+      innerHTML: '',
+      dataset: {},
+      close() {
+        this.open = false;
+      },
+      removeAttribute() {},
+      remove() {
+        dialogRemoved = true;
+      },
+    };
+    const mockDashboardPanel = {
+      id: 'panel-categories',
+      hidden: true,
+      classList: {
+        removedClasses: [],
+        remove(cls) {
+          this.removedClasses.push(cls);
+        },
+      },
+      removeAttribute(attr) {
+        if (attr === 'hidden') this.hidden = false;
+      },
+    };
+    const mockDocRef = {
+      getElementById(id) {
+        if (id === ONBOARDING_WIZARD_DIALOG_ID) return dialogRemoved ? null : mockDialogEl;
+        if (id === 'panel-categories') return mockDashboardPanel;
+        return null;
+      },
+      querySelectorAll() {
+        return dialogRemoved ? [] : [mockDialogEl];
+      },
+    };
+
+    const wizard = new OnboardingWizard();
+    wizard.dialogEl = mockDialogEl;
+    wizard.isOpen = true;
+
+    const signInCheckInitial = await verifyUserOnboardingOnSignIn('uid_catracho_onboarding', {
+      db: {},
+      firestoreModule: mockFirestoreModule,
+      wizard,
+      docRef: mockDocRef,
+    });
+    assert.equal(signInCheckInitial.hasCompletedOnboarding, false);
+    assert.equal(signInCheckInitial.wizardInitialized, true);
+
+    // 3. Al hacer clic en "🚀 Comenzar a usar Pisto":
+    //    a) Deshabilita el botón temporalmente
+    //    b) Obtiene auth.currentUser.uid
+    //    c) Ejecuta await updateDoc(doc(db, "users", auth.currentUser.uid), { hasCompletedOnboarding: true })
+    //    d) Remueve el modal del DOM y muestra el Dashboard
+    const mockFinishBtn = {
+      id: ONBOARDING_FINISH_BUTTON_ID,
+      disabled: false,
+      ariaBusy: null,
+      setAttribute(name, val) {
+        if (name === 'aria-busy') this.ariaBusy = val;
+      },
+    };
+
+    const mockAuth = {
+      currentUser: {
+        uid: 'uid_catracho_onboarding',
+        email: 'nuevo@pisto.hn',
+      },
+    };
+
+    await wizard.finish({
+      buttonEl: mockFinishBtn,
+      auth: mockAuth,
+      db: {},
+      firestoreModule: mockFirestoreModule,
+      docRef: mockDocRef,
+    });
+
+    assert.equal(mockFinishBtn.disabled, true);
+    assert.ok(updateDocCalls.length >= 1);
+    assert.equal(updateDocCalls[0].ref.col, 'users');
+    assert.equal(updateDocCalls[0].ref.id, 'uid_catracho_onboarding');
+    assert.equal(updateDocCalls[0].updates.hasCompletedOnboarding, true);
+    assert.equal(usersFirestoreMap.get('uid_catracho_onboarding').hasCompletedOnboarding, true);
+    assert.equal(dialogRemoved, true);
+    assert.equal(wizard.isOpen, false);
+    assert.equal(mockDashboardPanel.hidden, false);
+
+    // 4. Al volver a iniciar sesión cuando hasCompletedOnboarding === true, NO invoca ni renderiza el Wizard
+    let wizardOpenedAgain = false;
+    const secondWizard = {
+      open() {
+        wizardOpenedAgain = true;
+      },
+      checkAndStartForUser() {
+        wizardOpenedAgain = true;
+      },
+    };
+    const signInCheckAfterComplete = await verifyUserOnboardingOnSignIn('uid_catracho_onboarding', {
+      db: {},
+      firestoreModule: mockFirestoreModule,
+      wizard: secondWizard,
+      docRef: mockDocRef,
+    });
+    assert.equal(signInCheckAfterComplete.hasCompletedOnboarding, true);
+    assert.equal(signInCheckAfterComplete.wizardInitialized, false);
+    assert.equal(wizardOpenedAgain, false);
+
+    // 5. Al cerrar sesión (Logout), remueve cualquier modal residual del DOM y resetea estados locales
+    dialogRemoved = false;
+    wizard.dialogEl = mockDialogEl;
+    wizard.isOpen = true;
+    wizard.currentStepIndex = 3;
+    const logoutResult = cleanupOnboardingOnLogout({
+      wizard,
+      docRef: mockDocRef,
+    });
+    assert.equal(logoutResult.modalRemoved, true);
+    assert.equal(dialogRemoved, true);
+    assert.equal(wizard.isOpen, false);
+    assert.equal(wizard.currentStepIndex, 0);
+    assert.equal(wizard.activeUser, null);
+    assert.equal(wizard.activeProfile, null);
+
+    // 6. Cero llamadas a console.log en auth.js, authProfileService.js y OnboardingWizard.js
+    for (const relPath of [
+      'src/js/services/auth.js',
+      'public/js/services/auth.js',
+      'public/js/services/authProfileService.js',
+      'src/js/components/OnboardingWizard.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Expected zero console.log in ${relPath}`
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 24. Unificación en "Seleccionar Imagen o PDF", Eliminación de Filtro Superior
+//     y Visibilidad Directa de "Cerrar Sesión" en Header
+// ---------------------------------------------------------------------------
+describe('ImportAccountModal Unification (accounts[]), Top Filter Removal & Header Logout UX', () => {
+  it('elimina permanentemente Cargar Resumen de Productos (Lote), devuelve siempre accounts[], y permite editar/eliminar/seleccionar cada cuenta en ImportAccountModal', async () => {
+    const fs = await import('node:fs/promises');
+    const {
+      ACCOUNT_EXTRACTOR_SYSTEM_PROMPT,
+      EXTRACTED_ACCOUNT_JSON_SCHEMA,
+      validateExtractedAccount,
+    } = await import('../src/js/services/accountExtractor.js');
+
+    // 1. Esquema y validador SIEMPRE devuelven el arreglo `accounts` (incluso para 1 sola cuenta)
+    assert.ok(ACCOUNT_EXTRACTOR_SYSTEM_PROMPT.includes('accounts'));
+    assert.ok(EXTRACTED_ACCOUNT_JSON_SCHEMA.properties.accounts);
+    assert.ok(EXTRACTED_ACCOUNT_JSON_SCHEMA.required.includes('accounts'));
+
+    const singleExtracted = validateExtractedAccount({
+      bankName: 'BAC Credomatic',
+      accountType: 'HN - CUENTA BANCARIA',
+      accountNumber: '726935871',
+      currency: 'LPS',
+      availableBalance: '401.28',
+    });
+    assert.ok(Array.isArray(singleExtracted.accounts));
+    assert.equal(singleExtracted.accounts.length, 1);
+    assert.equal(singleExtracted.accounts[0].bankName, 'BAC Credomatic');
+    assert.equal(singleExtracted.accounts[0].accountNumber, '726935871');
+    assert.equal(singleExtracted.accounts[0].currency, 'HNL');
+    assert.equal(singleExtracted.accounts[0].currentBalance, 401.28);
+
+    // 2. ImportAccountModal elimina #btn-import-batch-demo-summary y soporta edición/eliminación/checkboxes por registro
+    const importModalSource = await fs.readFile(
+      new URL('../src/js/components/ImportAccountModal.js', import.meta.url),
+      'utf8'
+    );
+    assert.equal(
+      importModalSource.includes('Cargar Resumen de Productos (Lote)'),
+      false,
+      'El botón Cargar Resumen de Productos (Lote) debe haber sido eliminado permanentemente'
+    );
+    assert.equal(
+      importModalSource.includes('btn-import-batch-demo-summary'),
+      false,
+      'El id btn-import-batch-demo-summary no debe existir en ImportAccountModal.js'
+    );
+    assert.ok(importModalSource.includes('Seleccionar Imagen o PDF'));
+
+    const state = {
+      accounts: [],
+      transactions: [],
+      categories: [],
+      settings: { workspaceId: 'ws_ux_refactor' },
+    };
+    const modal = new ImportAccountModal({
+      getState: () => state,
+      getContext: () => ({ workspaceId: 'ws_ux_refactor' }),
+    });
+
+    // Cargamos 3 cuentas en la vista previa del modal
+    modal.populateForm({
+      bankName: 'BAC Credomatic',
+      accounts: [
+        {
+          bankName: 'BAC Credomatic',
+          accountType: 'HN - CUENTA BANCARIA',
+          accountNumber: '726935871',
+          currency: 'HNL',
+          currentBalance: 401.28,
+          isCreditCard: false,
+          selected: true,
+        },
+        {
+          bankName: 'BAC Credomatic',
+          accountType: 'HN - CUENTA BANCARIA',
+          accountNumber: '751666931',
+          currency: 'USD',
+          currentBalance: 3705.95,
+          isCreditCard: false,
+          selected: true,
+        },
+        {
+          bankName: 'BAC Credomatic',
+          accountType: 'AMERICAN EXPRESS',
+          accountNumber: '3244',
+          currency: 'HNL',
+          currentBalance: 8154.03,
+          isCreditCard: true,
+          selected: true,
+        },
+      ],
+    });
+
+    assert.equal(modal.extractedAccounts.length, 3);
+
+    // ✏️ Editar cuenta individual (Banco, Tipo, Número, Moneda, Saldo)
+    modal.editAccountRow(1, {
+      bankName: 'Banco Atlántida',
+      accountType: 'Cuenta Ahorro Dólares',
+      accountNumber: '99887766',
+      currency: 'USD',
+      currentBalance: '4,250.50',
+    });
+    assert.equal(modal.extractedAccounts[1].bankName, 'Banco Atlántida');
+    assert.equal(modal.extractedAccounts[1].accountType, 'Cuenta Ahorro Dólares');
+    assert.equal(modal.extractedAccounts[1].accountNumber, '99887766');
+    assert.equal(modal.extractedAccounts[1].currency, 'USD');
+    assert.equal(modal.extractedAccounts[1].currentBalance, 4250.5);
+
+    // 🗑️ Eliminar cuenta individual de la lista antes de guardar
+    const afterRemove = modal.removeExtractedAccount(0);
+    assert.equal(afterRemove.length, 2);
+    assert.equal(modal.extractedAccounts[0].accountNumber, '99887766');
+
+    // Checkboxes: seleccionar / deseleccionar en lote
+    modal.toggleSelectAllAccounts(false);
+    assert.equal(modal.getSelectedAccounts().length, 0);
+    modal.updateAccountAtIndex(0, 'selected', true);
+    assert.equal(modal.getSelectedAccounts().length, 1);
+    assert.equal(modal.getSelectedAccounts()[0].accountNumber, '99887766');
+  });
+
+  it('elimina por completo el filtro superior inútil y coloca Cerrar Sesión con visibilidad directa en el Header', async () => {
+    const fs = await import('node:fs/promises');
+
+    for (const htmlFile of ['index.html', 'public/index.html']) {
+      const html = await fs.readFile(new URL(`../${htmlFile}`, import.meta.url), 'utf8');
+      // Filtro superior eliminado
+      assert.equal(html.includes('btn-toggle-mobile-filters'), false);
+      assert.equal(html.includes('header-filter-toggle-btn'), false);
+      assert.equal(html.includes('active-profile-filter-bar'), false);
+      assert.equal(html.includes('profile-filter-banner'), false);
+
+      // Botón Cerrar Sesión extraído al Header con clase estilizada .header-logout-btn
+      const headerMatch = html.match(/<header class="top-header"[\s\S]*?<\/header>/);
+      assert.ok(headerMatch, `Debe existir <header class="top-header"> en ${htmlFile}`);
+      assert.ok(
+        headerMatch[0].includes('id="btn-profile-signout"'),
+        `El botón #btn-profile-signout debe estar directamente en el Header en ${htmlFile}`
+      );
+      assert.ok(
+        headerMatch[0].includes('class="header-logout-btn"'),
+        `El botón Cerrar Sesión debe usar .header-logout-btn en ${htmlFile}`
+      );
+
+      // No debe quedar duplicado dentro de #panel-profile
+      const profileSectionMatch = html.match(/id="panel-profile"[\s\S]*?<\/section>/);
+      assert.ok(profileSectionMatch);
+      assert.equal(
+        profileSectionMatch[0].includes('id="btn-profile-signout"'),
+        false,
+        `El botón Cerrar Sesión no debe estar oculto dentro de #panel-profile en ${htmlFile}`
+      );
+    }
+
+    for (const cssFile of ['src/css/styles.css', 'public/css/index.css']) {
+      const css = await fs.readFile(new URL(`../${cssFile}`, import.meta.url), 'utf8');
+      assert.equal(css.includes('.header-filter-toggle-btn'), false);
+      assert.equal(css.includes('.profile-filter-banner'), false);
+      assert.ok(css.includes('.header-logout-btn'));
+    }
+
+    const appJs = await fs.readFile(new URL('../public/js/app.js', import.meta.url), 'utf8');
+    assert.equal(appJs.includes('btn-toggle-mobile-filters'), false);
+    assert.equal(appJs.includes('renderProfileFilterBanner'), false);
+
+    // Verificación de 0 console.log en todos los archivos refactorizados
+    for (const relPath of [
+      'src/js/components/ImportAccountModal.js',
+      'src/js/components/BatchAccountsModal.js',
+      'src/js/services/accountExtractor.js',
+      'public/js/ui/profileView.js',
+      'public/js/app.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Expected zero console.log in ${relPath}`
+      );
+    }
+  });
+});

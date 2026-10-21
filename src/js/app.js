@@ -16,6 +16,11 @@ import {
   findAccountDuplicateTransactions,
   checkAccountTransactionDuplicate,
   resolveDuplicateTransactionAction,
+  saveBatchAccountsToFirestore,
+  fetchExistingWorkspaceAccountNumbers,
+  formatBatchAccountsToastMessage,
+  BATCH_DEMO_PRODUCTS_SUMMARY,
+  ExtractedBatchAccountsSchema,
 } from './services/firestore.js';
 import {
   ImportAccountModal,
@@ -23,6 +28,11 @@ import {
   bindImportAccountTriggerButtons,
   promptDuplicateTransactionModal,
 } from './components/ImportAccountModal.js';
+import {
+  BatchAccountsModal,
+  formatBatchAccountRowSummary,
+  renderBatchAccountsRowsMarkup,
+} from './components/BatchAccountsModal.js';
 import {
   OnboardingWizard,
   createOnboardingWizard,
@@ -36,6 +46,12 @@ import {
   ONBOARDING_FINISH_BUTTON_ID,
   ONBOARDING_FINISH_BUTTON_LABEL,
   EMPTY_STATE_CTA_LABELS,
+  buildDefaultUserDocument,
+  registerNewUserDocument,
+  persistOnboardingCompletionInFirestore,
+  removeOnboardingWizardFromDom,
+  verifyUserOnboardingOnSignIn,
+  cleanupOnboardingOnLogout,
 } from './components/OnboardingWizard.js';
 import {
   FinanceAppController,
@@ -46,6 +62,9 @@ export {
   FinanceAppController,
   bootstrapPistoApp,
   ImportAccountModal,
+  BatchAccountsModal,
+  formatBatchAccountRowSummary,
+  renderBatchAccountsRowsMarkup,
   openImportModal,
   bindImportAccountTriggerButtons,
   promptDuplicateTransactionModal,
@@ -61,6 +80,12 @@ export {
   ONBOARDING_FINISH_BUTTON_ID,
   ONBOARDING_FINISH_BUTTON_LABEL,
   EMPTY_STATE_CTA_LABELS,
+  buildDefaultUserDocument,
+  registerNewUserDocument,
+  persistOnboardingCompletionInFirestore,
+  removeOnboardingWizardFromDom,
+  verifyUserOnboardingOnSignIn,
+  cleanupOnboardingOnLogout,
   FIRESTORE_COLLECTIONS,
   DUPLICATE_TRANSACTION_ACTIONS,
   DUPLICATE_TRANSACTION_OPTION_LABELS,
@@ -69,6 +94,11 @@ export {
   findAccountDuplicateTransactions,
   checkAccountTransactionDuplicate,
   resolveDuplicateTransactionAction,
+  saveBatchAccountsToFirestore,
+  fetchExistingWorkspaceAccountNumbers,
+  formatBatchAccountsToastMessage,
+  BATCH_DEMO_PRODUCTS_SUMMARY,
+  ExtractedBatchAccountsSchema,
 };
 
 if (typeof document !== 'undefined') {
