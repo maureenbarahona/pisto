@@ -71,8 +71,20 @@ import {
   deleteAccountWithCascade,
 } from '../src/services/accounts.ts';
 import { DeleteAccountModal } from '../public/js/ui/deleteAccountModal.js';
+import {
+  AccountsView,
+  createAccountsView,
+  ImportAccountModal,
+  IMPORT_ACCOUNT_BUTTON_ID,
+  IMPORT_ACCOUNT_BUTTON_LABEL,
+  getIsImportAccountModalOpen,
+  setIsImportAccountModalOpen,
+  sanitizeClickableAncestors,
+  renderAccountsViewTemplate,
+} from '../public/js/ui/accountsTab.js';
 import { handleRequest } from '../server/index.js';
 import http from 'node:http';
+import fs from 'node:fs/promises';
 
 describe('Domain Models & Money Integer-Cents Math', () => {
   it('avoids IEEE-754 floating point drift on addition and subtraction', () => {
@@ -1464,7 +1476,89 @@ describe('Account Archiving, Cascade Deletion (writeBatch) & Relational Integrit
 
     // Verify local state also removed the account and its transactions
     assert.equal(state.accounts.some((a) => a.id === 'acc_card'), false);
+    assert.equal(state.accounts.some((a) => a.id === 'acc_bank'), true);
     assert.equal(state.transactions.some((tx) => tx.accountId === 'acc_card'), false);
     assert.equal(typeof DeleteAccountModal, 'function');
   });
 });
+
+describe('AccountsView & ImportAccountModal Button Handler, Conditional Render & Multi-Env Fallback', () => {
+  it('binds onClick to setIsImportAccountModalOpen(true), strips pointer-events-none/select-none on ancestors, and opens in local fallback mode without console.log', async () => {
+    let closedCalled = 0;
+    const toasts = [];
+    const view = createAccountsView({
+      showToast: (msg) => toasts.push(msg),
+      onClose: () => {
+        closedCalled += 1;
+      },
+    });
+
+    assert.equal(IMPORT_ACCOUNT_BUTTON_ID, 'btn-import-account-media');
+    assert.equal(IMPORT_ACCOUNT_BUTTON_LABEL, '➕ Importar Cuenta desde Imagen/PDF');
+    assert.equal(view.isImportAccountModalOpen, false);
+
+    // 1. Verify parent container class sanitization removes pointer-events-none and select-none
+    const removedClasses = [];
+    const mockParent = {
+      classList: {
+        remove: (...cls) => removedClasses.push(...cls),
+      },
+      style: { pointerEvents: 'none', userSelect: 'none' },
+      parentElement: null,
+    };
+    const mockBtn = {
+      classList: {
+        remove: (...cls) => removedClasses.push(...cls),
+      },
+      style: { pointerEvents: 'none', userSelect: 'none' },
+      parentElement: mockParent,
+    };
+    sanitizeClickableAncestors(mockBtn);
+    assert.ok(removedClasses.includes('pointer-events-none'));
+    assert.ok(removedClasses.includes('select-none'));
+    assert.equal(mockBtn.style.pointerEvents, 'auto');
+    assert.equal(mockParent.style.pointerEvents, 'auto');
+
+    // 2. Verify opening modal synchronously without production env vars works and triggers local fallback
+    view.setIsImportAccountModalOpen(true);
+    assert.equal(view.isImportAccountModalOpen, true);
+    assert.equal(getIsImportAccountModalOpen(), true);
+    assert.equal(globalThis.__PISTO_IMPORT_ACCOUNT_MODAL_OPEN__, true);
+    assert.ok(toasts.some((t) => t.includes('Agente ADK')));
+
+    const demoData = view.modal.handleLoadDemoADK();
+    assert.equal(demoData.bankName, 'Banco Atlántida');
+    assert.equal(demoData.accountNumber, '213130058771');
+    assert.equal(demoData.currentBalance, 3901.33);
+
+    // 3. Verify conditional rendering markup and closing modal calls onClose
+    assert.ok(renderAccountsViewTemplate(true).includes('data-rendered-component="ImportAccountModal"'));
+    view.setIsImportAccountModalOpen(false);
+    assert.equal(view.isImportAccountModalOpen, false);
+    assert.equal(getIsImportAccountModalOpen(), false);
+    assert.equal(closedCalled, 1);
+
+    // 4. Verify anti-tree-shaking global registrations and zero console.log in component/modal files
+    assert.equal(globalThis.__PISTO_ACCOUNTS_VIEW__, AccountsView);
+    assert.equal(globalThis.__PISTO_IMPORT_ACCOUNT_MODAL__, ImportAccountModal);
+
+    const filesToCheck = [
+      'src/components/AccountsView.tsx',
+      'src/components/ImportAccountModal.tsx',
+      'public/js/ui/accountsTab.js',
+      'public/js/ui/importAccountModal.js',
+    ];
+    for (const relPath of filesToCheck) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const codeWithoutComments = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        codeWithoutComments.includes('console.log('),
+        false,
+        `Expected no console.log in ${relPath}`
+      );
+    }
+  });
+});
+
