@@ -228,6 +228,41 @@ export function createSeedState() {
   };
 }
 
+/**
+ * Builds a completely clean initial workspace state (0 accounts, 0 transactions, 0 budgets)
+ * for first-time users starting the Onboarding Wizard.
+ * @param {object} [options]
+ */
+export function createCleanWorkspaceState(options = {}) {
+  const baseCurrency = options.baseCurrency || 'HNL';
+  const workspaceId = options.workspaceId || 'ws_default';
+  const currentUid = options.currentUid || 'local_default_user';
+  const categories = DEFAULT_CATEGORIES.map((c) => ({ ...c, defaultBudget: 0 }));
+
+  return {
+    version: 1,
+    settings: {
+      baseCurrency,
+      currencyFilter: baseCurrency,
+      periodFilter: 'month',
+      theme: options.theme || 'dark',
+      workspaceId,
+      personalViewMode: Boolean(options.personalViewMode ?? false),
+      currentUid,
+    },
+    accounts: [],
+    categories,
+    budgets: {},
+    transactions: [],
+    aiTelemetry: {
+      localParsesSaved: 0,
+      aiCallsCount: 0,
+      totalTokensUsed: 0,
+      cacheHits: 0,
+    },
+  };
+}
+
 export class StorageRepository {
   /**
    * @param {Storage} [storageBackend]
@@ -290,6 +325,16 @@ export class StorageRepository {
   resetToDemo() {
     const seeded = createSeedState();
     return this.saveState(seeded);
+  }
+
+  /**
+   * Resets state to a completely empty workspace (0 accounts, 0 transactions, 0 budgets)
+   * for newly registered / first-time users.
+   * @param {object} [options]
+   */
+  resetToCleanWorkspace(options = {}) {
+    const cleanState = createCleanWorkspaceState(options);
+    return this.saveState(cleanState);
   }
 
   /**

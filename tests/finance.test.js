@@ -24,7 +24,10 @@ import {
   TRANSACTION_TYPES,
   ACCOUNT_TYPES,
 } from '../public/js/domain/models.js';
-import { createSeedState } from '../public/js/repositories/storageRepository.js';
+import {
+  createSeedState,
+  createCleanWorkspaceState,
+} from '../public/js/repositories/storageRepository.js';
 import {
   isDateInPeriod,
   computeAccountsSummary,
@@ -93,6 +96,20 @@ import {
   bindImportAccountTriggerButtons,
   persistImportedAccountAndTransactions,
 } from '../public/js/ui/accountsTab.js';
+import {
+  OnboardingWizard,
+  createOnboardingWizard,
+  shouldTriggerOnboarding,
+  ensureCleanWorkspaceForFirstTimeUser,
+  completeUserOnboarding,
+  renderOnboardingStepMarkup,
+  renderDashboardEmptyStateMarkup,
+  ONBOARDING_STEPS,
+  ONBOARDING_WIZARD_DIALOG_ID,
+  ONBOARDING_FINISH_BUTTON_ID,
+  ONBOARDING_FINISH_BUTTON_LABEL,
+  EMPTY_STATE_CTA_LABELS,
+} from '../src/js/components/OnboardingWizard.js';
 import { handleRequest } from '../server/index.js';
 import http from 'node:http';
 import fs from 'node:fs/promises';
@@ -1840,4 +1857,228 @@ describe('Smart Transaction Deduplication & Lightweight Firestore Cursor Paginat
     assert.ok(appliedConstraints.some((c) => c.type === 'limit' && c.n === 2));
   });
 });
+
+describe('Primer Inicio / Onboarding Wizard & Clean Database Initialization (Vanilla JS)', () => {
+  it('detects first-time users (hasCompletedOnboarding false/missing), cleans workspace (0 accounts, 0 transactions, 0 budgets), and launches the 4-step OnboardingWizard', async () => {
+    const map = new Map();
+    const storage = {
+      getItem: (k) => (map.has(k) ? map.get(k) : null),
+      setItem: (k, v) => map.set(k, String(v)),
+      removeItem: (k) => map.delete(k),
+    };
+
+    const firestoreStores = {
+      users: new Map(),
+      accounts: new Map([
+        ['acc_seed_1', { id: 'acc_seed_1', workspaceId: 'ws_uid_new_user_1' }],
+      ]),
+      transactions: new Map([
+        ['tx_seed_1', { id: 'tx_seed_1', workspaceId: 'ws_uid_new_user_1' }],
+      ]),
+      budgets: new Map([
+        ['bud_seed_1', { id: 'bud_seed_1', workspaceId: 'ws_uid_new_user_1' }],
+      ]),
+    };
+
+    const mockFirestoreModule = {
+      doc: (_db, col, id) => ({ col, id, path: `${col}/${id}` }),
+      getDoc: async (ref) => {
+        const store = firestoreStores[ref.col] || new Map();
+        return {
+          exists: () => store.has(ref.id),
+          data: () => store.get(ref.id),
+        };
+      },
+      setDoc: async (ref, data, options) => {
+        const store = firestoreStores[ref.col] || new Map();
+        const prev = store.get(ref.id) || {};
+        store.set(ref.id, options?.merge ? { ...prev, ...data } : { ...data });
+      },
+      collection: (_db, name) => ({ name }),
+      where: (field, op, value) => ({ field, op, value }),
+      query: (colRef, ...constraints) => ({ colRef, constraints }),
+      getDocs: async (q) => {
+        const store = firestoreStores[q.colRef.name] || new Map();
+        const docs = [];
+        for (const [id, data] of store.entries()) {
+          if (q.constraints.every((c) => data[c.field] === c.value)) {
+            docs.push({
+              id,
+              ref: { col: q.colRef.name, id, path: `${q.colRef.name}/${id}` },
+              data: () => data,
+            });
+          }
+        }
+        return { empty: docs.length === 0, docs };
+      },
+      writeBatch: () => ({
+        delete: (ref) => {
+          firestoreStores[ref.col]?.delete(ref.id);
+        },
+        commit: async () => {},
+      }),
+    };
+    const mockDb = { name: 'mock_firestore_db' };
+
+    const authService = new FirebaseAuthProfileService(storage);
+    await authService.init();
+    authService.setFirebaseRuntimeForTesting({
+      firestoreDb: mockDb,
+      firestoreModule: mockFirestoreModule,
+    });
+
+    // 1. Register a brand-new user -> users/{uid} has hasCompletedOnboarding: false
+    const { user, profile } = await authService.signInOrRegisterWithEmail({
+      isRegister: true,
+      name: 'Nuevo Usuario Honduras',
+      email: 'nuevo@pisto.hn',
+      password: 'Password123!',
+    });
+
+    assert.equal(profile.hasCompletedOnboarding, false);
+    assert.equal(shouldTriggerOnboarding(profile), true);
+    assert.equal(shouldTriggerOnboarding({ uid: 'u1' }), true);
+    assert.equal(shouldTriggerOnboarding({ uid: 'u1', hasCompletedOnboarding: true }), false);
+
+    // 2. Start with a state that has demo accounts, transactions, and budgets
+    const state = createSeedState();
+    assert.ok(state.accounts.length > 0);
+    assert.ok(state.transactions.length > 0);
+    assert.ok(Object.keys(state.budgets).length > 0);
+
+    let completedPayload = null;
+    const wizard = createOnboardingWizard({
+      authService,
+      getState: () => state,
+      onComplete: (payload) => {
+        completedPayload = payload;
+      },
+    });
+
+    // Force workspaceId to match the seeded mock Firestore docs to verify Firestore cleanup as well
+    profile.workspaceId = 'ws_uid_new_user_1';
+    const checkRes = await wizard.checkAndStartForUser(user, profile, {
+      state,
+      firestoreDb: mockDb,
+      firestoreModule: mockFirestoreModule,
+      storage,
+    });
+
+    assert.equal(checkRes.triggered, true);
+    assert.equal(checkRes.cleaned, true);
+    assert.equal(wizard.isOpen, true);
+    assert.equal(wizard.currentStepIndex, 0);
+
+    // Verify 0 accounts, 0 transactions, 0 budgets in both local state and Firestore
+    assert.equal(state.accounts.length, 0);
+    assert.equal(state.transactions.length, 0);
+    assert.deepEqual(state.budgets, {});
+    assert.equal(firestoreStores.accounts.size, 0);
+    assert.equal(firestoreStores.transactions.size, 0);
+    assert.equal(firestoreStores.budgets.size, 0);
+
+    // Verify createCleanWorkspaceState helper also produces 0 accounts, 0 transactions, 0 budgets
+    const cleanHelperState = createCleanWorkspaceState({
+      baseCurrency: 'HNL',
+      workspaceId: profile.workspaceId,
+      currentUid: user.uid,
+    });
+    assert.equal(cleanHelperState.accounts.length, 0);
+    assert.equal(cleanHelperState.transactions.length, 0);
+    assert.deepEqual(cleanHelperState.budgets, {});
+
+    // 3. Verify all 4 Wizard Steps content & navigation
+    assert.equal(ONBOARDING_STEPS.length, 4);
+    assert.equal(ONBOARDING_STEPS[0].title, '👋 ¡Bienvenido a Pisto!');
+    assert.equal(
+      ONBOARDING_STEPS[0].description,
+      'Tu plataforma de control financiero personal y familiar, privada y 100% adaptada a Honduras.'
+    );
+    const step1Html = renderOnboardingStepMarkup(0, {
+      selectedCurrency: wizard.selectedCurrency,
+      selectedCountry: wizard.selectedCountry,
+    });
+    assert.ok(step1Html.includes('👋 ¡Bienvenido a Pisto!'));
+    assert.ok(step1Html.includes('onboarding-country-select'));
+    assert.ok(step1Html.includes('onboarding-currency-select'));
+    assert.equal(wizard.selectedCurrency, 'HNL');
+    assert.equal(wizard.selectedCountry, 'HN');
+
+    // Step 2: "💳 Cuentas y Metas"
+    wizard.nextStep();
+    assert.equal(wizard.currentStepIndex, 1);
+    assert.equal(ONBOARDING_STEPS[1].title, '💳 Cuentas y Metas');
+    assert.ok(ONBOARDING_STEPS[1].description.includes('Banco Atlántida, BAC, Ficohsa'));
+    const step2Html = wizard.render();
+    assert.ok(step2Html.includes('💳 Cuentas y Metas'));
+
+    // Step 3: "📊 Transacciones y Espacio Familiar"
+    wizard.nextStep();
+    assert.equal(wizard.currentStepIndex, 2);
+    assert.equal(ONBOARDING_STEPS[2].title, '📊 Transacciones y Espacio Familiar');
+    assert.ok(ONBOARDING_STEPS[2].description.includes('Token Único de Invitación'));
+    const step3Html = wizard.render();
+    assert.ok(step3Html.includes('📊 Transacciones y Espacio Familiar'));
+
+    // Step 4: "🔒 Tus datos son tuyos" + primary button "🚀 Comenzar a usar Pisto"
+    wizard.nextStep();
+    assert.equal(wizard.currentStepIndex, 3);
+    assert.equal(ONBOARDING_STEPS[3].title, '🔒 Tus datos son tuyos');
+    assert.ok(ONBOARDING_STEPS[3].description.includes('Local-First'));
+    assert.ok(ONBOARDING_STEPS[3].description.includes('Gemini API Key'));
+    const step4Html = wizard.render();
+    assert.ok(step4Html.includes('🔒 Tus datos son tuyos'));
+    assert.ok(step4Html.includes(ONBOARDING_FINISH_BUTTON_ID));
+    assert.ok(step4Html.includes(ONBOARDING_FINISH_BUTTON_LABEL));
+
+    // 4. Finish Wizard -> closes modal, updates Firestore users/{uid} hasCompletedOnboarding: true
+    const finishedProfile = await wizard.finish({
+      firestoreDb: mockDb,
+      firestoreModule: mockFirestoreModule,
+      storage,
+    });
+
+    assert.equal(wizard.isOpen, false);
+    assert.equal(finishedProfile.hasCompletedOnboarding, true);
+    assert.equal(finishedProfile.defaultCurrency, 'HNL');
+    assert.equal(finishedProfile.country, 'HN');
+    assert.equal(firestoreStores.users.get(user.uid)?.hasCompletedOnboarding, true);
+    assert.equal(shouldTriggerOnboarding(finishedProfile), false);
+    assert.ok(completedPayload);
+    assert.equal(completedPayload.hasCompletedOnboarding, true);
+
+    // 5. Verify Empty State markup contains highlighted primary action buttons
+    const emptyStateHtml = renderDashboardEmptyStateMarkup({
+      archivedCount: 0,
+      baseCurrency: 'HNL',
+    });
+    assert.ok(emptyStateHtml.includes(EMPTY_STATE_CTA_LABELS.CREATE_FIRST_ACCOUNT));
+    assert.ok(emptyStateHtml.includes(EMPTY_STATE_CTA_LABELS.IMPORT_WITH_IMAGE_PDF));
+    assert.ok(emptyStateHtml.includes('➕ Crear Primera Cuenta'));
+    assert.ok(emptyStateHtml.includes('📷 Importar con Imagen/PDF'));
+    assert.ok(emptyStateHtml.includes('onboarding-cta-highlight'));
+
+    // 6. Verify zero console.log in OnboardingWizard and refactored CSS/JS files
+    const onboardingFiles = [
+      'src/js/components/OnboardingWizard.js',
+      'public/js/ui/onboardingWizard.js',
+      'public/js/services/authProfileService.js',
+      'public/js/repositories/storageRepository.js',
+      'src/css/styles.css',
+      'public/css/index.css',
+    ];
+    for (const relPath of onboardingFiles) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Expected zero console.log in ${relPath}`
+      );
+    }
+  });
+});
+
 

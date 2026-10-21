@@ -70,8 +70,30 @@ import {
   resolveDuplicateTransactionAction,
   DUPLICATE_TRANSACTION_ACTIONS,
 } from './ui/importAccountModal.js?v=19';
+import {
+  OnboardingWizard,
+  createOnboardingWizard,
+  shouldTriggerOnboarding,
+  ensureCleanWorkspaceForFirstTimeUser,
+  completeUserOnboarding,
+  renderDashboardEmptyStateMarkup,
+  ONBOARDING_STEPS,
+  ONBOARDING_FINISH_BUTTON_LABEL,
+  EMPTY_STATE_CTA_LABELS,
+} from './ui/onboardingWizard.js?v=19';
 
-export { openImportModal };
+export {
+  openImportModal,
+  OnboardingWizard,
+  createOnboardingWizard,
+  shouldTriggerOnboarding,
+  ensureCleanWorkspaceForFirstTimeUser,
+  completeUserOnboarding,
+  renderDashboardEmptyStateMarkup,
+  ONBOARDING_STEPS,
+  ONBOARDING_FINISH_BUTTON_LABEL,
+  EMPTY_STATE_CTA_LABELS,
+};
 
 export class FinanceAppController {
   constructor() {
@@ -115,6 +137,22 @@ export class FinanceAppController {
       showToast: (msg) => this.showToast(msg),
     });
     this.accountsView = null;
+    this.onboardingWizard = new OnboardingWizard({
+      authService: this.authService,
+      getState: () => this.state,
+      repo: this.repo,
+      showToast: (msg) => this.showToast(msg),
+      onComplete: ({ defaultCurrency }) => {
+        if (defaultCurrency) {
+          this.state.settings.baseCurrency = defaultCurrency;
+          this.state.settings.currencyFilter = defaultCurrency;
+          this.ledgerFilters.currencyFilter = defaultCurrency;
+        }
+        this.repo.saveState(this.state);
+        this.profileView?.renderProfileTab?.();
+        this.renderAll();
+      },
+    });
   }
 
   async init() {
@@ -128,6 +166,7 @@ export class FinanceAppController {
     this.setupStatementImportModal();
     this.setupValidationAriaSync();
     this.setupPrivacyConsentBanner();
+    this.onboardingWizard.init();
     this.bindGlobalEvents();
     this.applyTheme(this.state.settings?.theme || 'system');
     this.profileView.init();
@@ -144,6 +183,7 @@ export class FinanceAppController {
 
   /**
    * Synchronizes Dashboard baseCurrency, automatic transaction currency filtering, Personal View Mode,
+   * First-Time Onboarding Wizard (clean workspace: 0 accounts, 0 transactions, 0 budgets),
    * and Shared Family Workspace (`workspaceId`) realtime listener whenever the user logs in or updates their `users/{uid}` profile.
    */
   handleAuthAndProfileUpdated(user, profile, reason = '') {
@@ -151,13 +191,30 @@ export class FinanceAppController {
       const nextUid = user?.uid || profile.uid || 'local_default_user';
       const nextEmail = user?.email || profile.email || 'personal@pisto.hn';
       const nextWorkspaceId = profile.workspaceId || 'ws_default';
+      const isFirstTimeUser = shouldTriggerOnboarding(profile);
 
       this.state.settings.currentUid = nextUid;
       this.state.settings.personalViewMode = Boolean(profile.personalViewMode);
       this.state.settings.workspaceId = nextWorkspaceId;
 
-      // Sync local seed/current-user transactions into the active workspace when linking or signing in
-      if (Array.isArray(this.state.transactions)) {
+      if (isFirstTimeUser && reason !== 'profile-saved') {
+        // 1a. Guarantee initial workspace state is completely CLEAN (0 accounts, 0 transactions, 0 budgets)
+        this.state.accounts = [];
+        this.state.transactions = [];
+        this.state.budgets = {};
+        if (Array.isArray(this.state.categories)) {
+          this.state.categories = this.state.categories.map((cat) => ({
+            ...cat,
+            defaultBudget: 0,
+          }));
+        }
+        // 1b. Automatically start the interactive Onboarding Wizard
+        void this.onboardingWizard?.checkAndStartForUser(user, profile, {
+          state: this.state,
+          repo: this.repo,
+        });
+      } else if (Array.isArray(this.state.transactions)) {
+        // Sync local current-user transactions into the active workspace when linking or signing in
         this.state.transactions.forEach((tx) => {
           if (tx.workspaceId === 'ws_default' || tx.createdByUid === nextUid) {
             tx.workspaceId = nextWorkspaceId;
@@ -183,7 +240,7 @@ export class FinanceAppController {
 
       // Ensure member transactions are migrated & subscribed via workspaceId query
       const { firestoreDb, firestoreModule, storage } = this.authService.getFirestoreContext();
-      if (nextWorkspaceId && nextWorkspaceId !== 'ws_default') {
+      if (!isFirstTimeUser && nextWorkspaceId && nextWorkspaceId !== 'ws_default') {
         migrateTransactionsToSharedWorkspace(
           nextWorkspaceId,
           [nextUid],
@@ -2267,9 +2324,26 @@ export class FinanceAppController {
   }
 
   /**
-   * Renders Tab 1: Pisto Signature Interactive Donut + Category Grid with Edit/Delete actions.
+   * Renders Tab 1: Pisto Signature Interactive Donut + Category Grid with Edit/Delete actions,
+   * plus the clean workspace Empty State hero when the user has 0 accounts.
    */
   renderCategoriesView(analytics) {
+    const emptyStateBanner = document.getElementById('dashboard-empty-state-banner');
+    const activeAccountsCount = filterActiveAccounts(this.state.accounts || []).length;
+    if (emptyStateBanner) {
+      if (activeAccountsCount === 0) {
+        const archivedCount = filterArchivedAccounts(this.state.accounts || []).length;
+        emptyStateBanner.classList.remove('is-hidden');
+        emptyStateBanner.innerHTML = renderDashboardEmptyStateMarkup({
+          archivedCount,
+          baseCurrency: analytics.baseCurrency || this.state.settings?.baseCurrency || 'HNL',
+        });
+      } else {
+        emptyStateBanner.classList.add('is-hidden');
+        emptyStateBanner.innerHTML = '';
+      }
+    }
+
     const donutMount = document.getElementById('donut-chart-mount');
     if (donutMount) {
       donutMount.innerHTML = renderPistoDonutChart(analytics);
@@ -2482,25 +2556,10 @@ export class FinanceAppController {
     );
 
     if (visibleAccounts.length === 0) {
-      accountsGrid.innerHTML = `
-        <div class="empty-state-box" style="grid-column: 1 / -1;">
-          <p>
-            ${
-              archivedCount > 0
-                ? `No tienes cuentas activas visibles. Tienes <strong>${archivedCount} cuenta(s) archivada(s)</strong> que conservan su historial intacto.`
-                : 'Aún no tienes cuentas activas registradas.'
-            }
-          </p>
-          <div style="display: flex; gap: 0.6rem; justify-content: center; flex-wrap: wrap; margin-top: 0.75rem;">
-            ${
-              archivedCount > 0
-                ? `<button type="button" class="btn-secondary btn-sm" data-action="toggle-show-archived-accounts">📦 Mostrar Cuentas Archivadas (${archivedCount})</button>`
-                : ''
-            }
-            <button type="button" class="btn-primary btn-sm" data-action="open-account-modal">+ Nueva Cuenta / Meta</button>
-          </div>
-        </div>
-      `;
+      accountsGrid.innerHTML = renderDashboardEmptyStateMarkup({
+        archivedCount,
+        baseCurrency: this.state.settings?.baseCurrency || 'HNL',
+      });
       return;
     }
 
