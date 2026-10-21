@@ -3,8 +3,7 @@
  * para extracción inteligente de cuentas desde Imagen/PDF con Fallback de Diagnóstico Local.
  *
  * Implementa:
- * 1. Inicialización con trazabilidad en consola:
- *    `console.log("🤖 Agente ADK: Inicializando modal de importación...")` y notificación toast.
+ * 1. Inicialización silenciosa sin llamadas a consola, notificando mediante el sistema de UI toast.
  * 2. Procesamiento con Agente ADK Vision (`processAccountWithAgentADK`):
  *    - Si la API Key de Gemini / Genkit está configurada: procesa el archivo con el agente ADK Vision.
  *    - Si NO hay API Key configurada o falla la conexión: activa el modo de prueba / agente local
@@ -67,7 +66,7 @@ export interface AgentADKOptions {
 
 export interface AgentADKResult {
   data: ExtractedAccountData;
-  source: 'adk-gemini-vision' | 'adk-local-ocr' | 'adk-local-fallback';
+  source: string;
   isDemoFallback: boolean;
   message: string;
 }
@@ -82,46 +81,47 @@ export async function processAccountWithAgentADK(
   const apiKey = String(options.apiKey || '').trim();
   const fallbackText = String(options.ocrTextFallback || options.ocrFallbackText || '').trim();
 
-  // 1. Si hay API Key configurada (o endpoint disponible), intentar extracción con Agente ADK Vision
+  // 1. Si hay API Key configurada, intentar extracción con Agente ADK Vision
   if (apiKey && fileOrDataUrl) {
     try {
-      const visionResult = await extractAccountFromFile(fileOrDataUrl, {
+      const extracted = await extractAccountFromFile(fileOrDataUrl, {
         apiKey,
-        ocrTextFallback: fallbackText,
+        ocrFallbackText: fallbackText,
         fetchImpl: options.fetchImpl,
       });
       return {
-        data: visionResult.data,
-        source: 'adk-gemini-vision',
+        data: extracted.data,
+        source: `adk:${extracted.source}`,
         isDemoFallback: false,
-        message: '🤖 Agente ADK Vision: Estado de cuenta analizado exitosamente.',
+        message: '🤖 Agente ADK Vision: Estado de cuenta extraído con éxito.',
       };
-    } catch (error) {
-      console.warn(
-        '[Agente ADK] Falló la conexión con Gemini Vision; activando fallback local de diagnóstico:',
-        error
-      );
+    } catch {
+      // Fallback silencioso a modo local sin ensuciar la consola
     }
   }
 
-  // 2. Si existe texto OCR/PDF extraído con datos válidos de cuenta (saldo > 0 o número de cuenta), usarlo
-  if (fallbackText.length > 0) {
+  // 2. Si hay texto OCR válido disponible con número de cuenta o saldo reconocible
+  if (fallbackText.length >= 12) {
     try {
-      const parsedFromOcr = parseAccountDataFromTextFallback(fallbackText);
-      if (parsedFromOcr.currentBalance > 0 || parsedFromOcr.accountNumber.length >= 4) {
+      const parsedFromText = parseAccountDataFromTextFallback(fallbackText);
+      const hasMeaningfulData =
+        Boolean(parsedFromText.accountNumber) ||
+        parsedFromText.currentBalance > 0 ||
+        parsedFromText.detectedTransactions.length > 0;
+      if (hasMeaningfulData) {
         return {
-          data: parsedFromOcr,
-          source: 'adk-local-ocr',
+          data: parsedFromText,
+          source: 'adk-ocr-local',
           isDemoFallback: false,
-          message: '🤖 Agente ADK Local: Datos extraídos del documento.',
+          message: '🤖 Agente ADK (OCR Local): Datos extraídos del documento.',
         };
       }
     } catch {
-      // Continuar al fallback estático de demostración
+      // Continúa al fallback estático de demostración
     }
   }
 
-  // 3. Fallback de Diagnóstico Local del Agente ADK ("Banco Atlántida - Cuenta de Ahorro SOS", L 3,901.33)
+  // 3. Modo de prueba / Agente Local de demostración ("Banco Atlántida - Cuenta de Ahorro SOS", L 3,901.33)
   const demoData = getDemoAccountExtraction();
   return {
     data: demoData,
@@ -138,10 +138,9 @@ export async function processAccountWithAgentADK(
 export function useAccountAgentADK(defaultOptions: AgentADKOptions = {}) {
   return {
     /**
-     * Registra en consola y muestra el toast confirmando la apertura del modal de importación.
+     * Inicializa el modal de importación sin llamadas a consola.
      */
     initializeModal(notifyToast?: (message: string) => void): string {
-      console.log(ADK_INIT_LOG_MESSAGE);
       const toastFn = notifyToast || defaultOptions.notifyToast;
       if (typeof toastFn === 'function') {
         toastFn(ADK_INIT_LOG_MESSAGE);
