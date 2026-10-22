@@ -145,6 +145,19 @@ import {
   confirmAndPersistStatementBatch,
   confirmAndPersistSmartScanTransaction,
 } from './ui/smartScanModal.js';
+import {
+  AI_COACH_CTA_BUTTON_ID,
+  AI_COACH_CTA_LABEL,
+  AI_TECHNICAL_DETAILS_ID,
+  AI_TECHNICAL_SUMMARY_LABEL,
+  formatBudgetCategoryStatusHtml,
+  renderBudgetLimitCardMarkup,
+  renderBudgetsListMarkup,
+  renderAiInsightsEmptyStateMarkup,
+  renderAiInsightsResultMarkup,
+  renderTokenTechnicalStatsMarkup,
+  renderBudgetsAndAiPanelMarkup,
+} from './ui/budgetsView.js';
 
 export {
   openImportModal,
@@ -211,6 +224,17 @@ export {
   renderSmartScanModalMarkup,
   confirmAndPersistStatementBatch,
   confirmAndPersistSmartScanTransaction,
+  AI_COACH_CTA_BUTTON_ID,
+  AI_COACH_CTA_LABEL,
+  AI_TECHNICAL_DETAILS_ID,
+  AI_TECHNICAL_SUMMARY_LABEL,
+  formatBudgetCategoryStatusHtml,
+  renderBudgetLimitCardMarkup,
+  renderBudgetsListMarkup,
+  renderAiInsightsEmptyStateMarkup,
+  renderAiInsightsResultMarkup,
+  renderTokenTechnicalStatsMarkup,
+  renderBudgetsAndAiPanelMarkup,
 };
 
 export class FinanceAppController {
@@ -1458,6 +1482,20 @@ export class FinanceAppController {
   }
 
   /**
+   * Obtiene el ID del workspace activo desde authService o desde el estado en memoria.
+   * @returns {string}
+   */
+  getActiveWorkspaceId() {
+    return String(
+      this.authService?.getActiveWorkspaceId?.() ||
+        this.state?.activeWorkspaceId ||
+        this.state?.workspaceId ||
+        this.state?.settings?.workspaceId ||
+        'ws_default'
+    );
+  }
+
+  /**
    * Configures the unified Smart Scan button (#btn-smart-scan) in TransactionsView
    * and the single confirmation modal (#smart-scan-dialog) via SmartScanModal.
    */
@@ -1471,6 +1509,7 @@ export class FinanceAppController {
       doc: document,
       getState: () => this.state,
       getWorkspaceId: () => this.getActiveWorkspaceId(),
+      authService: this.authService || null,
       firestoreDb: this.authService?.db || null,
       firestoreModule: this.authService?.firestoreModule || null,
       recordTransactionFn: (txInput) => this.recordWorkspaceTransaction(txInput),
@@ -2986,83 +3025,34 @@ export class FinanceAppController {
   }
 
   /**
-   * Renders Tab 4: Category Budgets & Genkit Financial Coach with Token Audit.
+   * Renders Tab 4: Category Budgets & Genkit Financial Coach with Collapsible Technical Details.
    */
   renderBudgetsAndAiView(analytics, micro) {
     const budgetsMount = document.getElementById('budgets-list-mount');
     const cur = analytics.baseCurrency;
 
     if (budgetsMount) {
-      budgetsMount.innerHTML = analytics.expenseCategories
-        .map((cat) => {
-          const pct = Math.min(100, cat.budgetPct);
-          return `
-            <div class="budget-item-card status-border-${cat.budgetStatus}">
-              <div class="budget-item-header">
-                <div class="budget-cat-title">
-                  <span class="budget-dot" style="background-color: ${cat.color}"></span>
-                  <strong>${cat.name}</strong>
-                </div>
-                <div class="budget-input-group">
-                  <label for="budget-input-${cat.id}" class="sr-only">Límite mensual para ${cat.name}</label>
-                  <span class="currency-prefix">${cur}</span>
-                  <input
-                    type="number"
-                    id="budget-input-${cat.id}"
-                    class="budget-inline-input"
-                    min="0"
-                    step="10"
-                    value="${cat.budgetLimit}"
-                    data-budget-category="${cat.id}"
-                  />
-                </div>
-              </div>
-              <progress class="native-progress progress-${cat.budgetStatus}" max="100" value="${pct}"></progress>
-              <div class="budget-item-footer">
-                <span>Gastado: <strong>${Money.format(cat.amount, cur)}</strong></span>
-                <span class="budget-status-text status-${cat.budgetStatus}">
-                  ${
-                    cat.budgetLimit <= 0
-                      ? 'Sin límite asignado'
-                      : cat.amount <= cat.budgetLimit
-                        ? `Disponible: ${Money.format(cat.budgetLimit - cat.amount, cur)} (${cat.budgetPct}%)`
-                        : `Excedido por ${Money.format(cat.amount - cat.budgetLimit, cur)} (${cat.budgetPct}%)`
-                  }
-                </span>
-              </div>
-            </div>
-          `;
-        })
-        .join('');
+      budgetsMount.innerHTML = renderBudgetsListMarkup(analytics.expenseCategories, cur);
     }
 
-    // Token Compression Audit Panel
+    // Technical Token Compression Audit Panel (inside collapsible <details id="ai-technical-details">)
     const auditMount = document.getElementById('token-compression-stats');
     if (auditMount) {
-      auditMount.innerHTML = `
-        <div class="token-stat-pill">
-          <span>Historial bruto:</span>
-          <strong>~${micro.rawTokensEstimate} tokens</strong>
-        </div>
-        <div class="token-stat-pill highlight">
-          <span>Micro-Payload Genkit:</span>
-          <strong>${micro.compactTokensEstimate} tokens (-${micro.savingsPct}%)</strong>
-        </div>
-        <div class="token-stat-pill">
-          <span>Parses locales (0 tokens):</span>
-          <strong>${this.state.aiTelemetry?.localParsesSaved || 0}</strong>
-        </div>
-      `;
+      auditMount.innerHTML = renderTokenTechnicalStatsMarkup(
+        micro,
+        this.state.aiTelemetry?.localParsesSaved || 0
+      );
     }
 
+    const payloadCode = document.getElementById('micro-payload-code');
     const payloadPreview = document.getElementById('micro-payload-preview');
-    if (payloadPreview) {
-      payloadPreview.textContent = micro.fingerprint;
+    if (payloadCode) {
+      payloadCode.textContent = micro?.fingerprint || '';
+    } else if (payloadPreview) {
+      payloadPreview.textContent = micro?.fingerprint || '';
     }
 
-    if (this.lastInsightsResult) {
-      this.renderInsightsOutput(this.lastInsightsResult);
-    }
+    this.renderInsightsOutput(this.lastInsightsResult);
   }
 
   /**
@@ -3263,33 +3253,7 @@ export class FinanceAppController {
   renderInsightsOutput(result) {
     const mount = document.getElementById('ai-insights-result-mount');
     if (!mount) return;
-
-    const tipsHtml = (result.tips || [])
-      .map((tip) => `<li>${tip}</li>`)
-      .join('');
-
-    mount.innerHTML = `
-      <div class="ai-insight-card status-border-${result.status || 'healthy'}">
-        <div class="ai-insight-header">
-          <div class="ai-score-circle">
-            <strong>${result.score}</strong>
-            <span>/100</span>
-          </div>
-          <div class="ai-headline-box">
-            <span class="ai-source-tag">
-              Fuente: ${result.source} · ${result.cached ? 'Caché (0 tokens)' : `${result.tokensUsed || 0} tokens`}
-            </span>
-            <h4>${result.headline}</h4>
-          </div>
-        </div>
-        <ul class="ai-tips-list">
-          ${tipsHtml}
-        </ul>
-        <div class="ai-opportunity-banner">
-          <strong>🎯 Oportunidad de ahorro:</strong> ${result.savingOpportunity}
-        </div>
-      </div>
-    `;
+    mount.innerHTML = renderAiInsightsResultMarkup(result);
   }
 
   async fetchServerAiStatus() {
@@ -3345,12 +3309,30 @@ export class FinanceAppController {
 
   showToast(message) {
     const toast = document.getElementById('app-toast');
-    if (!toast) return;
-    toast.textContent = message;
-    toast.classList.add('is-visible');
+    if (toast) {
+      toast.textContent = message;
+      toast.style.zIndex = '9999';
+      toast.style.filter = 'none';
+      toast.style.backdropFilter = 'none';
+      toast.classList.add('is-visible');
+    }
+
+    const modalOverlayToast = document.getElementById('smart-scan-toast-overlay');
+    if (modalOverlayToast) {
+      modalOverlayToast.textContent = message;
+      modalOverlayToast.style.zIndex = '9999';
+      modalOverlayToast.style.filter = 'none';
+      modalOverlayToast.style.backdropFilter = 'none';
+      modalOverlayToast.style.opacity = '1';
+      modalOverlayToast.classList.remove('is-hidden');
+      modalOverlayToast.classList.add('is-visible');
+    }
+
     clearTimeout(this.toastTimer);
     this.toastTimer = setTimeout(() => {
-      toast.classList.remove('is-visible');
+      toast?.classList.remove('is-visible');
+      modalOverlayToast?.classList.remove('is-visible');
+      modalOverlayToast?.classList.add('is-hidden');
     }, 3200);
   }
 }

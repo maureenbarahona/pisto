@@ -5836,3 +5836,1406 @@ describe('33. Miniaturas de PDF (pdfjs-dist), Extracción Completa de Campos, Cr
     }
   });
 });
+
+describe('34. Motor de Extracción de Estados de Cuenta en PDF (PDF.js Nativo + Pattern Learning en bank_templates)', () => {
+  it('extrae la capa de texto vectorial nativa con pdfTextExtractor.js y aplica bankTemplateMatcher.js a costo 0 para el PDF de Banco Promerica', async () => {
+    const {
+      extractNativePdfTextLayer,
+      organizeTextItemsIntoLines,
+      organizeLinesIntoHierarchicalBlocks,
+    } = await import('../src/js/services/pdfTextExtractor.js');
+    const {
+      PROMERICA_CREDIT_CARD_SAMPLE_EXTRACTION,
+      processPdfStatementWithPatternLearning,
+    } = await import('../src/js/services/bankTemplateMatcher.js');
+
+    // Simular documento PDF vectorial nativo de Banco Promerica con coordenadas x/y en page.getTextContent()
+    const promericaTextItems = [
+      { str: 'Banco Promerica', transform: [1, 0, 0, 1, 40, 760] },
+      { str: 'ESTADO DE CUENTA DE TARJETA DE CREDITO', transform: [1, 0, 0, 1, 40, 740] },
+      { str: 'MI TARJETA PLATINUM VISA GAS/EDU', transform: [1, 0, 0, 1, 40, 718] },
+      { str: 'CUENTA No.: 310074459', transform: [1, 0, 0, 1, 40, 698] },
+      { str: 'TITULAR: BARAHONA ALVARADO MAUREEN FLOR', transform: [1, 0, 0, 1, 40, 678] },
+      { str: 'FECHA DE CORTE: 2026-09-24', transform: [1, 0, 0, 1, 40, 658] },
+      { str: 'FECHA LIMITE DE PAGO: 2026-10-14', transform: [1, 0, 0, 1, 40, 638] },
+      { str: 'MONEDA: HNL', transform: [1, 0, 0, 1, 40, 618] },
+      { str: 'SALDO ACTUAL: L 1,620.39', transform: [1, 0, 0, 1, 40, 598] },
+      { str: 'PAGO MINIMO: L 350.00', transform: [1, 0, 0, 1, 40, 578] },
+      { str: 'LIMITE DE CREDITO: L 188,600.00', transform: [1, 0, 0, 1, 40, 558] },
+      { str: 'DETALLE DE MOVIMIENTOS DEL PERIODO', transform: [1, 0, 0, 1, 40, 520] },
+      {
+        str: '2026-09-05 12:00 AM SEGURO DE DEUDA L 1,620.42',
+        transform: [1, 0, 0, 1, 40, 495],
+      },
+    ];
+
+    const lines = organizeTextItemsIntoLines(promericaTextItems);
+    assert.equal(lines.length, 13);
+    const blocks = organizeLinesIntoHierarchicalBlocks(lines);
+    assert.ok(blocks.header.some((l) => l.includes('Banco Promerica')));
+    assert.ok(blocks.movements.some((l) => l.includes('SEGURO DE DEUDA')));
+
+    const mockPdfjsLib = {
+      GlobalWorkerOptions: { workerSrc: '' },
+      getDocument: () => ({
+        promise: Promise.resolve({
+          numPages: 1,
+          getPage: async () => ({
+            getTextContent: async () => ({ items: promericaTextItems }),
+          }),
+        }),
+      }),
+    };
+
+    const promericaPdfBlob = new Blob(['%PDF-1.7 Banco Promerica vector statement'], {
+      type: 'application/pdf',
+    });
+    promericaPdfBlob.name = 'estado_cuenta_promerica_310074459.pdf';
+
+    const textLayer = await extractNativePdfTextLayer(promericaPdfBlob, {
+      pdfjsLib: mockPdfjsLib,
+    });
+    assert.equal(textLayer.isVectorPdf, true);
+    assert.equal(textLayer.pageCount, 1);
+    assert.ok(textLayer.firstPageText.includes('MI TARJETA PLATINUM VISA GAS/EDU'));
+
+    let externalApiCalled = false;
+    const extracted = await processPdfStatementWithPatternLearning(
+      promericaPdfBlob,
+      { accounts: [] },
+      {
+        pdfjsLib: mockPdfjsLib,
+        geminiFallbackRunner: async () => {
+          externalApiCalled = true;
+          return {};
+        },
+      }
+    );
+
+    // Verificar 0 Costo / Local-First sin llamar a Gemini API
+    assert.equal(externalApiCalled, false);
+    assert.equal(extracted.usedLocalTemplate, true);
+    assert.equal(extracted.usedGeminiFallback, false);
+
+    // Verificar coincidencia exacta con el objeto de datos de Banco Promerica
+    assert.equal(extracted.bankName, PROMERICA_CREDIT_CARD_SAMPLE_EXTRACTION.bankName);
+    assert.equal(extracted.documentType, PROMERICA_CREDIT_CARD_SAMPLE_EXTRACTION.documentType);
+    assert.deepEqual(extracted.accountInfo, PROMERICA_CREDIT_CARD_SAMPLE_EXTRACTION.accountInfo);
+    assert.deepEqual(extracted.transactions, PROMERICA_CREDIT_CARD_SAMPLE_EXTRACTION.transactions);
+  });
+
+  it('aprende automáticamente nuevos formatos con Gemini 2.5 Flash en bank_templates y muestra la alerta de creación de cuenta con límite L 188,600.00 en SmartScanModal', async () => {
+    const fs = await import('node:fs/promises');
+    const { processPdfStatementWithPatternLearning } = await import(
+      '../src/js/services/bankTemplateMatcher.js'
+    );
+    const {
+      formatMissingAccountAlertText,
+      formatMissingBankAccountPrompt,
+      confirmAndPersistStatementBatch,
+    } = await import('../src/js/components/SmartScanModal.js');
+
+    // 1. Simular un formato de banco nuevo ("Banco Cuscatlán Honduras") no existente aún en bank_templates
+    const mockStorageMap = new Map();
+    const mockStorage = {
+      getItem: (k) => (mockStorageMap.has(k) ? mockStorageMap.get(k) : null),
+      setItem: (k, v) => mockStorageMap.set(k, String(v)),
+      removeItem: (k) => mockStorageMap.delete(k),
+    };
+    const firestoreSavedTemplates = new Map();
+    const mockFirestoreModule = {
+      doc: (_db, ...segments) => ({ path: segments.join('/') }),
+      setDoc: async (ref, data) => {
+        firestoreSavedTemplates.set(ref.path, data);
+      },
+    };
+
+    const newBankPdfText = [
+      'BANCO CUSCATLAN HONDURAS',
+      'ESTADO DE CUENTA TARJETA INFINITE',
+      'TARJETA CUSCATLAN INFINITE MILLAS',
+      'CUENTA: 5544332211',
+      'TITULAR: BARAHONA ALVARADO MAUREEN FLOR',
+      'FECHA DE CORTE: 2026-10-15',
+      'FECHA LIMITE DE PAGO: 2026-11-05',
+      'MONEDA: HNL',
+      'SALDO ACTUAL: L 4,250.00',
+      'PAGO MINIMO: L 500.00',
+      'LIMITE DE CREDITO: L 250,000.00',
+      '2026-10-10 12:00 AM PRICEMART TEGUCIGALPA L 4,250.00',
+    ].join('\n');
+
+    let geminiCalls = 0;
+    const firstRead = await processPdfStatementWithPatternLearning(
+      newBankPdfText,
+      {},
+      {
+        storage: mockStorage,
+        firestoreDb: {},
+        firestoreModule: mockFirestoreModule,
+        geminiFallbackRunner: async () => {
+          geminiCalls += 1;
+          return {
+            bankName: 'Banco Cuscatlán Honduras',
+            documentType: 'Estado de Cuenta (Tarjeta de Crédito)',
+            accountInfo: {
+              accountName: 'TARJETA CUSCATLAN INFINITE MILLAS',
+              accountNumber: '5544332211',
+              owner: 'BARAHONA ALVARADO MAUREEN FLOR',
+              cutoffDate: '2026-10-15',
+              paymentDueDate: '2026-11-05',
+              currency: 'HNL',
+              currentBalance: 4250.0,
+              minimumPayment: 500.0,
+              creditLimit: 250000.0,
+            },
+            transactions: [
+              {
+                date: '2026-10-10',
+                time: '12:00 AM',
+                concept: 'PRICEMART TEGUCIGALPA',
+                amount: 4250.0,
+                type: 'expense',
+                currency: 'HNL',
+              },
+            ],
+          };
+        },
+      }
+    );
+
+    assert.equal(geminiCalls, 1);
+    assert.equal(firstRead.usedGeminiFallback, true);
+    assert.ok(firstRead.learnedTemplate);
+    assert.equal(firestoreSavedTemplates.size, 1);
+
+    // Segunda lectura del mismo banco: debe extraerse 100% de forma local y gratis sin volver a llamar a Gemini
+    const secondRead = await processPdfStatementWithPatternLearning(
+      newBankPdfText,
+      {},
+      {
+        storage: mockStorage,
+        geminiFallbackRunner: async () => {
+          geminiCalls += 1;
+          return {};
+        },
+      }
+    );
+
+    assert.equal(geminiCalls, 1);
+    assert.equal(secondRead.usedLocalTemplate, true);
+    assert.equal(secondRead.usedGeminiFallback, false);
+    assert.equal(secondRead.bankName, 'Banco Cuscatlán Honduras');
+    assert.equal(secondRead.accountInfo.accountNumber, '5544332211');
+    assert.equal(secondRead.accountInfo.creditLimit, 250000);
+    assert.equal(secondRead.transactions.length, 1);
+    assert.equal(secondRead.transactions[0].amount, 4250);
+
+    // 2. Verificar alerta de UI para la cuenta N.º 310074459 (Banco Promerica) y creación con límite L 188,600.00
+    assert.equal(
+      formatMissingAccountAlertText('310074459', 'Banco Promerica'),
+      '⚠️ La cuenta N.º 310074459 (Banco Promerica) no existe. ¿Deseas crearla automáticamente?'
+    );
+    assert.equal(
+      formatMissingBankAccountPrompt('310074459', 'Banco Promerica'),
+      '⚠️ La cuenta N.º 310074459 (Banco Promerica) no existe. ¿Deseas crearla automáticamente?'
+    );
+
+    const workspaceState = { accounts: [], transactions: [] };
+    const persistedPromerica = await confirmAndPersistStatementBatch({
+      extractedData: {
+        bankName: 'Banco Promerica',
+        documentType: 'Estado de Cuenta (Tarjeta de Crédito)',
+        accountInfo: {
+          accountName: 'MI TARJETA PLATINUM VISA GAS/EDU',
+          accountNumber: '310074459',
+          owner: 'BARAHONA ALVARADO MAUREEN FLOR',
+          cutoffDate: '2026-09-24',
+          paymentDueDate: '2026-10-14',
+          currency: 'HNL',
+          currentBalance: 1620.39,
+          minimumPayment: 350.0,
+          creditLimit: 188600.0,
+        },
+      },
+      statementRows: [
+        {
+          selected: true,
+          date: '2026-09-05',
+          time: '12:00 AM',
+          concept: 'SEGURO DE DEUDA',
+          amount: 1620.42,
+          type: 'expense',
+          currency: 'HNL',
+        },
+      ],
+      state: workspaceState,
+      createMissingAccount: true,
+      storage: mockStorage,
+    });
+
+    assert.equal(persistedPromerica.saved, true);
+    assert.ok(persistedPromerica.createdAccount);
+    assert.equal(persistedPromerica.createdAccount.type, 'card');
+    assert.equal(persistedPromerica.createdAccount.institution, 'Banco Promerica');
+    assert.equal(persistedPromerica.createdAccount.accountNumber, '310074459');
+    assert.equal(
+      persistedPromerica.createdAccount.accountName,
+      'MI TARJETA PLATINUM VISA GAS/EDU'
+    );
+    assert.equal(persistedPromerica.createdAccount.creditLimit, 188600.0);
+    assert.equal(persistedPromerica.createdAccount.minimumPayment, 350.0);
+    assert.equal(persistedPromerica.createdAccount.cutoffDate, '2026-09-24');
+    assert.equal(persistedPromerica.createdAccount.paymentDueDate, '2026-10-14');
+    assert.equal(persistedPromerica.savedTransactions.length, 1);
+    assert.equal(persistedPromerica.savedTransactions[0].amount, 1620.42);
+    assert.equal(persistedPromerica.savedTransactions[0].note, 'SEGURO DE DEUDA');
+
+    // 3. Verificar cero llamadas a console.log en todos los módulos entregados
+    for (const relPath of [
+      'src/js/services/pdfTextExtractor.js',
+      'src/js/services/bankTemplateMatcher.js',
+      'src/js/services/smartScanExtractor.js',
+      'src/js/components/SmartScanModal.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Expected zero console.log in ${relPath}`
+      );
+    }
+  });
+});
+
+// ============================================================================
+// 35. Corrección UI/UX en SmartScanModal.js: Toast en Primer Plano (z-index: 9999),
+//     Limpieza de Cajas Redundantes, Botón Único #btn-process-file y Doble Abstracción
+// ============================================================================
+describe('35. SmartScanModal UI/UX, First-Plane Toast (z-index: 9999), #btn-process-file & Dual-Abstraction Evaluation', () => {
+  it('elimina cajas redundantes, renderiza #btn-process-file ("⚡ Procesar y Evaluar Documento"), corrige getActiveWorkspaceId, muestra alertas en primer plano (z-index: 9999) sin blur y ejecuta doble abstracción', async () => {
+    const {
+      SmartScanModal,
+      SMART_SCAN_PROCESS_BUTTON_ID,
+      SMART_SCAN_PROCESS_BUTTON_LABEL,
+      SMART_SCAN_TOAST_OVERLAY_ID,
+      abstractDocumentHeaderAccountData,
+      abstractDocumentBodyTransactions,
+      renderSmartScanModalMarkup,
+      renderStatementTransactionsRowsMarkup,
+    } = await import('../src/js/components/SmartScanModal.js');
+    const { FinanceAppController } = await import('../public/js/app.js');
+
+    // 1. Verificar limpieza de UI y botón único #btn-process-file en el markup
+    const markup = renderSmartScanModalMarkup();
+    assert.equal(SMART_SCAN_PROCESS_BUTTON_ID, 'btn-process-file');
+    assert.equal(SMART_SCAN_PROCESS_BUTTON_LABEL, '⚡ Procesar y Evaluar Documento');
+    assert.ok(markup.includes('id="btn-process-file"'));
+    assert.ok(markup.includes('⚡ Procesar y Evaluar Documento'));
+    assert.ok(markup.includes(`id="${SMART_SCAN_TOAST_OVERLAY_ID}"`));
+    assert.ok(markup.includes('z-index: 9999'));
+    assert.equal(markup.includes('id="smart-scan-match-badges"'), false);
+    assert.equal(markup.includes('🔎 Selección o creación de cuenta'), false);
+
+    // 2. Verificar que FinanceAppController.prototype.getActiveWorkspaceId exista y no lance error
+    assert.equal(typeof FinanceAppController.prototype.getActiveWorkspaceId, 'function');
+    const fakeControllerCtx = {
+      authService: null,
+      state: { activeWorkspaceId: 'ws_promerica_hn' },
+    };
+    assert.equal(
+      FinanceAppController.prototype.getActiveWorkspaceId.call(fakeControllerCtx),
+      'ws_promerica_hn'
+    );
+
+    // Verificar que SmartScanModal también maneje un callback getWorkspaceId defectuoso sin lanzar error
+    const modalInstance = new SmartScanModal({
+      getState: () => ({
+        activeWorkspaceId: 'ws_fallback_safe',
+        accounts: [
+          {
+            id: 'acc_promerica_4459',
+            name: 'Promerica Platinum Visa',
+            type: 'card',
+            institution: 'Banco Promerica',
+            accountNumber: '310074459',
+            currency: 'HNL',
+            archived: false,
+          },
+        ],
+      }),
+      getWorkspaceId: () => {
+        throw new TypeError('this.getActiveWorkspaceId is not a function');
+      },
+    });
+    assert.equal(modalInstance.getActiveWorkspaceId(), 'ws_fallback_safe');
+    assert.equal(modalInstance.getWorkspaceId(), 'ws_fallback_safe');
+
+    // 3. Verificar Doble Abstracción:
+    //    a) Encabezado (Banco, Número de Cuenta/Tarjeta, Moneda, Tipo de Cuenta y Cuenta Asociada)
+    //    b) Detalle del Contenido (Fechas, Conceptos/Comercios, Montos y Tipo Ingreso/Gasto)
+    const sampleExtracted = {
+      bankName: 'Banco Promerica',
+      statementDocumentType: 'Estado de Cuenta (Tarjeta de Crédito)',
+      accountInfo: {
+        accountName: 'MI TARJETA PLATINUM VISA GAS/EDU',
+        accountNumber: '310074459',
+        currency: 'HNL',
+        creditLimit: 188600.0,
+      },
+      transactions: [
+        {
+          date: '2026-09-05',
+          concept: 'SEGURO DE DEUDA',
+          amount: 1620.42,
+          type: 'expense',
+          currency: 'HNL',
+        },
+        {
+          date: '2026-09-12',
+          concept: 'ABONO PAGO GRACIAS',
+          amount: 350.0,
+          type: 'income',
+          currency: 'HNL',
+        },
+      ],
+    };
+
+    const headerData = abstractDocumentHeaderAccountData(
+      sampleExtracted,
+      modalInstance.getState()
+    );
+    assert.equal(headerData.bankName, 'Banco Promerica');
+    assert.equal(headerData.accountNumber, '310074459');
+    assert.equal(headerData.last4Digits, '4459');
+    assert.equal(headerData.currency, 'HNL');
+    assert.equal(headerData.accountType, 'card');
+    assert.equal(headerData.matchedAccountId, 'acc_promerica_4459');
+
+    const bodyRows = abstractDocumentBodyTransactions(sampleExtracted, headerData);
+    assert.equal(bodyRows.length, 2);
+    assert.equal(bodyRows[0].fecha, '2026-09-05');
+    assert.equal(bodyRows[0].comercio, 'SEGURO DE DEUDA');
+    assert.equal(bodyRows[0].monto, 1620.42);
+    assert.equal(bodyRows[0].tipo, 'expense');
+    assert.equal(bodyRows[1].fecha, '2026-09-12');
+    assert.equal(bodyRows[1].comercio, 'ABONO PAGO GRACIAS');
+    assert.equal(bodyRows[1].monto, 350.0);
+    assert.equal(bodyRows[1].tipo, 'income');
+
+    const tableRowsHtml = renderStatementTransactionsRowsMarkup(bodyRows);
+    assert.ok(tableRowsHtml.includes('SEGURO DE DEUDA'));
+    assert.ok(tableRowsHtml.includes('1620.42'));
+    assert.ok(tableRowsHtml.includes('ABONO PAGO GRACIAS'));
+
+    // 4. Verificar CSS de primer plano (z-index: 9999 y filter/backdrop-filter: none)
+    const cssContent = await fs.readFile(
+      new URL('../public/css/index.css', import.meta.url),
+      'utf8'
+    );
+    assert.ok(cssContent.includes('.smart-scan-toast-overlay'));
+    assert.ok(cssContent.includes('z-index: 9999'));
+    assert.ok(cssContent.includes('backdrop-filter: none !important'));
+  });
+});
+
+// ============================================================================
+// 36. Extracción Nativa de PDF Vectorial (pdfExtractor.js), Parser Específico
+//     (bankParsers.js) y Handler de #btn-process-file en SmartScanModal.js
+// ============================================================================
+describe('36. Vector PDF Extraction (pdfExtractor.js), Bank Statement Parser (bankParsers.js) & #btn-process-file Handler', () => {
+  it('extrae la capa de texto nativa de todas las páginas del PDF (>50 chars), omite Tesseract.js, parsea encabezado y movimientos de Banco Promerica y actualiza atómicamente SmartScanModal', async () => {
+    const {
+      VECTOR_PDF_MIN_CHARS,
+      extractNativePdfTextLayer,
+      extractPdfData,
+    } = await import('../src/js/services/pdfExtractor.js');
+    const {
+      parseBankStatementTextData,
+      parseStatementHeaderAccountData,
+      parseStatementTransactions,
+      detectActiveStatementCurrency,
+    } = await import('../src/js/services/bankParsers.js');
+    const {
+      SmartScanModal,
+      SMART_SCAN_ANALYZING_PDF_LABEL,
+      formatUnregisteredAccountNotice,
+      formatStatementFooterSummary,
+      renderStatementTransactionsRowsMarkup,
+    } = await import('../src/js/components/SmartScanModal.js');
+
+    assert.equal(VECTOR_PDF_MIN_CHARS, 50);
+    assert.equal(SMART_SCAN_ANALYZING_PDF_LABEL, '⏳ Analizando PDF...');
+
+    // 1. Simulamos un PDF multipágina vectorial de Banco Promerica con page.getTextContent()
+    const mockPdfPages = [
+      {
+        items: [
+          { str: 'Banco Promerica', transform: [1, 0, 0, 1, 40, 760] },
+          { str: 'MI TARJETA PLATINUM VISA GAS/EDU', transform: [1, 0, 0, 1, 40, 738] },
+          { str: 'BARAHONA ALVARADO MAUREEN FLOR', transform: [1, 0, 0, 1, 40, 718] },
+          { str: 'Cuenta: 310074459', transform: [1, 0, 0, 1, 400, 738] },
+          { str: 'Fecha de Corte: 24/09/2026', transform: [1, 0, 0, 1, 400, 718] },
+          { str: 'Fecha Pago Contado: 14/10/2026', transform: [1, 0, 0, 1, 400, 700] },
+          { str: 'Limite de Credito: L 188,600.00', transform: [1, 0, 0, 1, 40, 680] },
+          { str: 'LEMPIRAS', transform: [1, 0, 0, 1, 180, 650] },
+          { str: 'DÓLARES', transform: [1, 0, 0, 1, 380, 650] },
+          { str: 'Saldo de Contado: 1,620.39 0.00', transform: [1, 0, 0, 1, 40, 630] },
+          { str: 'Pago Minimo: 350.00 0.00', transform: [1, 0, 0, 1, 40, 612] },
+        ],
+      },
+      {
+        items: [
+          { str: 'DETALLE DE MOVIMIENTOS', transform: [1, 0, 0, 1, 40, 740] },
+          { str: 'LEMPIRAS', transform: [1, 0, 0, 1, 40, 715] },
+          {
+            str: '05/09/2026 05/09/2026 984125 SEGURO DE DEUDA 1620.42',
+            transform: [1, 0, 0, 1, 40, 690],
+          },
+          { str: 'DÓLARES', transform: [1, 0, 0, 1, 40, 650] },
+        ],
+      },
+    ];
+
+    const mockPdfJsLib = {
+      GlobalWorkerOptions: { workerSrc: '' },
+      getDocument() {
+        return {
+          promise: Promise.resolve({
+            numPages: mockPdfPages.length,
+            async getPage(pageNumber) {
+              const pageData = mockPdfPages[pageNumber - 1];
+              return {
+                async getTextContent() {
+                  return { items: pageData.items };
+                },
+              };
+            },
+          }),
+        };
+      },
+    };
+
+    const mockPdfFile = {
+      name: 'Promerica_Estado_Cuenta_310074459.pdf',
+      type: 'application/pdf',
+      async arrayBuffer() {
+        return new Uint8Array([0x25, 0x50, 0x44, 0x46]).buffer;
+      },
+    };
+
+    const nativeLayer = await extractNativePdfTextLayer(mockPdfFile, {
+      pdfJsLoader: async () => mockPdfJsLib,
+    });
+
+    assert.equal(nativeLayer.pageCount, 2);
+    assert.equal(nativeLayer.isVectorPdf, true);
+    assert.equal(nativeLayer.skipTesseractOcr, true);
+    assert.ok(nativeLayer.charCount > VECTOR_PDF_MIN_CHARS);
+    assert.ok(nativeLayer.rawText.includes('Cuenta: 310074459'));
+    assert.ok(nativeLayer.rawText.includes('05/09/2026 05/09/2026 984125 SEGURO DE DEUDA 1620.42'));
+
+    // 2. Verificar Parser Específico de Estados de Cuenta y Tarjetas (bankParsers.js)
+    const parsedHeader = parseStatementHeaderAccountData(nativeLayer.rawText);
+    assert.equal(parsedHeader.accountNumber, '310074459');
+    assert.equal(parsedHeader.accountName, 'MI TARJETA PLATINUM VISA GAS/EDU');
+    assert.equal(parsedHeader.bankName, 'Banco Promerica');
+    assert.equal(parsedHeader.currency, 'HNL');
+
+    const parsedTransactions = parseStatementTransactions(nativeLayer.rawText, parsedHeader.currency);
+    assert.equal(parsedTransactions.length, 1);
+    assert.equal(parsedTransactions[0].date, '2026-09-05');
+    assert.equal(parsedTransactions[0].fecha, '2026-09-05');
+    assert.equal(parsedTransactions[0].rawDate, '05/09/2026');
+    assert.equal(parsedTransactions[0].concept, 'SEGURO DE DEUDA');
+    assert.equal(parsedTransactions[0].comercio, 'SEGURO DE DEUDA');
+    assert.equal(parsedTransactions[0].amount, 1620.42);
+    assert.equal(parsedTransactions[0].monto, 1620.42);
+    assert.equal(parsedTransactions[0].type, 'expense');
+    assert.equal(parsedTransactions[0].tipo, 'expense');
+
+    // Verificar detección de moneda USD cuando el bloque activo está bajo DÓLARES
+    const usdStatementText = [
+      'Banco Promerica',
+      'MI TARJETA PLATINUM VISA GAS/EDU',
+      'Cuenta: 310074459',
+      'DÓLARES',
+      '05/09/2026 05/09/2026 112233 AMAZON MARKETPLACE 45.99',
+    ].join('\n');
+    assert.equal(detectActiveStatementCurrency(usdStatementText), 'USD');
+    const usdParsed = parseBankStatementTextData(usdStatementText);
+    assert.equal(usdParsed.currency, 'USD');
+    assert.equal(usdParsed.transactions[0].currency, 'USD');
+
+    // 3. Verificar extractPdfData(currentFile) y omisión de Tesseract.js
+    const pdfExtractedData = await extractPdfData(mockPdfFile, {
+      pdfJsLoader: async () => mockPdfJsLib,
+    });
+    assert.equal(pdfExtractedData.isVectorPdf, true);
+    assert.equal(pdfExtractedData.skipTesseractOcr, true);
+    assert.equal(pdfExtractedData.usedTesseractOcr, false);
+    assert.equal(pdfExtractedData.accountNumber, '310074459');
+    assert.equal(pdfExtractedData.accountName, 'MI TARJETA PLATINUM VISA GAS/EDU');
+    assert.equal(pdfExtractedData.bankName, 'Banco Promerica');
+    assert.equal(pdfExtractedData.currency, 'HNL');
+    assert.equal(pdfExtractedData.transactions.length, 1);
+    assert.equal(pdfExtractedData.transactions[0].date, '2026-09-05');
+    assert.equal(pdfExtractedData.transactions[0].concept, 'SEGURO DE DEUDA');
+    assert.equal(pdfExtractedData.transactions[0].amount, 1620.42);
+    assert.equal(pdfExtractedData.transactions[0].type, 'expense');
+
+    // 4. Verificar conexión del botón #btn-process-file en SmartScanModal.js,
+    //    actualización atómica de DOM/estado y evaluación de existencia de cuenta en Firestore
+    const buttonTextStates = [];
+    const mockProcessBtn = {
+      id: 'btn-process-file',
+      disabled: false,
+      textContent: '⚡ Procesar y Evaluar Documento',
+      classList: {
+        classes: new Set(),
+        add(cls) {
+          this.classes.add(cls);
+        },
+        remove(cls) {
+          this.classes.delete(cls);
+        },
+      },
+      setAttribute() {},
+      removeAttribute() {},
+    };
+
+    const mockCurrencySelect = { value: 'USD' };
+    const mockAccountHintInput = { value: '' };
+    const mockStatementTbody = { innerHTML: '<tr><td>Fila por defecto</td></tr>' };
+    const mockFooterSummaryEl = { textContent: '' };
+    const mockToastOverlayEl = {
+      hidden: true,
+      innerHTML: '',
+      style: { display: 'none' },
+      removeAttribute(attr) {
+        if (attr === 'hidden') this.hidden = false;
+      },
+      querySelector() {
+        return null;
+      },
+    };
+    const mockMissingBannerEl = {
+      hidden: true,
+      innerHTML: '',
+    };
+
+    const elementMap = {
+      '#btn-process-file': mockProcessBtn,
+      '#smart-scan-currency': mockCurrencySelect,
+      '#smart-scan-account-hint': mockAccountHintInput,
+      '#smart-scan-statement-tbody': mockStatementTbody,
+      '#smart-scan-statement-footer-summary': mockFooterSummaryEl,
+      '#smart-scan-toast-overlay': mockToastOverlayEl,
+      '#smart-scan-missing-account-banner': mockMissingBannerEl,
+    };
+
+    const modal = new SmartScanModal({
+      getState: () => ({
+        activeWorkspaceId: 'ws_promerica_test',
+        accounts: [], // Cuenta 310074459 no existe en el estado ni en Firestore
+        transactions: [],
+      }),
+      firestoreAccountChecker: async () => [],
+    });
+
+    modal.currentFile = mockPdfFile;
+    modal.modalEl = {
+      querySelector(selector) {
+        return elementMap[selector] || null;
+      },
+      querySelectorAll() {
+        return [];
+      },
+    };
+
+    const origSetLoading = modal.setProcessButtonLoadingState.bind(modal);
+    modal.setProcessButtonLoadingState = (isLoading, label) => {
+      origSetLoading(isLoading, label);
+      buttonTextStates.push(mockProcessBtn.textContent);
+    };
+
+    const result = await modal.handleProcessFileButtonClick(null, {
+      pdfExtractorRunner: (file) =>
+        extractPdfData(file, {
+          pdfJsLoader: async () => mockPdfJsLib,
+        }),
+      firestoreAccountChecker: async () => [],
+    });
+
+    // a) Indicador visual "⏳ Analizando PDF..." mostrado durante la ejecución y restaurado al finalizar
+    assert.ok(buttonTextStates.includes('⏳ Analizando PDF...'));
+    assert.equal(mockProcessBtn.textContent, '⚡ Procesar y Evaluar Documento');
+    assert.equal(mockProcessBtn.disabled, false);
+
+    // b) Actualización atómica del estado y controles del DOM
+    assert.equal(mockCurrencySelect.value, 'HNL');
+    assert.equal(mockAccountHintInput.value, '310074459');
+    assert.equal(modal.statementRows.length, 1);
+    assert.equal(modal.statementRows[0].date, '2026-09-05');
+    assert.equal(modal.statementRows[0].concept, 'SEGURO DE DEUDA');
+    assert.equal(modal.statementRows[0].amount, 1620.42);
+    assert.equal(modal.statementRows[0].type, 'expense');
+    assert.ok(mockStatementTbody.innerHTML.includes('2026-09-05'));
+    assert.ok(mockStatementTbody.innerHTML.includes('SEGURO DE DEUDA'));
+    assert.ok(mockStatementTbody.innerHTML.includes('1620.42'));
+    assert.equal(
+      mockFooterSummaryEl.textContent,
+      'Total Seleccionado: L 1,620.42 | N.º de Movimientos: 1'
+    );
+    assert.equal(
+      formatStatementFooterSummary(modal.statementRows, 'HNL'),
+      'Total Seleccionado: L 1,620.42 | N.º de Movimientos: 1'
+    );
+    assert.ok(renderStatementTransactionsRowsMarkup(modal.statementRows).includes('SEGURO DE DEUDA'));
+
+    // c) Evaluación de Existencia de Cuenta en Firestore accounts y aviso en primer plano
+    const expectedNotice =
+      '⚠️ La cuenta N.º 310074459 (Banco Promerica) no está registrada. Se creará automáticamente al guardar.';
+    assert.equal(formatUnregisteredAccountNotice('310074459', 'Banco Promerica'), expectedNotice);
+    assert.equal(result.headerAbstraction.accountExistsInFirestore, false);
+    assert.equal(modal.createMissingAccountConfirmed, true);
+    assert.ok(mockToastOverlayEl.innerHTML.includes(expectedNotice));
+    assert.ok(mockMissingBannerEl.innerHTML.includes(expectedNotice));
+
+    // 5. Calidad del Código: Cero console.log en pdfExtractor.js, bankParsers.js y SmartScanModal.js
+    for (const relPath of [
+      'src/js/services/pdfExtractor.js',
+      'src/js/services/bankParsers.js',
+      'src/js/components/SmartScanModal.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Expected zero console.log in ${relPath}`
+      );
+    }
+  });
+});
+
+// ============================================================================
+// Suite 37: User Profile Country Field (`users/{uid}`), `#user-country` UI & Country-Aware OCR Templates
+// ============================================================================
+describe('Suite 37: User Profile Country Field, Firestore updateDoc Persistence & Country-Aware OCR Templates', () => {
+  it('1. User Profile Data Model & Firestore Persistence (`user.js` / `auth.js`): defaults to "HN", supports ISO codes, and persists via updateDoc + memory + localStorage', async () => {
+    const userMod = await import('../src/js/services/user.js');
+    const authMod = await import('../src/js/services/auth.js');
+
+    // Default value is "HN" (Honduras)
+    assert.equal(userMod.DEFAULT_USER_COUNTRY, 'HN');
+    const defaultSchema = authMod.buildDefaultUserDocument({
+      uid: 'uid_hn_01',
+      email: 'usuario@pisto.hn',
+      displayName: 'Usuario Honduras',
+    });
+    assert.equal(defaultSchema.country, 'HN');
+    assert.equal(defaultSchema.defaultCurrency, 'HNL');
+
+    // Supports ISO country codes ("HN", "GT", "SV", "CR", "NI", "PA", "MX", "US")
+    for (const code of ['HN', 'GT', 'SV', 'CR', 'NI', 'PA', 'MX', 'US']) {
+      assert.ok(userMod.SUPPORTED_ISO_COUNTRY_CODES.includes(code));
+      assert.equal(userMod.normalizeUserCountryCode(code.toLowerCase()), code);
+    }
+
+    // Mock localStorage & Firestore SDK (`updateDoc`, `setDoc`, `getDoc`, `doc`)
+    const storeMap = new Map();
+    const mockStorage = {
+      getItem: (k) => (storeMap.has(k) ? storeMap.get(k) : null),
+      setItem: (k, v) => storeMap.set(k, String(v)),
+      removeItem: (k) => storeMap.delete(k),
+    };
+
+    const firestoreDocs = new Map();
+    const updateDocCalls = [];
+    const mockFirestoreModule = {
+      doc: (_db, col, id) => ({ path: `${col}/${id}`, col, id }),
+      getDoc: async (ref) => ({
+        exists: () => firestoreDocs.has(ref.path),
+        data: () => firestoreDocs.get(ref.path),
+      }),
+      setDoc: async (ref, data, opts) => {
+        const prev = firestoreDocs.get(ref.path) || {};
+        firestoreDocs.set(ref.path, opts?.merge ? { ...prev, ...data } : { ...data });
+      },
+      updateDoc: async (ref, data) => {
+        updateDocCalls.push({ path: ref.path, data });
+        const prev = firestoreDocs.get(ref.path) || {};
+        firestoreDocs.set(ref.path, { ...prev, ...data });
+      },
+    };
+
+    // Sync initial user -> defaults to "HN"
+    const synced = await userMod.syncUserProfileDocument(
+      { uid: 'uid_country_test', email: 'test@pisto.app', displayName: 'Test User' },
+      { firestoreDb: {}, firestoreModule: mockFirestoreModule, storage: mockStorage }
+    );
+    assert.equal(synced.country, 'HN');
+    assert.equal(firestoreDocs.get('users/uid_country_test').country, 'HN');
+
+    // Update profile country to "GT" -> persists via Firestore `updateDoc`, updates in-memory user object & localStorage
+    const updated = await userMod.updateUserProfile(
+      'uid_country_test',
+      { country: 'GT', displayName: 'Test User GT' },
+      { firestoreDb: {}, firestoreModule: mockFirestoreModule, storage: mockStorage }
+    );
+
+    assert.equal(updateDocCalls.length, 1);
+    assert.equal(updateDocCalls[0].path, 'users/uid_country_test');
+    assert.equal(updateDocCalls[0].data.country, 'GT');
+    assert.equal(updated.country, 'GT');
+    assert.equal(updated.defaultCurrency, 'GTQ');
+    assert.equal(userMod.getActiveUserCountry({ storage: mockStorage }), 'GT');
+    assert.equal(userMod.getCurrentUserProfile({ storage: mockStorage }).country, 'GT');
+
+    const storedProfileJson = JSON.parse(
+      mockStorage.getItem('pisto_profile_uid_country_test')
+    );
+    assert.equal(storedProfileJson.country, 'GT');
+  });
+
+  it('2. Profile Settings UI Component (`src/js/components/ProfileView.js`): renders `<select id="user-country">` and saves country changes seamlessly', async () => {
+    const {
+      ProfileView,
+      USER_COUNTRY_SELECT_ID,
+      renderUserCountrySelectorHtml,
+    } = await import('../src/js/components/ProfileView.js');
+
+    assert.equal(USER_COUNTRY_SELECT_ID, 'user-country');
+    const selectMarkup = renderUserCountrySelectorHtml('HN');
+    assert.ok(selectMarkup.includes('id="user-country"'));
+    assert.ok(selectMarkup.includes('value="HN" selected'));
+    for (const code of ['HN', 'GT', 'SV', 'CR', 'NI', 'PA', 'MX', 'US']) {
+      assert.ok(selectMarkup.includes(`value="${code}"`));
+    }
+
+    // Verify `index.html` and `public/index.html` include `<select id="user-country"`
+    const rootIndexHtml = await fs.readFile(new URL('../index.html', import.meta.url), 'utf8');
+    const publicIndexHtml = await fs.readFile(
+      new URL('../public/index.html', import.meta.url),
+      'utf8'
+    );
+    assert.ok(rootIndexHtml.includes('id="user-country"'));
+    assert.ok(publicIndexHtml.includes('id="user-country"'));
+
+    // Verify seamless save via ProfileView.updateCountryPreference
+    const storeMap = new Map();
+    const mockStorage = {
+      getItem: (k) => (storeMap.has(k) ? storeMap.get(k) : null),
+      setItem: (k, v) => storeMap.set(k, String(v)),
+      removeItem: (k) => storeMap.delete(k),
+    };
+    const updateDocCalls = [];
+    const mockFirestoreModule = {
+      doc: (_db, col, id) => ({ path: `${col}/${id}` }),
+      updateDoc: async (ref, data) => {
+        updateDocCalls.push({ path: ref.path, data });
+      },
+      setDoc: async () => {},
+    };
+
+    let notifiedProfile = null;
+    const profileView = new ProfileView({
+      uid: 'uid_ui_test',
+      storage: mockStorage,
+      firestoreDb: {},
+      firestoreModule: mockFirestoreModule,
+      onCountryChanged: (profile) => {
+        notifiedProfile = profile;
+      },
+    });
+
+    const saved = await profileView.updateCountryPreference('PA');
+    assert.equal(saved.country, 'PA');
+    assert.equal(saved.defaultCurrency, 'USD');
+    assert.equal(updateDocCalls.length, 1);
+    assert.equal(updateDocCalls[0].data.country, 'PA');
+    assert.equal(notifiedProfile?.country, 'PA');
+  });
+
+  it('3. Document Extractor & Template Engine (`ocrExtractor.js` / `bankTemplateMatcher.js`): filters bank_templates by country, prioritizes regional banks, and adapts tax/currency defaults', async () => {
+    const {
+      extractBankDataHybrid,
+      normalizeHybridBankName,
+      parseRegionalInvoiceOrVoucher,
+      filterBankTemplatesByCountry,
+      detectCountryTaxAndCurrency,
+    } = await import('../src/js/services/ocrExtractor.js');
+    const {
+      DEFAULT_STATEMENT_TEMPLATES,
+      loadKnownStatementTemplates,
+      matchStatementTemplate,
+      processPdfStatementWithPatternLearning,
+    } = await import('../src/js/services/bankTemplateMatcher.js');
+    const { fetchBankTemplatesFromFirestore } = await import(
+      '../src/js/services/templateLearner.js'
+    );
+
+    // 3a. Firestore query filters `bank_templates` by `where("country", "==", country)`
+    const whereClauses = [];
+    const mockFirestoreModule = {
+      collection: (_db, name) => ({ name }),
+      where: (field, op, val) => {
+        whereClauses.push({ field, op, val });
+        return { field, op, val };
+      },
+      query: (col, ...constraints) => ({ col, constraints }),
+      getDocs: async () => ({
+        forEach: (cb) => {
+          cb({
+            id: 'ficohsa_hn_mobile',
+            data: () => ({
+              bankId: 'ficohsa_hn_mobile',
+              bankName: 'Banco Ficohsa',
+              country: 'HN',
+              keywords: ['ficohsa', 'interbanca'],
+            }),
+          });
+        },
+      }),
+    };
+
+    const hnTemplates = await fetchBankTemplatesFromFirestore({
+      firestoreDb: {},
+      firestoreModule: mockFirestoreModule,
+      country: 'HN',
+      strictCountryOnly: true,
+    });
+    assert.ok(
+      whereClauses.some(
+        (w) => w.field === 'country' && w.op === '==' && w.val === 'HN'
+      )
+    );
+    assert.ok(hnTemplates.every((tpl) => tpl.country === 'HN'));
+
+    // 3b. Prioritize Honduran banks (Atlántida, BAC, Ficohsa, Promerica, Banpaís) when country === "HN"
+    const hnBankNames = hnTemplates.map((t) => t.bankName);
+    assert.ok(hnBankNames.some((n) => n.includes('Atlántida')));
+    assert.ok(hnBankNames.some((n) => n.includes('BAC')));
+    assert.ok(hnBankNames.some((n) => n.includes('Ficohsa')));
+    assert.ok(hnBankNames.some((n) => n.includes('Promerica')));
+    assert.ok(hnBankNames.some((n) => n.includes('Banpaís')));
+
+    assert.equal(normalizeHybridBankName('', 'Interbanca Ficohsa HN', 'HN'), 'Banco Ficohsa');
+    assert.equal(normalizeHybridBankName('', 'Banco del País Banpaís', 'HN'), 'Banpaís (Banco del País)');
+    assert.equal(normalizeHybridBankName('', 'BI en Línea Guatemala', 'GT'), 'Banco Industrial');
+
+    // 3c. Statement template matching prioritizes GT templates when country === "GT"
+    const gtTemplates = filterBankTemplatesByCountry(DEFAULT_STATEMENT_TEMPLATES, 'GT', {
+      strictCountryOnly: true,
+    });
+    assert.ok(gtTemplates.length >= 2);
+    assert.ok(gtTemplates.every((t) => t.country === 'GT'));
+
+    const gtMatch = matchStatementTemplate(
+      'BANCO INDUSTRIAL BI EN LINEA ESTADO DE CUENTA MONETARIA No. 4500112233 Saldo Q 12,450.00',
+      DEFAULT_STATEMENT_TEMPLATES,
+      { country: 'GT' }
+    );
+    assert.equal(gtMatch.matched, true);
+    assert.equal(gtMatch.template.country, 'GT');
+    assert.equal(gtMatch.template.bankName, 'Banco Industrial');
+
+    // 3d. Tax & currency detection adapts to country (ISV / HNL for HN, IVA / GTQ for GT)
+    const hnInvoice = parseRegionalInvoiceOrVoucher(
+      'Banco Atlántida Factura Comercial Subtotal: L 1,000.00 ISV 15%: L 150.00 Total a pagar: L 1,150.00',
+      { country: 'HN' }
+    );
+    assert.equal(hnInvoice.country, 'HN');
+    assert.equal(hnInvoice.bankName, 'Banco Atlántida');
+    assert.equal(hnInvoice.currency, 'HNL');
+    assert.equal(hnInvoice.currencySymbol, 'L');
+    assert.equal(hnInvoice.taxType, 'ISV');
+    assert.equal(hnInvoice.taxRate, 0.15);
+    assert.equal(hnInvoice.taxAmount, 150);
+    assert.equal(hnInvoice.totalAmount, 1150);
+
+    const gtInvoice = parseRegionalInvoiceOrVoucher(
+      'Banco Industrial Factura Electrónica FEL Subtotal: Q 500.00 IVA 12%: Q 60.00 Total a pagar: Q 560.00',
+      { country: 'GT' }
+    );
+    assert.equal(gtInvoice.country, 'GT');
+    assert.equal(gtInvoice.bankName, 'Banco Industrial');
+    assert.equal(gtInvoice.currency, 'GTQ');
+    assert.equal(gtInvoice.currencySymbol, 'Q');
+    assert.equal(gtInvoice.taxType, 'IVA');
+    assert.equal(gtInvoice.taxRate, 0.12);
+    assert.equal(gtInvoice.taxAmount, 60);
+    assert.equal(gtInvoice.totalAmount, 560);
+
+    // 3e. Hybrid OCR extraction respects `country` and returns regional currency & taxMetadata
+    const hybridGtResult = await extractBankDataHybrid(null, {
+      country: 'GT',
+      ocrTextFallback:
+        'BANCO INDUSTRIAL BI EN LINEA\nCuenta Monetaria No. 4500998877\nSaldo Disponible Q 8,250.50\nIVA: Q 12.00',
+      ocrConfidence: 95,
+      offline: true,
+    });
+    assert.equal(hybridGtResult.country, 'GT');
+    assert.equal(hybridGtResult.bankName, 'Banco Industrial');
+    assert.equal(hybridGtResult.currency, 'GTQ');
+    assert.equal(hybridGtResult.currentBalance, 8250.5);
+    assert.equal(hybridGtResult.taxMetadata.taxType, 'IVA');
+    assert.equal(hybridGtResult.taxMetadata.currency, 'GTQ');
+
+    const statementGtResult = await processPdfStatementWithPatternLearning(
+      'BANCO INDUSTRIAL BI EN LINEA\nCuenta No. 4500998877\n15/10/2026 SUPERMERCADO LA TORRE Débito Q 450.00',
+      { country: 'GT' }
+    );
+    assert.equal(statementGtResult.country, 'GT');
+    assert.equal(statementGtResult.taxMetadata.taxType, 'IVA');
+    assert.equal(statementGtResult.taxMetadata.currency, 'GTQ');
+
+    // 4. Zero console.log in all new/updated modules
+    for (const relPath of [
+      'src/js/services/user.js',
+      'src/js/services/auth.js',
+      'src/js/components/ProfileView.js',
+      'src/js/services/ocrExtractor.js',
+      'src/js/services/bankTemplateMatcher.js',
+      'src/js/services/templateLearner.js',
+      'public/js/services/authProfileService.js',
+      'public/js/ui/profileView.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Expected zero console.log in ${relPath}`
+      );
+    }
+  });
+});
+
+// ============================================================================
+// Suite 38: `document_templates` Collection (`templateDatabase.js`) & ML Pattern Recognition Loop (`patternLearner.js`)
+// ============================================================================
+describe('Suite 38: document_templates Collection (templateDatabase.js) & ML Pattern Recognition by Country (patternLearner.js)', () => {
+  it('1. Data Model, Firestore/IndexedDB Setup & Pre-Populated Honduran ("HN") Default Templates (`templateDatabase.js`)', async () => {
+    const dbMod = await import('../src/js/services/templateDatabase.js');
+
+    assert.equal(dbMod.DOCUMENT_TEMPLATES_COLLECTION, 'document_templates');
+    assert.equal(dbMod.MAX_TEMPLATE_ACCURACY_SCORE, 0.999);
+    assert.deepEqual(dbMod.DOCUMENT_TEMPLATE_TYPES, {
+      BANK_STATEMENT: 'bank_statement',
+      POS_VOUCHER: 'pos_voucher',
+      TAX_INVOICE: 'tax_invoice',
+      RECEIPT: 'receipt',
+    });
+
+    const storeMap = new Map();
+    const mockStorage = {
+      getItem: (k) => (storeMap.has(k) ? storeMap.get(k) : null),
+      setItem: (k, v) => storeMap.set(k, String(v)),
+      removeItem: (k) => storeMap.delete(k),
+    };
+
+    const idbStore = new Map();
+    const mockIdb = {
+      open: () => {
+        const req = { result: null, onupgradeneeded: null, onsuccess: null, onerror: null };
+        queueMicrotask(() => {
+          req.result = {
+            objectStoreNames: { contains: () => true },
+            createObjectStore: () => ({}),
+            transaction: () => {
+              const tx = {
+                oncomplete: null,
+                onerror: null,
+                objectStore: () => ({
+                  put: (val) => {
+                    idbStore.set(val.id, val);
+                    queueMicrotask(() => tx.oncomplete && tx.oncomplete());
+                  },
+                  getAll: () => {
+                    const getReq = { result: Array.from(idbStore.values()), onsuccess: null };
+                    queueMicrotask(() => getReq.onsuccess && getReq.onsuccess());
+                    return getReq;
+                  },
+                }),
+              };
+              return tx;
+            },
+          };
+          if (req.onsuccess) req.onsuccess();
+        });
+        return req;
+      },
+    };
+
+    const seeded = await dbMod.seedDefaultHonduranDocumentTemplates({
+      indexedDb: mockIdb,
+      storage: mockStorage,
+    });
+    assert.ok(seeded.length >= 3);
+
+    // Verify the 3 required Honduran default templates ("HN"):
+    // a) Banco Promerica Credit Cards ("MI TARJETA PLATINUM", "Cuenta: 310074459", "SEGURO DE DEUDA")
+    const promericaTpl = seeded.find((t) => t.institutionName === 'Banco Promerica');
+    assert.ok(promericaTpl);
+    assert.equal(promericaTpl.country, 'HN');
+    assert.equal(promericaTpl.docType, 'bank_statement');
+    assert.ok(promericaTpl.matchingRules.fingerprintKeywords.includes('MI TARJETA PLATINUM'));
+    assert.ok(promericaTpl.matchingRules.fingerprintKeywords.includes('Cuenta: 310074459'));
+    assert.ok(promericaTpl.matchingRules.fingerprintKeywords.includes('SEGURO DE DEUDA'));
+    assert.ok(promericaTpl.matchingRules.headerRegexPatterns.accountNumber);
+    assert.ok(promericaTpl.matchingRules.lineItemRegexPattern);
+    assert.ok(promericaTpl.metadata.accuracyScore <= 0.999);
+    assert.ok(promericaTpl.metadata.sampleCount >= 1);
+    assert.ok(promericaTpl.metadata.version >= 1);
+
+    // b) BAC Credomatic Account Summaries ("Resumen de productos", "Cuentas bancarias", "LPS", "USD")
+    const bacTpl = seeded.find((t) => t.institutionName === 'BAC Credomatic');
+    assert.ok(bacTpl);
+    assert.equal(bacTpl.country, 'HN');
+    assert.equal(bacTpl.docType, 'bank_statement');
+    assert.ok(bacTpl.matchingRules.fingerprintKeywords.includes('Resumen de productos'));
+    assert.ok(bacTpl.matchingRules.fingerprintKeywords.includes('Cuentas bancarias'));
+    assert.ok(bacTpl.matchingRules.fingerprintKeywords.includes('LPS'));
+    assert.ok(bacTpl.matchingRules.fingerprintKeywords.includes('USD'));
+
+    // c) Standard POS Vouchers ("RTN", "CAI", "SUBTOTAL", "ISV 15%")
+    const posTpl = seeded.find((t) => t.docType === 'pos_voucher');
+    assert.ok(posTpl);
+    assert.equal(posTpl.country, 'HN');
+    assert.ok(posTpl.matchingRules.fingerprintKeywords.includes('RTN'));
+    assert.ok(posTpl.matchingRules.fingerprintKeywords.includes('CAI'));
+    assert.ok(posTpl.matchingRules.fingerprintKeywords.includes('SUBTOTAL'));
+    assert.ok(posTpl.matchingRules.fingerprintKeywords.includes('ISV 15%'));
+  });
+
+  it('2. Match Engine & Learning Loop (`patternLearner.js` & `SmartScanModal.js`): Step 1 Identify by country, Step 2 Parse (>99% confidence at 0 cost), Step 3 Learn/Feedback in Firestore', async () => {
+    const {
+      identifyDocumentTemplate,
+      matchAndParseDocumentWithTemplate,
+      recordDocumentTemplateFeedback,
+    } = await import('../src/js/services/patternLearner.js');
+    const { confirmAndPersistStatementBatch } = await import(
+      '../src/js/components/SmartScanModal.js'
+    );
+
+    // Step 1 & Step 2a: Banco Promerica Credit Card Statement (>99% confidence, 0 API cost)
+    const promericaText = [
+      'Banco Promerica',
+      'ESTADO DE CUENTA DE TARJETA DE CREDITO',
+      'MI TARJETA PLATINUM',
+      'Cuenta: 310074459',
+      'FECHA DE CORTE: 2026-09-05',
+      'FECHA LIMITE DE PAGO: 2026-09-28',
+      'LIMITE DE CREDITO: L 188,600.00',
+      'PAGO DE CONTADO: L 1,620.42',
+      '2026-09-05 12:00 AM SEGURO DE DEUDA L 1,620.42',
+    ].join('\n');
+
+    const promericaMatch = await matchAndParseDocumentWithTemplate(promericaText, {
+      user: { country: 'HN' },
+    });
+    assert.equal(promericaMatch.matched, true);
+    assert.equal(promericaMatch.highConfidence, true);
+    assert.ok(promericaMatch.confidence > 0.99);
+    assert.ok(promericaMatch.confidencePercent > 99);
+    assert.equal(promericaMatch.template.institutionName, 'Banco Promerica');
+    assert.equal(promericaMatch.extracted.apiCost, 0);
+    assert.equal(promericaMatch.extracted.usedLocalTemplate, true);
+    assert.equal(promericaMatch.extracted.accountInfo.accountNumber, '310074459');
+    assert.equal(promericaMatch.extracted.accountInfo.creditLimit, 188600);
+    assert.equal(promericaMatch.extracted.transactions.length, 1);
+    assert.equal(promericaMatch.extracted.transactions[0].concept, 'SEGURO DE DEUDA');
+    assert.equal(promericaMatch.extracted.transactions[0].amount, 1620.42);
+
+    // Step 1 & Step 2b: BAC Credomatic Account Summary (>99% confidence, 0 API cost)
+    const bacText = [
+      'BAC Credomatic',
+      'Resumen de productos',
+      'Cuentas bancarias',
+      'HN - CUENTA BANCARIA 726935871 LPS 401.28',
+      'HN - CUENTA BANCARIA 751666931 USD 3,705.95',
+    ].join('\n');
+
+    const bacMatch = await matchAndParseDocumentWithTemplate(bacText, {
+      country: 'HN',
+    });
+    assert.equal(bacMatch.matched, true);
+    assert.equal(bacMatch.highConfidence, true);
+    assert.ok(bacMatch.confidence > 0.99);
+    assert.equal(bacMatch.template.institutionName, 'BAC Credomatic');
+    assert.equal(bacMatch.extracted.apiCost, 0);
+    assert.ok(bacMatch.extracted.accountsList.length >= 2);
+
+    // Step 1 & Step 2c: Standard POS Voucher ("RTN", "CAI", "SUBTOTAL", "ISV 15%")
+    const posVoucherText = [
+      'SUPERMERCADOS LA COLONIA',
+      'RTN: 08019001234567',
+      'CAI: 3A4B5C-6D7E8F-9A0B1C-2D3E4F-5A6B7C-01',
+      'FACTURA: 000-001-01-00045678',
+      'FECHA: 2026-10-22',
+      'SUBTOTAL: L 1,000.00',
+      'ISV 15%: L 150.00',
+      'TOTAL A PAGAR: L 1,150.00',
+    ].join('\n');
+
+    const posMatch = await matchAndParseDocumentWithTemplate(posVoucherText, {
+      country: 'HN',
+    });
+    assert.equal(posMatch.matched, true);
+    assert.equal(posMatch.highConfidence, true);
+    assert.ok(posMatch.confidence > 0.99);
+    assert.equal(posMatch.template.docType, 'pos_voucher');
+    assert.equal(posMatch.extracted.apiCost, 0);
+    assert.equal(posMatch.extracted.header.rtn, '08019001234567');
+    assert.equal(posMatch.extracted.header.subtotal, 1000);
+    assert.equal(posMatch.extracted.header.taxAmount, 150);
+    assert.equal(posMatch.extracted.header.totalAmount, 1150);
+
+    // Step 3: Learn/Feedback when user edits/confirms fields in SmartScanModal.js
+    const firestoreWrites = [];
+    const mockFirestoreModule = {
+      collection: (_db, name) => ({ name }),
+      where: (field, op, val) => ({ field, op, val }),
+      query: (col, ...constraints) => ({ col, constraints }),
+      getDocs: async () => ({ docs: [] }),
+      doc: (_db, ...segments) => ({ path: segments.join('/') }),
+      updateDoc: async (ref, data) => {
+        firestoreWrites.push({ op: 'updateDoc', path: ref.path, data });
+      },
+      setDoc: async (ref, data) => {
+        firestoreWrites.push({ op: 'setDoc', path: ref.path, data });
+      },
+    };
+
+    const beforeIdentify = await identifyDocumentTemplate(promericaText, {
+      country: 'HN',
+    });
+    const initialSamples = beforeIdentify.template.metadata.sampleCount;
+    const initialVersion = beforeIdentify.template.metadata.version;
+    const initialAccuracy = beforeIdentify.template.metadata.accuracyScore;
+
+    const batchConfirmResult = await confirmAndPersistStatementBatch({
+      extractedData: {
+        country: 'HN',
+        bankName: 'Banco Promerica',
+        cuentaIdentificada: '310074459',
+        detectedAccountTypeLabel: 'MI TARJETA PLATINUM',
+        moneda: 'HNL',
+        rawText: promericaText,
+      },
+      statementRows: [
+        {
+          date: '2026-09-05',
+          concept: 'SEGURO DE DEUDA',
+          amount: 1620.42,
+          type: 'expense',
+          selected: true,
+        },
+      ],
+      createMissingAccount: true,
+      state: { accounts: [], transactions: [], user: { country: 'HN' } },
+      firestoreDb: {},
+      firestoreModule: mockFirestoreModule,
+    });
+
+    assert.ok(batchConfirmResult.learnedDocumentTemplate);
+    assert.equal(
+      batchConfirmResult.learnedDocumentTemplate.metadata.sampleCount,
+      initialSamples + 1
+    );
+    assert.equal(
+      batchConfirmResult.learnedDocumentTemplate.metadata.version,
+      initialVersion + 1
+    );
+    assert.ok(
+      batchConfirmResult.learnedDocumentTemplate.metadata.accuracyScore >= initialAccuracy
+    );
+    assert.ok(
+      batchConfirmResult.learnedDocumentTemplate.metadata.accuracyScore <= 0.999
+    );
+    assert.ok(
+      firestoreWrites.some((w) =>
+        w.path.startsWith('document_templates/hn_promerica_credit_card_statement')
+      )
+    );
+
+    // Direct feedback call also refines fingerprintKeywords and caps accuracyScore at 0.999
+    const refined = await recordDocumentTemplateFeedback(
+      {
+        templateId: 'hn_promerica_credit_card_statement',
+        country: 'HN',
+        docType: 'bank_statement',
+        institutionName: 'Banco Promerica',
+        fingerprintKeywords: ['PROMERICA PLATINUM HN'],
+      },
+      { firestoreDb: {}, firestoreModule: mockFirestoreModule }
+    );
+    assert.ok(
+      refined.matchingRules.fingerprintKeywords.includes('PROMERICA PLATINUM HN')
+    );
+    assert.ok(refined.metadata.accuracyScore <= 0.999);
+
+    // 4. Zero console.log in templateDatabase.js and patternLearner.js
+    for (const relPath of [
+      'src/js/services/templateDatabase.js',
+      'src/js/services/patternLearner.js',
+      'src/js/components/SmartScanModal.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Expected zero console.log in ${relPath}`
+      );
+    }
+  });
+});
+
+describe('39. Refactor UI/UX de "Presupuestos y Genkit IA" (BudgetsView.js + styles.css)', () => {
+  it('1. rediseña las tarjetas de límite de presupuesto (Flexbox justify-between items-center, p-4, barras de progreso y textos legibles para Gastado, Disponible y Excedido)', async () => {
+    const {
+      renderBudgetLimitCardMarkup,
+      renderBudgetsListMarkup,
+      formatBudgetCategoryStatusHtml,
+    } = await import('../src/js/components/BudgetsView.js');
+
+    const supermercadoCard = renderBudgetLimitCardMarkup(
+      {
+        id: 'groceries',
+        name: 'Supermercado',
+        color: '#10b981',
+        amount: 3200,
+        budgetLimit: 5000,
+        budgetPct: 64,
+        budgetStatus: 'healthy',
+      },
+      'HNL'
+    );
+
+    assert.ok(supermercadoCard.includes('budget-item-card p-4 status-border-healthy'));
+    assert.ok(supermercadoCard.includes('budget-item-header flex justify-between items-center'));
+    assert.ok(supermercadoCard.includes('<strong class="budget-cat-name">Supermercado</strong>'));
+    assert.ok(supermercadoCard.includes('data-budget-category="groceries"'));
+    assert.ok(supermercadoCard.includes('budget-progress-bar progress-healthy'));
+    assert.ok(supermercadoCard.includes('Gastado:'));
+    assert.ok(supermercadoCard.includes('Disponible:'));
+    assert.ok(supermercadoCard.includes('(64%)'));
+
+    const restaurantesExceeded = renderBudgetLimitCardMarkup(
+      {
+        id: 'food',
+        name: 'Restaurantes',
+        color: '#f59e0b',
+        amount: 4500,
+        budgetLimit: 3000,
+        budgetPct: 150,
+        budgetStatus: 'exceeded',
+      },
+      'HNL'
+    );
+
+    assert.ok(restaurantesExceeded.includes('status-border-exceeded'));
+    assert.ok(restaurantesExceeded.includes('progress-exceeded'));
+    assert.ok(restaurantesExceeded.includes('Excedido:'));
+    assert.ok(restaurantesExceeded.includes('(150%)'));
+
+    const listMarkup = renderBudgetsListMarkup(
+      [
+        {
+          id: 'groceries',
+          name: 'Supermercado',
+          color: '#10b981',
+          amount: 1200,
+          budgetLimit: 4000,
+          budgetPct: 30,
+          budgetStatus: 'healthy',
+        },
+        {
+          id: 'food',
+          name: 'Restaurantes',
+          color: '#f59e0b',
+          amount: 2800,
+          budgetLimit: 2500,
+          budgetPct: 112,
+          budgetStatus: 'exceeded',
+        },
+      ],
+      'HNL'
+    );
+    assert.ok(listMarkup.includes('Supermercado'));
+    assert.ok(listMarkup.includes('Restaurantes'));
+    assert.ok(formatBudgetCategoryStatusHtml({ budgetLimit: 0, amount: 100 }, 'HNL').includes('Sin límite asignado'));
+  });
+
+  it('2. simplifica el Coach Financiero IA ocultando el JSON y métricas de tokens en <details> ("⚙️ Ver datos técnicos de IA"), destacando el botón "✨ Generar Diagnóstico con Genkit" y el estado vacío limpio, con layout responsivo grid-cols-1 md:grid-cols-3', async () => {
+    const fs = await import('node:fs/promises');
+    const {
+      AI_COACH_CTA_LABEL,
+      AI_TECHNICAL_SUMMARY_LABEL,
+      renderAiInsightsEmptyStateMarkup,
+      renderAiInsightsResultMarkup,
+      renderBudgetsAndAiPanelMarkup,
+    } = await import('../src/js/components/BudgetsView.js');
+
+    assert.equal(AI_COACH_CTA_LABEL, '✨ Generar Diagnóstico con Genkit');
+    assert.equal(AI_TECHNICAL_SUMMARY_LABEL, '⚙️ Ver datos técnicos de IA');
+
+    const panelHtml = renderBudgetsAndAiPanelMarkup();
+    assert.ok(panelHtml.includes('grid-cols-1 md:grid-cols-3'));
+    assert.ok(panelHtml.includes('md:col-span-2'));
+    assert.ok(panelHtml.includes('md:col-span-1'));
+    assert.ok(panelHtml.includes('✨ Generar Diagnóstico con Genkit'));
+    assert.ok(panelHtml.includes('<details id="ai-technical-details" class="ai-technical-details">'));
+    assert.ok(panelHtml.includes('⚙️ Ver datos técnicos de IA'));
+    assert.ok(panelHtml.includes('ai-insights-empty-state'));
+
+    // Empty state vs populated insight card
+    const emptyStateHtml = renderAiInsightsEmptyStateMarkup();
+    assert.ok(emptyStateHtml.includes('ai-insights-empty-state'));
+
+    const populatedInsightHtml = renderAiInsightsResultMarkup({
+      score: 88,
+      status: 'healthy',
+      headline: 'Buen control en Supermercado este mes',
+      tips: ['Mantén tus compras semanales planificadas'],
+      savingOpportunity: 'Ahorra L 450 reduciendo pedidos a domicilio.',
+      cached: true,
+    });
+    assert.ok(populatedInsightHtml.includes('ai-insight-card'));
+    assert.ok(populatedInsightHtml.includes('Buen control en Supermercado este mes'));
+
+    // Verify index.html and styles.css
+    const indexHtml = await fs.readFile(new URL('../index.html', import.meta.url), 'utf8');
+    assert.ok(indexHtml.includes('grid-cols-1 md:grid-cols-3'));
+    assert.ok(indexHtml.includes('⚙️ Ver datos técnicos de IA'));
+    assert.ok(indexHtml.includes('✨ Generar Diagnóstico con Genkit'));
+
+    const stylesCss = await fs.readFile(new URL('../src/css/styles.css', import.meta.url), 'utf8');
+    assert.ok(stylesCss.includes('.md\\:grid-cols-3'));
+    assert.ok(stylesCss.includes('.budget-item-header'));
+    assert.ok(stylesCss.includes('justify-content: space-between'));
+    assert.ok(stylesCss.includes('.ai-technical-details'));
+
+    const budgetsViewContent = await fs.readFile(
+      new URL('../src/js/components/BudgetsView.js', import.meta.url),
+      'utf8'
+    );
+    const stripped = budgetsViewContent
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/\/\/.*$/gm, '');
+    assert.equal(stripped.includes('console.log('), false);
+  });
+});
+

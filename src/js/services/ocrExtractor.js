@@ -42,12 +42,20 @@ import {
   BANK_TEMPLATES_LOCAL_STORE,
   normalizeTemplateCurrency,
   computeLayoutFingerprint,
+  filterBankTemplatesByCountry,
   fetchBankTemplatesFromFirestore,
   getAllLocalBankTemplates,
   extractOfflineWithLearnedTemplates,
   buildFewShotPromptWithTemplates,
   learnBankTemplateFromConfirmation,
 } from './templateLearner.js';
+import {
+  DEFAULT_USER_COUNTRY,
+  normalizeUserCountryCode,
+  getCountryRegionalConfig,
+  getActiveUserCountry,
+} from './user.js';
+import { detectCountryTaxAndCurrency } from './bankTemplateMatcher.js';
 
 export const GEMINI_VISION_MODEL = 'gemini-2.5-flash';
 export const GEMINI_VISION_FALLBACK_MODEL = 'gemini-1.5-flash';
@@ -296,18 +304,42 @@ function matchCanonicalBankFromString(text) {
   if (lower.includes('popular')) return 'Banco Popular';
   if (lower.includes('banhprovi')) return 'Banhprovi';
 
+  if (lower.includes('industrial') || /\bbi\s+en\s+l[ií]nea\b/.test(lower)) {
+    return 'Banco Industrial';
+  }
+  if (lower.includes('g&t') || lower.includes('continental')) {
+    return 'Banco G&T Continental';
+  }
+  if (lower.includes('agricola') || lower.includes('agrícola')) {
+    return 'Banco Agrícola';
+  }
+  if (lower.includes('general')) {
+    return 'Banco General';
+  }
+  if (lower.includes('bbva')) {
+    return 'BBVA México';
+  }
+  if (lower.includes('banorte')) {
+    return 'Banorte';
+  }
+
   return '';
 }
 
 /**
- * Normaliza el nombre del banco a su nombre canónico o conserva el nombre personalizado.
+ * Normaliza el nombre del banco a su nombre canónico o conserva el nombre personalizado,
+ * priorizando los bancos de la región seleccionada (`country`).
+ *
  * @param {string} rawBank
  * @param {string} [contextHint='']
+ * @param {string} [country='']
  * @returns {string}
  */
-export function normalizeHybridBankName(rawBank, contextHint = '') {
+export function normalizeHybridBankName(rawBank, contextHint = '', country = '') {
   const raw = String(rawBank ?? '').trim();
   const hint = String(contextHint ?? '').trim();
+  const targetCountry = normalizeUserCountryCode(country || DEFAULT_USER_COUNTRY);
+  const regionalConfig = getCountryRegionalConfig(targetCountry);
 
   // 1. Si `raw` es un nombre de banco explícito de una sola línea, priorizarlo sin que `contextHint` lo sobreescriba
   if (raw && !/\r?\n/.test(raw) && raw !== hint) {
@@ -315,7 +347,7 @@ export function normalizeHybridBankName(rawBank, contextHint = '') {
     if (directCanonical) return directCanonical;
 
     const isLikelyBankOrEntityName =
-      /\b(?:banco|cooperativa|financiera|billetera|credomatic|banpa[ií]s|ficohsa|davivienda|promerica|lafise|banrural|banhcaf[eé]|banhprovi|azteca|popular|tigo\s+money|tenge|kash|paypal|efectivo)\b/i.test(
+      /\b(?:banco|cooperativa|financiera|billetera|credomatic|banpa[ií]s|ficohsa|davivienda|promerica|lafise|banrural|industrial|continental|banhcaf[eé]|banhprovi|azteca|popular|tigo\s+money|tenge|kash|paypal|efectivo)\b/i.test(
         raw
       );
     if (isLikelyBankOrEntityName) {
@@ -325,6 +357,38 @@ export function normalizeHybridBankName(rawBank, contextHint = '') {
 
   const combined = `${raw} ${hint}`.toLowerCase();
 
+  // Priorización regional cuando `country === "HN"` (Atlántida, BAC, Ficohsa, Promerica, Banpaís)
+  if (targetCountry === 'HN') {
+    if (combined.includes('atlantida') || combined.includes('atlántida')) return 'Banco Atlántida';
+    if (
+      /\bbac\b/.test(combined) ||
+      combined.includes('credomatic') ||
+      combined.includes('cuentas personales') ||
+      combined.includes('tarjetas personales') ||
+      combined.includes('resumen de productos') ||
+      /\bhn\s*-\s*(?:cuenta|negocio|tarjeta|american\s+express|mastercard|visa|pr[eé]stamo)/i.test(
+        combined
+      )
+    ) {
+      return 'BAC Credomatic';
+    }
+    if (combined.includes('ficohsa')) return 'Banco Ficohsa';
+    if (combined.includes('promerica')) return 'Banco Promerica';
+    if (
+      combined.includes('banpais') ||
+      combined.includes('banpaís') ||
+      combined.includes('banco del pais') ||
+      combined.includes('banco del país')
+    ) {
+      return 'Banpaís (Banco del País)';
+    }
+  }
+
+  if (combined.includes('industrial') || /\bbi\s+en\s+l[ií]nea\b/.test(combined)) {
+    return 'Banco Industrial';
+  }
+  if (combined.includes('banrural')) return 'Banrural';
+  if (combined.includes('g&t') || combined.includes('continental')) return 'Banco G&T Continental';
   if (combined.includes('atlantida') || combined.includes('atlántida')) return 'Banco Atlántida';
   if (
     /\bbac\b/.test(combined) ||
@@ -351,7 +415,6 @@ export function normalizeHybridBankName(rawBank, contextHint = '') {
   if (combined.includes('occidente')) return 'Banco de Occidente';
   if (combined.includes('davivienda')) return 'Davivienda';
   if (combined.includes('lafise')) return 'Banco Lafise';
-  if (combined.includes('banrural')) return 'Banrural';
 
   if (raw && raw.length >= 3 && !/^\d+$/.test(raw) && !/\n/.test(raw)) {
     return raw.replace(/\s+/g, ' ').trim();
@@ -364,7 +427,7 @@ export function normalizeHybridBankName(rawBank, contextHint = '') {
     return customMatch[1].replace(/\s+/g, ' ').trim();
   }
 
-  return 'Banco Atlántida';
+  return regionalConfig.priorityBanks?.[0] || 'Banco Atlántida';
 }
 
 /**
@@ -408,13 +471,19 @@ export function normalizeHybridAccountItem(rawItem = {}, index = 0, defaultBankN
     isCreditCard ? `Tarjeta de Crédito ${rawType}` : rawType
   );
 
-  const currency = normalizeScanCurrency(rawItem?.currency || 'HNL');
+  const targetCountry = normalizeUserCountryCode(rawItem?.country || DEFAULT_USER_COUNTRY);
+  const regionalConfig = getCountryRegionalConfig(targetCountry);
+  const currency = normalizeTemplateCurrency(
+    rawItem?.currency || regionalConfig.currency || 'HNL',
+    targetCountry
+  );
   const currentBalance = sanitizeNumericAmount(
     rawItem?.currentBalance ?? rawItem?.balance ?? rawItem?.amount ?? 0
   );
   const bankName = normalizeHybridBankName(
     rawItem?.bankName || defaultBankName,
-    rawType
+    rawType,
+    targetCountry
   );
   const selected = rawItem?.selected !== undefined ? Boolean(rawItem.selected) : true;
   const status = /^inactiv/i.test(String(rawItem?.status || 'Activa'))
@@ -428,6 +497,7 @@ export function normalizeHybridAccountItem(rawItem = {}, index = 0, defaultBankN
     productType,
     accountNumber,
     currency,
+    country: targetCountry,
     currentBalance,
     isCreditCard,
     isLoan,
@@ -443,15 +513,22 @@ export function normalizeHybridAccountItem(rawItem = {}, index = 0, defaultBankN
  * @param {object} rawTx
  * @param {number} [index=0]
  * @param {string} [defaultCurrency='HNL']
+ * @param {string} [country='HN']
  */
-export function normalizeHybridTransactionItem(rawTx = {}, index = 0, defaultCurrency = 'HNL') {
+export function normalizeHybridTransactionItem(
+  rawTx = {},
+  index = 0,
+  defaultCurrency = 'HNL',
+  country = 'HN'
+) {
+  const targetCountry = normalizeUserCountryCode(rawTx?.country || country || DEFAULT_USER_COUNTRY);
   const concept = String(rawTx?.concept || rawTx?.description || 'Movimiento bancario')
     .replace(/\s+/g, ' ')
     .trim();
   const amount = Math.abs(sanitizeNumericAmount(rawTx?.amount));
   const type = classifyTransactionType(rawTx?.type, concept);
   const date = normalizeScanDateToIso(rawTx?.date);
-  const currency = normalizeScanCurrency(rawTx?.currency || defaultCurrency);
+  const currency = normalizeTemplateCurrency(rawTx?.currency || defaultCurrency, targetCountry);
   const selected = rawTx?.selected !== undefined ? Boolean(rawTx.selected) : true;
 
   return {
@@ -461,7 +538,56 @@ export function normalizeHybridTransactionItem(rawTx = {}, index = 0, defaultCur
     type,
     amount,
     currency,
+    country: targetCountry,
     selected,
+  };
+}
+
+/**
+ * Parsea facturas, recibos (vouchers POS) o comprobantes bancarios adaptando
+ * el impuesto (`ISV` en HN, `IVA` en GT/SV/CR/NI/MX, `ITBMS` en PA), la moneda
+ * (`HNL` / Lempiras para HN, `GTQ` / Quetzales para GT, etc.) y priorizando
+ * los bancos de la región seleccionada.
+ *
+ * @param {string} rawText
+ * @param {{ country?: string, storage?: Storage }} [options]
+ */
+export function parseRegionalInvoiceOrVoucher(rawText, options = {}) {
+  const targetCountry = normalizeUserCountryCode(
+    options.country || getActiveUserCountry({ storage: options.storage })
+  );
+  const taxAndCurrency = detectCountryTaxAndCurrency(rawText, targetCountry);
+  const bankName = normalizeHybridBankName('', rawText, targetCountry);
+
+  const totalMatch =
+    String(rawText || '').match(
+      /\b(?:total(?:\s+a\s+pagar|\s+factura|\s+recibo)?|monto(?:\s+total)?|importe\s+total)\s*[:|-]?\s*(?:LPS|HNL|GTQ|USD|US\$|\$|L\.?|Q\.?|C\$|₡)?\s*(\d{1,3}(?:,\d{3})+\.\d{2}|\d{1,9}\.\d{2})/i
+    ) ||
+    String(rawText || '').match(
+      /(?:LPS|HNL|GTQ|USD|US\$|\$|L\.?|Q\.?|C\$|₡)\s*(\d{1,3}(?:,\d{3})+\.\d{2}|\d{1,9}\.\d{2})/i
+    );
+
+  const totalAmount = totalMatch ? sanitizeNumericAmount(totalMatch[1]) : 0;
+  const subtotalMatch = String(rawText || '').match(
+    /(?:subtotal|importe\s+gravado|base\s+imponible)\s*[:|-]?\s*(?:LPS|HNL|GTQ|USD|US\$|\$|L\.?|Q\.?|C\$|₡)?\s*(\d{1,3}(?:,\d{3})+\.\d{2}|\d{1,9}\.\d{2})/i
+  );
+  const subtotalAmount = subtotalMatch
+    ? sanitizeNumericAmount(subtotalMatch[1])
+    : totalAmount > 0 && taxAndCurrency.taxAmount > 0
+      ? Number((totalAmount - taxAndCurrency.taxAmount).toFixed(2))
+      : totalAmount;
+
+  return {
+    country: targetCountry,
+    bankName,
+    currency: taxAndCurrency.currency,
+    currencySymbol: taxAndCurrency.currencySymbol,
+    taxType: taxAndCurrency.taxType,
+    taxLabel: taxAndCurrency.taxLabel,
+    taxRate: taxAndCurrency.taxRate,
+    taxAmount: taxAndCurrency.taxAmount,
+    subtotalAmount,
+    totalAmount,
   };
 }
 
@@ -662,6 +788,10 @@ export async function runTesseractLocalOcr(fileOrDataUrl, options = {}) {
  */
 export function parseMultiProductBankText(rawText, options = {}) {
   const expandDual = Boolean(options.expandDualCurrencyCards);
+  const targetCountry = normalizeUserCountryCode(
+    options.country || getActiveUserCountry({ storage: options.storage })
+  );
+  const regionalConfig = getCountryRegionalConfig(targetCountry);
   const cleanedText = cleanMobileUiText(String(rawText || ''));
   const lines = cleanedText
     .split(/\r?\n/)
@@ -670,7 +800,8 @@ export function parseMultiProductBankText(rawText, options = {}) {
 
   const bankName = normalizeHybridBankName(
     options.defaultBankName || cleanedText,
-    cleanedText
+    cleanedText,
+    targetCountry
   );
 
   const accountsList = [];
@@ -678,17 +809,21 @@ export function parseMultiProductBankText(rawText, options = {}) {
   let currentSection = '';
 
   const amountPattern =
-    /(?:(LPS|HNL|USD|US\$|\$|L\.?)\s*(\d{1,3}(?:,\d{3})+\.\d{2}|\d{1,9}\.\d{2})(?:\s*(?:LPS|HNL|USD))?|(\d{1,3}(?:,\d{3})+\.\d{2}|\d{1,9}\.\d{2})\s*(LPS|HNL|USD|US\$|\$|L\.?))/gi;
+    /(?:(LPS|HNL|GTQ|NIO|CRC|MXN|USD|US\$|\$|L\.?|Q\.?|C\$|₡)\s*(\d{1,3}(?:,\d{3})+\.\d{2}|\d{1,9}\.\d{2})(?:\s*(?:LPS|HNL|GTQ|NIO|CRC|MXN|USD))?|(\d{1,3}(?:,\d{3})+\.\d{2}|\d{1,9}\.\d{2})\s*(LPS|HNL|GTQ|NIO|CRC|MXN|USD|US\$|\$|L\.?|Q\.?|C\$|₡))/gi;
 
   const extractAmountsFromStr = (str) =>
     [...String(str || '').matchAll(amountPattern)].map((m) => ({
       rawMatch: m[0],
-      currency: normalizeTemplateCurrency(m[1] || m[4]),
+      currency: normalizeTemplateCurrency(m[1] || m[4], targetCountry),
       balance: sanitizeNumericAmount(m[2] || m[3]),
     }));
 
   const addAccountEntry = (rawEntry) => {
-    const norm = normalizeHybridAccountItem(rawEntry, accountsList.length, bankName);
+    const norm = normalizeHybridAccountItem(
+      { ...rawEntry, country: targetCountry },
+      accountsList.length,
+      bankName
+    );
     const key = `${norm.accountNumber}::${norm.currency}::${norm.productType}::${norm.currentBalance}`;
     if (!seenKeys.has(key)) {
       seenKeys.add(key);
@@ -906,7 +1041,7 @@ export function parseMultiProductBankText(rawText, options = {}) {
       .replace(/\s+/g, ' ')
       .trim();
     const rawTypeHint = txMatch[3] || '';
-    const rawCur = txMatch[4] || accountsList[0]?.currency || 'HNL';
+    const rawCur = txMatch[4] || accountsList[0]?.currency || regionalConfig.currency || 'HNL';
     const rawAmt = txMatch[5];
 
     const amount = sanitizeNumericAmount(rawAmt);
@@ -919,19 +1054,23 @@ export function parseMultiProductBankText(rawText, options = {}) {
             type: classifyTransactionType(rawTypeHint, rawConcept),
             amount,
             currency: rawCur,
+            country: targetCountry,
             selected: true,
           },
           transactionsList.length,
-          accountsList[0]?.currency || 'HNL'
+          accountsList[0]?.currency || regionalConfig.currency || 'HNL',
+          targetCountry
         )
       );
     }
   }
 
   return {
+    country: targetCountry,
     bankName: accountsList[0]?.bankName || bankName,
     accountsList,
     transactionsList,
+    taxMetadata: detectCountryTaxAndCurrency(cleanedText, targetCountry),
   };
 }
 
@@ -1167,16 +1306,24 @@ export async function extractBankDataHybrid(fileOrDataUrl, options = {}) {
     typeof options.confidenceThreshold === 'number'
       ? options.confidenceThreshold
       : DEFAULT_OCR_CONFIDENCE_THRESHOLD;
+  const targetCountry = normalizeUserCountryCode(
+    options.country || getActiveUserCountry({ storage: options.storage })
+  );
+  const regionalConfig = getCountryRegionalConfig(targetCountry);
 
-  // Cargar plantillas desde `bank_templates` (IndexedDB `bank_templates_local` + Firestore `bank_templates`)
+  // Cargar plantillas desde `bank_templates` filtradas por el `country` del usuario
   const bankTemplates =
     Array.isArray(options.templates) && options.templates.length > 0
-      ? options.templates
+      ? filterBankTemplatesByCountry(options.templates, targetCountry, {
+          strictCountryOnly: Boolean(options.strictCountryOnly),
+        })
       : await fetchBankTemplatesFromFirestore({
           firestoreDb: options.firestoreDb,
           firestoreModule: options.firestoreModule,
           indexedDb: options.indexedDb,
           storage: options.storage,
+          country: targetCountry,
+          strictCountryOnly: Boolean(options.strictCountryOnly),
         });
 
   // =========================================================================
@@ -1191,6 +1338,8 @@ export async function extractBankDataHybrid(fileOrDataUrl, options = {}) {
       indexedDb: options.indexedDb,
       storage: options.storage,
       templates: bankTemplates,
+      country: targetCountry,
+      strictCountryOnly: Boolean(options.strictCountryOnly),
     });
 
     if (templateMatch.matched && templateMatch.accountsList.length > 0) {
@@ -1202,6 +1351,7 @@ export async function extractBankDataHybrid(fileOrDataUrl, options = {}) {
         const multiParsed = parseMultiProductBankText(ocrText, {
           defaultBankName: templateMatch.bankName,
           expandDualCurrencyCards: true,
+          country: targetCountry,
         });
         if (multiParsed.accountsList.length > rawAccounts.length) {
           rawAccounts = multiParsed.accountsList;
@@ -1209,22 +1359,30 @@ export async function extractBankDataHybrid(fileOrDataUrl, options = {}) {
       }
 
       const normalizedAccounts = rawAccounts.map((acc, idx) =>
-        normalizeHybridAccountItem(acc, idx, templateMatch.bankName)
+        normalizeHybridAccountItem(
+          { ...acc, country: targetCountry },
+          idx,
+          templateMatch.bankName
+        )
       );
       const normalizedTransactions = (templateMatch.detectedTransactions || []).map(
         (tx, idx) =>
           normalizeHybridTransactionItem(
             tx,
             idx,
-            normalizedAccounts[0]?.currency || 'HNL'
+            normalizedAccounts[0]?.currency || regionalConfig.currency || 'HNL',
+            targetCountry
           )
       );
 
       const primary = normalizedAccounts[0];
+      const taxMetadata = detectCountryTaxAndCurrency(ocrText, targetCountry);
       return {
         stage: 'primary-local-ocr',
         usedGeminiFallback: false,
         apiCost: 0,
+        country: targetCountry,
+        taxMetadata,
         ocrConfidence,
         ocrText,
         matchedTemplate: templateMatch.template,
@@ -1287,26 +1445,39 @@ export async function extractBankDataHybrid(fileOrDataUrl, options = {}) {
               : [];
 
       const defaultBank = normalizeHybridBankName(
-        raw.bankName || rawAccounts[0]?.bankName || 'Banco Atlántida'
+        raw.bankName ||
+          rawAccounts[0]?.bankName ||
+          regionalConfig.priorityBanks?.[0] ||
+          'Banco Atlántida',
+        ocrText,
+        targetCountry
       );
 
       const normalizedAccounts = rawAccounts.map((acc, idx) =>
-        normalizeHybridAccountItem(acc, idx, defaultBank)
+        normalizeHybridAccountItem(
+          { ...acc, country: targetCountry },
+          idx,
+          defaultBank
+        )
       );
       const normalizedTransactions = rawTransactions.map((tx, idx) =>
         normalizeHybridTransactionItem(
           tx,
           idx,
-          normalizedAccounts[0]?.currency || 'HNL'
+          normalizedAccounts[0]?.currency || regionalConfig.currency || 'HNL',
+          targetCountry
         )
       );
 
       if (normalizedAccounts.length > 0) {
         const primary = normalizedAccounts[0];
+        const taxMetadata = detectCountryTaxAndCurrency(ocrText, targetCountry);
         return {
           stage: 'secondary-gemini-vision',
           usedGeminiFallback: true,
           apiCost: 1,
+          country: targetCountry,
+          taxMetadata,
           ocrConfidence,
           ocrText,
           matchedTemplate: null,
@@ -1339,6 +1510,7 @@ export async function extractBankDataHybrid(fileOrDataUrl, options = {}) {
   if (ocrText) {
     const multiParsed = parseMultiProductBankText(ocrText, {
       expandDualCurrencyCards: options.expandDualCurrencyCards !== false,
+      country: targetCountry,
     });
 
     if (multiParsed.accountsList.length > 0 || multiParsed.transactionsList.length > 0) {
@@ -1352,7 +1524,8 @@ export async function extractBankDataHybrid(fileOrDataUrl, options = {}) {
                   accountType: 'Cuenta de Ahorro',
                   productType: BANK_PRODUCT_TYPES.SAVINGS,
                   accountNumber: '',
-                  currency: 'HNL',
+                  currency: regionalConfig.currency || 'HNL',
+                  country: targetCountry,
                   currentBalance: 0,
                 },
                 0,
@@ -1365,6 +1538,8 @@ export async function extractBankDataHybrid(fileOrDataUrl, options = {}) {
         stage: 'local-heuristic-new-format',
         usedGeminiFallback: false,
         apiCost: 0,
+        country: targetCountry,
+        taxMetadata: multiParsed.taxMetadata,
         ocrConfidence,
         ocrText,
         matchedTemplate: null,
@@ -1396,6 +1571,8 @@ export {
   BANK_TEMPLATES_COLLECTION,
   BANK_TEMPLATES_LOCAL_STORE,
   computeLayoutFingerprint,
+  filterBankTemplatesByCountry,
   getAllLocalBankTemplates,
   learnBankTemplateFromConfirmation,
+  detectCountryTaxAndCurrency,
 };

@@ -21,6 +21,7 @@ import {
   SUPPORTED_COUNTRIES,
   FIRESTORE_USERS_CACHE_PREFIX,
   LOCAL_AUTH_SESSION_KEY,
+  normalizeCountryCode,
   createUserProfile,
   shouldTriggerOnboarding,
   ensureCleanWorkspaceForFirstTimeUser,
@@ -29,6 +30,19 @@ import {
   filterTransactionsForUserView,
   formatFirebaseAuthDiagnosticMessage,
 } from '../../../public/js/services/authProfileService.js';
+import {
+  DEFAULT_USER_COUNTRY,
+  SUPPORTED_ISO_COUNTRY_CODES,
+  COUNTRY_REGIONAL_CONFIG,
+  normalizeUserCountryCode,
+  getCountryRegionalConfig,
+  buildUserProfileSchema,
+  getCurrentUserProfile,
+  getActiveUserCountry,
+  syncUserProfileDocument,
+  updateUserProfile,
+  UserService,
+} from './user.js';
 import {
   ZERO_DASHBOARD_METRICS,
   clearDashboardDomContainers,
@@ -57,6 +71,7 @@ export {
   SUPPORTED_COUNTRIES,
   FIRESTORE_USERS_CACHE_PREFIX,
   LOCAL_AUTH_SESSION_KEY,
+  normalizeCountryCode,
   createUserProfile,
   shouldTriggerOnboarding,
   ensureCleanWorkspaceForFirstTimeUser,
@@ -66,23 +81,37 @@ export {
   formatFirebaseAuthDiagnosticMessage,
   clearDashboardDomContainers,
   resetDashboardDomToZeroAndEmpty,
+  DEFAULT_USER_COUNTRY,
+  SUPPORTED_ISO_COUNTRY_CODES,
+  COUNTRY_REGIONAL_CONFIG,
+  normalizeUserCountryCode,
+  getCountryRegionalConfig,
+  buildUserProfileSchema,
+  getCurrentUserProfile,
+  getActiveUserCountry,
+  syncUserProfileDocument,
+  updateUserProfile,
+  UserService,
 };
 
 /**
  * Construye el documento de usuario para un nuevo registro en la colección `users`,
- * garantizando por defecto `hasCompletedOnboarding: false`.
+ * garantizando por defecto `country: "HN"` y `hasCompletedOnboarding: false`.
  *
  * @param {object} userInput
  * @returns {object}
  */
 export function buildDefaultUserDocument(userInput = {}) {
+  const country = normalizeUserCountryCode(userInput?.country || DEFAULT_USER_COUNTRY);
   const profile = createUserProfile({
     ...userInput,
+    country,
     hasCompletedOnboarding:
       userInput?.hasCompletedOnboarding === true ? true : false,
   });
   return {
     ...profile,
+    country,
     hasCompletedOnboarding:
       userInput?.hasCompletedOnboarding === true ? true : false,
   };
@@ -90,7 +119,7 @@ export function buildDefaultUserDocument(userInput = {}) {
 
 /**
  * Crea o registra un nuevo documento de usuario en `users/{uid}` asegurando
- * explícitamente la propiedad `hasCompletedOnboarding: false`.
+ * explícitamente la propiedad `country` (por defecto `"HN"`) y `hasCompletedOnboarding: false`.
  *
  * @param {object} user
  * @param {object} [options]
@@ -108,9 +137,11 @@ export async function registerNewUserDocument(user, options = {}) {
     throw new Error('El uid del usuario es obligatorio para crear el documento en users/{uid}.');
   }
 
+  const country = normalizeUserCountryCode(user?.country || options?.country || DEFAULT_USER_COUNTRY);
   const newUserDoc = buildDefaultUserDocument({
     ...user,
     uid,
+    country,
     hasCompletedOnboarding: false,
   });
 

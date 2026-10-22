@@ -21,12 +21,40 @@ import {
   encodeSmartScanFileToBase64,
   renderPdfFirstPageThumbnail,
   extractSmartScanDocument,
+  extractStatementTransactionsFromText,
   learnStatementFormatTemplate,
 } from '../services/smartScanExtractor.js';
+import {
+  VECTOR_PDF_MIN_CHARS,
+  extractPdfData,
+} from '../services/pdfExtractor.js';
+import {
+  parseBankStatementTextData,
+  parseStatementHeaderAccountData,
+  parseStatementTransactions,
+  detectActiveStatementCurrency,
+  normalizeBankStatementDate,
+} from '../services/bankParsers.js';
 import {
   SMART_SCAN_FILE_INPUT_ID,
   extractFileFromInputOrDropEvent,
 } from './TransactionsView.js';
+import {
+  identifyDocumentTemplate,
+  parseDocumentWithTemplate,
+  matchAndParseDocumentWithTemplate,
+  recordDocumentTemplateFeedback,
+} from '../services/patternLearner.js';
+
+export {
+  VECTOR_PDF_MIN_CHARS,
+  extractPdfData,
+  parseBankStatementTextData,
+  parseStatementHeaderAccountData,
+  parseStatementTransactions,
+  detectActiveStatementCurrency,
+  normalizeBankStatementDate,
+};
 
 export const SMART_SCAN_MODAL_ID = 'smart-scan-dialog';
 export const SMART_SCAN_MODAL_FILE_INPUT_ID = 'smart-scan-modal-file-input';
@@ -36,12 +64,271 @@ export const SMART_SCAN_THUMBNAIL_CONTAINER_ID = 'smart-scan-thumbnail-container
 export const SMART_SCAN_PREVIEW_CANVAS_ID = 'smart-scan-preview-canvas';
 export const SMART_SCAN_PREVIEW_IMG_ID = 'smart-scan-preview-img';
 export const STATEMENT_FOOTER_SUMMARY_ID = 'smart-scan-statement-footer-summary';
+export const SMART_SCAN_PROCESS_BUTTON_ID = 'btn-process-file';
+export const SMART_SCAN_PROCESS_BUTTON_LABEL = '⚡ Procesar y Evaluar Documento';
+export const SMART_SCAN_ANALYZING_PDF_LABEL = '⏳ Analizando PDF...';
+export const SMART_SCAN_TOAST_OVERLAY_ID = 'smart-scan-toast-overlay';
 
 export const DUPLICATE_RESOLUTION_ACTIONS = Object.freeze({
   OVERWRITE: 'overwrite',
   CREATE_NEW: 'create_new',
   SKIP: 'skip',
 });
+
+/**
+ * 3a) Abstrae la información del encabezado del documento (Datos de Cuenta):
+ * - Extrae Nombre del Banco (`bankName`), Número de Cuenta/Tarjeta (`accountNumber` / `cuentaIdentificada`),
+ *   Moneda (`HNL` / `USD`) y Tipo de Cuenta (`accountType`, `accountTypeLabel`).
+ * - Evalúa automáticamente la coincidencia contra las cuentas activas del workspace para poblar
+ *   "Cuenta / Últimos 4 Dígitos" y "Cuenta Asociada".
+ *
+ * @param {object} [extracted={}]
+ * @param {object} [state={}]
+ * @returns {{
+ *   bankName: string,
+ *   accountNumber: string,
+ *   cuentaIdentificada: string,
+ *   last4Digits: string,
+ *   currency: 'HNL'|'USD',
+ *   moneda: 'HNL'|'USD',
+ *   accountType: 'card'|'bank',
+ *   accountTypeLabel: string,
+ *   activeAccounts: Array<object>,
+ *   matchedAccountId: string,
+ *   matchedAccount: object|null,
+ *   accountMatch: object
+ * }}
+ */
+export function abstractDocumentHeaderAccountData(extracted = {}, state = {}) {
+  const accountInfo = extracted?.accountInfo || {};
+  const rawText = String(extracted?.rawText || '').trim();
+  const parsedHeaderFromText = rawText ? parseStatementHeaderAccountData(rawText) : null;
+  const metadata = detectBankAndAccountMetadata(
+    rawText ||
+      `${extracted?.bankName || ''} ${extracted?.detectedBank || ''} ${accountInfo?.bankName || ''} ${accountInfo?.accountName || ''}`
+  );
+
+  const bankName = String(
+    (parsedHeaderFromText?.bankName && parsedHeaderFromText.bankName !== 'Banco Local'
+      ? parsedHeaderFromText.bankName
+      : '') ||
+      extracted?.bankName ||
+      extracted?.detectedBank ||
+      accountInfo?.bankName ||
+      metadata.bankName ||
+      'Banco Local'
+  ).trim();
+
+  const accountNumber = String(
+    parsedHeaderFromText?.accountNumber ||
+      extracted?.cuentaIdentificada ||
+      extracted?.accountNumber ||
+      accountInfo?.accountNumber ||
+      metadata.accountNumber ||
+      ''
+  ).trim();
+
+  const last4Digits = extractLast4Digits(accountNumber) || accountNumber;
+
+  const currency = parsedHeaderFromText?.currency
+    ? parsedHeaderFromText.currency
+    : extracted?.moneda === 'USD' ||
+        extracted?.currency === 'USD' ||
+        accountInfo?.currency === 'USD'
+      ? 'USD'
+      : 'HNL';
+
+  const creditLimit = sanitizeSmartScanAmount(
+    extracted?.creditLimit ?? accountInfo?.creditLimit ?? parsedHeaderFromText?.creditLimit ?? 0
+  );
+  const isCreditCard =
+    creditLimit > 0 ||
+    parsedHeaderFromText?.accountType === 'card' ||
+    extracted?.detectedAccountType === 'card' ||
+    accountInfo?.accountType === 'card' ||
+    /Tarjeta|PLATINUM|VISA|MASTERCARD|AMEX/i.test(
+      `${extracted?.statementDocumentType || ''} ${accountInfo?.accountName || ''} ${parsedHeaderFromText?.accountName || ''} ${extracted?.detectedAccountTypeLabel || ''}`
+    ) ||
+    metadata.accountType === 'card';
+
+  const accountType = isCreditCard ? 'card' : 'bank';
+  const accountTypeLabel = String(
+    accountInfo?.accountName ||
+      parsedHeaderFromText?.accountName ||
+      extracted?.detectedAccountTypeLabel ||
+      accountInfo?.accountTypeLabel ||
+      metadata.accountTypeLabel ||
+      (isCreditCard ? 'Tarjeta de Crédito' : 'Cuenta de Ahorro')
+  ).trim();
+
+  const activeAccounts =
+    extracted?.accountMatch?.activeAccounts ||
+    filterActiveAccounts(state?.accounts || []).filter(
+      (a) => a && !a.archived && !a.isArchived
+    );
+
+  let effectiveAccountMatch = extracted?.accountMatch || null;
+  if (!effectiveAccountMatch && accountNumber) {
+    const targetLast4 = extractLast4Digits(accountNumber);
+    const matchedAcc = activeAccounts.find((acc) => {
+      const accDigits = String(acc.accountNumber || '').replace(/\D/g, '');
+      const rawDigits = accountNumber.replace(/\D/g, '');
+      if (accDigits && rawDigits && (accDigits === rawDigits || accDigits.endsWith(rawDigits))) {
+        return true;
+      }
+      const accLast4 = extractLast4Digits(acc.accountNumber || '');
+      return Boolean(targetLast4 && accLast4 && accLast4 === targetLast4);
+    });
+    effectiveAccountMatch = {
+      matched: Boolean(matchedAcc),
+      accountId: matchedAcc?.id || '',
+      matchedAccount: matchedAcc || null,
+      activeAccounts,
+      matchedDigits: targetLast4 || accountNumber,
+    };
+  } else if (!effectiveAccountMatch) {
+    effectiveAccountMatch = {
+      matched: false,
+      accountId: '',
+      matchedAccount: null,
+      activeAccounts,
+      matchedDigits: '',
+    };
+  }
+
+  const matchedAccountId = effectiveAccountMatch?.matched
+    ? effectiveAccountMatch.accountId
+    : String(extracted?.accountId || '').trim();
+
+  return {
+    bankName,
+    accountNumber,
+    cuentaIdentificada: accountNumber,
+    last4Digits,
+    currency,
+    moneda: currency,
+    accountType,
+    accountTypeLabel,
+    activeAccounts,
+    matchedAccountId,
+    matchedAccount: effectiveAccountMatch?.matchedAccount || null,
+    accountMatch: effectiveAccountMatch,
+  };
+}
+
+/**
+ * 3b) Abstrae el detalle del cuerpo del documento (Lista de Transacciones):
+ * - Extrae fechas, conceptos/comercios, montos y tipos (Ingreso/Gasto).
+ * - Genera filas normalizadas listas para poblar dinámicamente la tabla
+ *   "Movimientos Extraídos del Estado de Cuenta".
+ *
+ * @param {object} [extracted={}]
+ * @param {object} [headerData={}]
+ * @returns {Array<{
+ *   id: string,
+ *   selected: boolean,
+ *   fecha: string,
+ *   date: string,
+ *   comercio: string,
+ *   concept: string,
+ *   monto: number,
+ *   amount: number,
+ *   moneda: 'HNL'|'USD',
+ *   currency: 'HNL'|'USD',
+ *   tipo: 'income'|'expense',
+ *   type: 'income'|'expense',
+ *   categoryId: string,
+ *   categoriaSugerida: string
+ * }>}
+ */
+export function abstractDocumentBodyTransactions(extracted = {}, headerData = {}) {
+  const defaultCurrency =
+    headerData?.currency ||
+    headerData?.moneda ||
+    (extracted?.moneda === 'USD' || extracted?.currency === 'USD' ? 'USD' : 'HNL');
+  const fallbackDate = normalizeSmartScanDate(
+    extracted?.fecha ||
+      extracted?.date ||
+      extracted?.accountInfo?.cutoffDate ||
+      new Date().toISOString().slice(0, 10)
+  );
+
+  let rawRows = Array.isArray(extracted?.statementItems)
+    ? extracted.statementItems
+    : Array.isArray(extracted?.statementTransactions)
+      ? extracted.statementTransactions
+      : Array.isArray(extracted?.transactions)
+        ? extracted.transactions
+        : [];
+
+  if (extracted?.rawText) {
+    const parsedFromBankParser = parseStatementTransactions(
+      String(extracted.rawText),
+      defaultCurrency
+    );
+    const parsedFromText =
+      parsedFromBankParser.length > 0
+        ? parsedFromBankParser
+        : extractStatementTransactionsFromText(String(extracted.rawText), defaultCurrency);
+
+    const hasOnlyPlaceholderDefaultRow =
+      rawRows.length === 1 &&
+      (!rawRows[0]?.comercio && !rawRows[0]?.concept
+        ? true
+        : String(rawRows[0]?.comercio || rawRows[0]?.concept || '')
+            .trim()
+            .toUpperCase() ===
+          String(
+            headerData?.accountTypeLabel ||
+              extracted?.accountInfo?.accountName ||
+              extracted?.accountName ||
+              ''
+          )
+            .trim()
+            .toUpperCase());
+
+    if ((rawRows.length === 0 || hasOnlyPlaceholderDefaultRow) && parsedFromText.length > 0) {
+      rawRows = parsedFromText;
+    }
+  }
+
+  return rawRows.map((row, idx) => {
+    const fecha = normalizeSmartScanDate(row.fecha || row.date || fallbackDate);
+    const comercio = String(
+      row.comercio || row.merchant || row.concept || row.description || 'Movimiento'
+    ).trim();
+    const monto = sanitizeSmartScanAmount(row.monto ?? row.amount ?? 0);
+    const moneda =
+      row.moneda === 'USD' || row.currency === 'USD' ? 'USD' : defaultCurrency;
+    const isIncome =
+      row.tipo === TRANSACTION_TYPES.INCOME ||
+      row.type === TRANSACTION_TYPES.INCOME ||
+      /cr[eé]dito|abono|dep[oó]sito|pago\s+gracias|su\s+pago/i.test(
+        `${row.tipo || ''} ${row.type || ''} ${comercio}`
+      );
+    const tipo = isIncome ? TRANSACTION_TYPES.INCOME : TRANSACTION_TYPES.EXPENSE;
+
+    return {
+      id: row.id || `stmt_tx_${idx + 1}`,
+      selected: row.selected !== false,
+      fecha,
+      date: fecha,
+      comercio,
+      concept: comercio,
+      monto,
+      amount: monto,
+      moneda,
+      currency: moneda,
+      tipo,
+      type: tipo,
+      categoryId:
+        row.categoryId || (tipo === TRANSACTION_TYPES.INCOME ? 'salary' : 'groceries'),
+      categoriaSugerida:
+        row.categoriaSugerida ||
+        (tipo === TRANSACTION_TYPES.INCOME ? 'Ingresos' : 'Supermercado'),
+    };
+  });
+}
 
 /**
  * Genera el aviso explícito cuando la cuenta identificada no se encuentra en el espacio financiero.
@@ -65,27 +352,78 @@ export function formatCreateAndAssociateAccountButtonLabel(accountNumber = '') {
 
 /**
  * Genera la alerta concisa cuando la cuenta detectada no existe en el workspace de Firestore.
+ * - Si se especifica `bankName`, muestra:
+ *   `⚠️ La cuenta N.º 310074459 (Banco Promerica) no existe. ¿Deseas crearla automáticamente?`
+ * - Si no se especifica `bankName`, muestra:
+ *   `⚠️ La cuenta N.º {accountNumber} no existe. Se creará automáticamente`
+ *
  * @param {string} accountNumber
+ * @param {string} [bankName='']
  * @returns {string}
  */
-export function formatMissingAccountAlertText(accountNumber = '') {
+export function formatMissingAccountAlertText(accountNumber = '', bankName = '') {
   const num = String(accountNumber || '').trim() || 'S/N';
+  const cleanBank = String(bankName || '').trim();
+  if (cleanBank) {
+    return `⚠️ La cuenta N.º ${num} (${cleanBank}) no existe. ¿Deseas crearla automáticamente?`;
+  }
   return `⚠️ La cuenta N.º ${num} no existe. Se creará automáticamente`;
+}
+
+/**
+ * Genera la alerta de confirmación para crear automáticamente una cuenta bancaria o de crédito faltante:
+ * `"⚠️ La cuenta N.º 310074459 (Banco Promerica) no existe. ¿Deseas crearla automáticamente?"`
+ *
+ * @param {string} accountNumber
+ * @param {string} [bankName='']
+ * @returns {string}
+ */
+export function formatMissingBankAccountPrompt(accountNumber = '', bankName = '') {
+  const num = String(accountNumber || '').trim() || 'S/N';
+  const cleanBank = String(bankName || '').trim();
+  if (cleanBank) {
+    return `⚠️ La cuenta N.º ${num} (${cleanBank}) no existe. ¿Deseas crearla automáticamente?`;
+  }
+  return `⚠️ La cuenta N.º ${num} no existe. ¿Deseas crearla automáticamente?`;
+}
+
+/**
+ * Genera el aviso nítido en primer plano cuando la cuenta extraída del PDF no está registrada en Firestore `accounts`:
+ * `"⚠️ La cuenta N.º 310074459 (Banco Promerica) no está registrada. Se creará automáticamente al guardar."`
+ *
+ * @param {string} accountNumber
+ * @param {string} [bankName='']
+ * @returns {string}
+ */
+export function formatUnregisteredAccountNotice(accountNumber = '', bankName = '') {
+  const num = String(accountNumber || '').trim() || 'S/N';
+  const cleanBank = String(bankName || '').trim();
+  if (cleanBank && cleanBank !== 'Banco Local') {
+    return `⚠️ La cuenta N.º ${num} (${cleanBank}) no está registrada. Se creará automáticamente al guardar.`;
+  }
+  return `⚠️ La cuenta N.º ${num} no está registrada. Se creará automáticamente al guardar.`;
 }
 
 /**
  * Genera el mensaje de aviso cuando la cuenta identificada en el documento no existe en el workspace.
  * @param {string} accountNumber
- * @param {{ short?: boolean, workspaceNotice?: boolean }} [options]
+ * @param {{ short?: boolean, workspaceNotice?: boolean, unregistered?: boolean, bankName?: string }} [options]
  * @returns {string}
  */
 export function formatMissingAccountBannerMessage(accountNumber = '', options = {}) {
   const num = String(accountNumber || '').trim() || 'S/N';
+  const bankName = String(options?.bankName || '').trim();
+  if (options?.unregistered === true) {
+    return formatUnregisteredAccountNotice(num, bankName);
+  }
   if (options?.short === true) {
-    return formatMissingAccountAlertText(num);
+    return formatMissingAccountAlertText(num, bankName);
   }
   if (options?.workspaceNotice === true) {
     return formatMissingAccountWorkspaceNotice(num);
+  }
+  if (bankName) {
+    return formatMissingBankAccountPrompt(num, bankName);
   }
   return `⚠️ La cuenta N.º ${num} no existe en tu espacio. Se creará automáticamente con la información del documento.`;
 }
@@ -328,6 +666,14 @@ export function renderSmartScanModalMarkup() {
     .join('');
 
   return `
+    <div
+      id="${SMART_SCAN_TOAST_OVERLAY_ID}"
+      class="smart-scan-toast-overlay is-hidden"
+      role="status"
+      aria-live="assertive"
+      style="position: fixed; top: 1.25rem; left: 50%; transform: translateX(-50%); z-index: 9999; filter: none; backdrop-filter: none; opacity: 1;"
+    ></div>
+
     <div class="modal-header">
       <div>
         <h3 id="smart-scan-dialog-title">📷 Escanear Documento / PDF</h3>
@@ -377,7 +723,13 @@ export function renderSmartScanModalMarkup() {
             data-action="pick-smart-scan-file"
             style="margin-top: 0.5rem; width: 100%;"
           >📂 Seleccionar o arrastrar imagen / PDF</button>
-          <div id="smart-scan-match-badges" class="voucher-match-badges"></div>
+          <button
+            type="button"
+            id="${SMART_SCAN_PROCESS_BUTTON_ID}"
+            class="btn-primary btn-sm"
+            data-action="process-smart-scan-file"
+            style="margin-top: 0.5rem; width: 100%;"
+          >${SMART_SCAN_PROCESS_BUTTON_LABEL}</button>
         </div>
 
         <div class="voucher-fields-pane">
@@ -388,9 +740,12 @@ export function renderSmartScanModalMarkup() {
             id="smart-scan-missing-account-banner"
             class="is-hidden"
             role="alert"
-            style="padding: 0.85rem 1rem; border-radius: var(--radius-md); background: rgba(245, 158, 11, 0.14); border: 1px solid rgba(245, 158, 11, 0.45); margin-bottom: 0.85rem;"
+            style="padding: 0.85rem 1rem; border-radius: var(--radius-md); background: rgba(245, 158, 11, 0.14); border: 1px solid rgba(245, 158, 11, 0.45); margin-bottom: 0.85rem; position: relative; z-index: 9999; filter: none; backdrop-filter: none; opacity: 1;"
           >
-            <strong id="smart-scan-missing-account-workspace-notice" style="display: block; font-size: 0.85rem; color: #fbbf24; margin-bottom: 0.25rem;">
+            <strong id="smart-scan-unregistered-account-notice" style="display: block; font-size: 0.86rem; color: #fbbf24; margin-bottom: 0.25rem;">
+              ⚠️ La cuenta N.º S/N no está registrada. Se creará automáticamente al guardar.
+            </strong>
+            <strong id="smart-scan-missing-account-workspace-notice" style="display: block; font-size: 0.82rem; color: #fbbf24; margin-bottom: 0.2rem;">
               ⚠️ La cuenta N.º S/N no se encuentra en tu espacio financiero.
             </strong>
             <span id="smart-scan-missing-account-alert" style="display: block; font-size: 0.78rem; color: #fcd34d; margin-bottom: 0.2rem;">
@@ -673,16 +1028,20 @@ export async function confirmAndPersistStatementBatch(paramsOrPayload = {}, seco
   );
 
   const effectiveRawText = String(rawText || extractedData.rawText || '').trim();
+  const accountInfo = extractedData.accountInfo || merged.accountInfo || accountMetadata || {};
   const cuentaIdentificada = String(
     extractedData.cuentaIdentificada ||
+      extractedData.accountNumber ||
+      accountInfo?.accountNumber ||
       merged.cuentaIdentificada ||
-      accountMetadata?.accountNumber ||
+      merged.accountNumber ||
       ''
   ).trim();
   const moneda =
     extractedData.moneda === 'USD' ||
-    merged.moneda === 'USD' ||
-    accountMetadata?.currency === 'USD'
+    extractedData.currency === 'USD' ||
+    accountInfo?.currency === 'USD' ||
+    merged.moneda === 'USD'
       ? 'USD'
       : 'HNL';
   const metadata = detectBankAndAccountMetadata(effectiveRawText);
@@ -690,20 +1049,41 @@ export async function confirmAndPersistStatementBatch(paramsOrPayload = {}, seco
     extractedData.detectedBank ||
       extractedData.bankName ||
       merged.bankName ||
-      accountMetadata?.bankName ||
+      accountInfo?.bankName ||
       metadata.bankName ||
       'Banco Local'
   ).trim();
-  const detectedAccountType =
-    extractedData.detectedAccountType ||
-    accountMetadata?.accountType ||
-    metadata.accountType ||
-    'bank';
-  const detectedAccountTypeLabel =
-    extractedData.detectedAccountTypeLabel ||
-    accountMetadata?.accountTypeLabel ||
-    metadata.accountTypeLabel ||
-    'Cuenta de Ahorro';
+  const creditLimit = sanitizeSmartScanAmount(
+    extractedData.creditLimit ?? accountInfo?.creditLimit ?? merged.creditLimit ?? 0
+  );
+  const minimumPayment = sanitizeSmartScanAmount(
+    extractedData.minimumPayment ?? accountInfo?.minimumPayment ?? merged.minimumPayment ?? 0
+  );
+  const cutoffDate = String(
+    extractedData.cutoffDate || accountInfo?.cutoffDate || merged.cutoffDate || ''
+  ).trim();
+  const paymentDueDate = String(
+    extractedData.paymentDueDate || accountInfo?.paymentDueDate || merged.paymentDueDate || ''
+  ).trim();
+  const owner = String(
+    extractedData.owner || accountInfo?.owner || merged.owner || ''
+  ).trim();
+  const isCreditCard =
+    creditLimit > 0 ||
+    extractedData.detectedAccountType === 'card' ||
+    accountInfo?.accountType === 'card' ||
+    /Tarjeta|PLATINUM|VISA|MASTERCARD|AMEX/i.test(
+      `${extractedData.documentType || ''} ${accountInfo?.accountName || ''} ${extractedData.detectedAccountTypeLabel || ''}`
+    ) ||
+    metadata.accountType === 'card';
+  const detectedAccountType = isCreditCard ? 'card' : 'bank';
+  const detectedAccountTypeLabel = String(
+    accountInfo?.accountName ||
+      extractedData.detectedAccountTypeLabel ||
+      accountInfo?.accountTypeLabel ||
+      metadata.accountTypeLabel ||
+      (isCreditCard ? 'Tarjeta de Crédito' : 'Cuenta de Ahorro')
+  ).trim();
 
   let targetAccountId = String(selectedAccountId || extractedData.accountId || '').trim();
   let targetAccount = state.accounts.find((a) => a.id === targetAccountId) || null;
@@ -723,8 +1103,14 @@ export async function confirmAndPersistStatementBatch(paramsOrPayload = {}, seco
     createdAccount = {
       ...baseAcc,
       bankName: detectedBank,
+      accountName: detectedAccountTypeLabel,
       accountType: detectedAccountTypeLabel,
       accountNumber: cuentaIdentificada || last4,
+      creditLimit,
+      minimumPayment,
+      cutoffDate,
+      paymentDueDate,
+      owner,
       currentBalance: 0,
       archived: false,
       isArchived: false,
@@ -735,6 +1121,11 @@ export async function confirmAndPersistStatementBatch(paramsOrPayload = {}, seco
   } else if (!targetAccount && state.accounts[0]) {
     targetAccount = state.accounts[0];
     targetAccountId = targetAccount.id;
+  }
+
+  if (targetAccount?._pendingBatchCreate) {
+    delete targetAccount._pendingBatchCreate;
+    createdAccount = targetAccount;
   }
 
   if (!targetAccountId) {
@@ -900,7 +1291,7 @@ export async function confirmAndPersistStatementBatch(paramsOrPayload = {}, seco
     }
   }
 
-  // 3. Aprendizaje Adaptativo de Formatos (Pattern Learning) en bank_templates (IndexedDB + Firestore)
+  // 3. Aprendizaje Adaptativo de Formatos (Pattern Learning) en bank_templates y document_templates (IndexedDB + Firestore)
   const learnedTemplate = await learnStatementFormatTemplate({
     bankName: detectedBank,
     accountNumber: cuentaIdentificada || targetAccount?.accountNumber || '',
@@ -914,6 +1305,26 @@ export async function confirmAndPersistStatementBatch(paramsOrPayload = {}, seco
     storage,
   });
 
+  const learnedDocumentTemplate = await recordDocumentTemplateFeedback(
+    {
+      country: extractedData.country || merged.country || state?.user?.country || state?.profile?.country,
+      docType: 'bank_statement',
+      institutionName: detectedBank,
+      accountNumber: cuentaIdentificada || targetAccount?.accountNumber || '',
+      accountName: detectedAccountTypeLabel,
+      currency: moneda,
+      rawText: effectiveRawText,
+      transactions: savedTransactions,
+    },
+    {
+      firestoreDb,
+      firestoreModule,
+      indexedDb,
+      storage,
+      state,
+    }
+  );
+
   return {
     saved: true,
     action: 'statement_batch',
@@ -926,6 +1337,7 @@ export async function confirmAndPersistStatementBatch(paramsOrPayload = {}, seco
     updatedAccount: targetAccount,
     newAccountBalance,
     learnedTemplate,
+    learnedDocumentTemplate,
   };
 }
 
@@ -1210,6 +1622,42 @@ export async function confirmAndPersistSmartScanTransaction(
     }
   }
 
+  const learnedDocumentTemplate = await recordDocumentTemplateFeedback(
+    {
+      country:
+        extractedData.country ||
+        merged.country ||
+        state?.user?.country ||
+        state?.profile?.country,
+      docType:
+        tipoDocumento === SMART_SCAN_DOCUMENT_TYPES.INVOICE_RECEIPT
+          ? 'tax_invoice'
+          : 'pos_voucher',
+      institutionName:
+        extractedData.institutionName ||
+        extractedData.detectedBank ||
+        comercio ||
+        'Voucher POS / Facturación SAR Honduras',
+      accountNumber: cuentaIdentificada || '',
+      currency: moneda,
+      rtn: extractedData.rtn || '',
+      cai: extractedData.cai || '',
+      rawText: String(extractedData.rawText || merged.rawText || ''),
+      transactions: [savedTx],
+    },
+    {
+      firestoreDb:
+        typeof firestoreModule?.updateDoc === 'function' ||
+        typeof firestoreModule?.collection === 'function'
+          ? firestoreDb
+          : null,
+      firestoreModule,
+      indexedDb: merged.indexedDb,
+      storage,
+      state,
+    }
+  );
+
   return {
     action: effectiveAction,
     saved: true,
@@ -1218,6 +1666,7 @@ export async function confirmAndPersistSmartScanTransaction(
     transaction: savedTx,
     updatedAccount,
     newAccountBalance,
+    learnedDocumentTemplate,
   };
 }
 
@@ -1232,13 +1681,21 @@ export class SmartScanModal {
   constructor(options = {}) {
     this.doc = options.doc || (typeof document !== 'undefined' ? document : null);
     this.getState = typeof options.getState === 'function' ? options.getState : () => ({});
-    this.getWorkspaceId =
-      typeof options.getWorkspaceId === 'function' ? options.getWorkspaceId : () => '';
+    this._rawGetWorkspaceId =
+      typeof options.getWorkspaceId === 'function'
+        ? options.getWorkspaceId
+        : typeof options.getActiveWorkspaceId === 'function'
+          ? options.getActiveWorkspaceId
+          : null;
+    this.authService = options.authService || null;
+    this.getWorkspaceId = () => this.getActiveWorkspaceId();
     this.firestoreDb = options.firestoreDb || null;
     this.firestoreModule = options.firestoreModule || null;
     this.recordTransactionFn = options.recordTransactionFn || null;
     this.onSaved = typeof options.onSaved === 'function' ? options.onSaved : null;
-    this.showToast = typeof options.showToast === 'function' ? options.showToast : () => {};
+    this._externalShowToast =
+      typeof options.showToast === 'function' ? options.showToast : null;
+    this.showToast = (message) => this.displayForegroundToast(message);
     this.storage =
       options.storage || (typeof localStorage !== 'undefined' ? localStorage : null);
     this.indexedDb =
@@ -1246,9 +1703,131 @@ export class SmartScanModal {
       (typeof globalThis !== 'undefined' ? globalThis.indexedDB : undefined);
 
     this.currentExtracted = null;
+    this.currentFile = null;
+    this.lastSelectedFile = null;
+    this.lastAnalyzingButtonLabel = '';
     this.statementRows = [];
     this.createMissingAccountAccepted = false;
+    this.createMissingAccountConfirmed = false;
+    this.modalEl = options.modalEl || null;
+    this._toastTimer = null;
     this._bound = false;
+  }
+
+  /**
+   * Busca un elemento por ID tanto en `this.doc` como en `this.modalEl`.
+   * @param {string} id
+   * @returns {HTMLElement|null}
+   */
+  findElement(id) {
+    const cleanId = String(id || '').replace(/^#/, '');
+    if (!cleanId) return null;
+    return (
+      this.doc?.getElementById?.(cleanId) ||
+      this.modalEl?.querySelector?.(`#${cleanId}`) ||
+      this.doc?.querySelector?.(`#${cleanId}`) ||
+      null
+    );
+  }
+
+  /**
+   * Actualiza el estado visual del botón `#btn-process-file`:
+   * - En análisis: `"⏳ Analizando PDF..."` (`SMART_SCAN_ANALYZING_PDF_LABEL`)
+   * - En reposo: `"⚡ Procesar y Evaluar Documento"` (`SMART_SCAN_PROCESS_BUTTON_LABEL`)
+   *
+   * @param {boolean} isLoading
+   */
+  setProcessButtonLoadingState(isLoading = false) {
+    const processBtn = this.findElement(SMART_SCAN_PROCESS_BUTTON_ID);
+    if (isLoading) {
+      this.lastAnalyzingButtonLabel = SMART_SCAN_ANALYZING_PDF_LABEL;
+    }
+    if (!processBtn) return;
+
+    if (isLoading) {
+      processBtn.textContent = SMART_SCAN_ANALYZING_PDF_LABEL;
+      if (processBtn.dataset) {
+        processBtn.dataset.loading = 'true';
+        processBtn.dataset.loadingLabel = SMART_SCAN_ANALYZING_PDF_LABEL;
+      }
+      processBtn.disabled = true;
+    } else {
+      processBtn.textContent = SMART_SCAN_PROCESS_BUTTON_LABEL;
+      if (processBtn.dataset) {
+        processBtn.dataset.loading = 'false';
+      }
+      processBtn.disabled = false;
+    }
+  }
+
+  /**
+   * Obtiene de forma segura el ID del workspace activo evitando errores como
+   * `this.getActiveWorkspaceId is not a function`.
+   * @returns {string}
+   */
+  getActiveWorkspaceId() {
+    if (typeof this._rawGetWorkspaceId === 'function') {
+      try {
+        const wsId = this._rawGetWorkspaceId();
+        if (wsId) return String(wsId);
+      } catch {
+        // Fallback seguro al estado local o authService
+      }
+    }
+    const state = typeof this.getState === 'function' ? this.getState() : {};
+    return String(
+      this.authService?.getActiveWorkspaceId?.() ||
+        state?.activeWorkspaceId ||
+        state?.workspaceId ||
+        state?.settings?.workspaceId ||
+        'ws_default'
+    );
+  }
+
+  /**
+   * Muestra notificaciones y alertas en primer plano (`z-index: 9999`) completamente nítidas,
+   * sin difuminado (`filter: none`, `backdrop-filter: none`) ni superposiciones opacas detrás del modal.
+   *
+   * @param {string} message
+   */
+  displayForegroundToast(message) {
+    const cleanMsg = String(message || '').trim();
+    if (!cleanMsg) return;
+
+    const appToast = this.findElement('app-toast');
+    if (appToast) {
+      if (appToast.style) {
+        appToast.style.zIndex = '9999';
+        appToast.style.filter = 'none';
+        appToast.style.backdropFilter = 'none';
+      }
+    }
+
+    const modalOverlayToast = this.findElement(SMART_SCAN_TOAST_OVERLAY_ID);
+    if (modalOverlayToast) {
+      modalOverlayToast.textContent = cleanMsg;
+      modalOverlayToast.innerHTML = cleanMsg;
+      modalOverlayToast.hidden = false;
+      modalOverlayToast.removeAttribute?.('hidden');
+      if (modalOverlayToast.style) {
+        modalOverlayToast.style.display = 'block';
+        modalOverlayToast.style.zIndex = '9999';
+        modalOverlayToast.style.filter = 'none';
+        modalOverlayToast.style.backdropFilter = 'none';
+        modalOverlayToast.style.opacity = '1';
+      }
+      modalOverlayToast.classList?.remove?.('is-hidden');
+      modalOverlayToast.classList?.add?.('is-visible');
+      clearTimeout(this._toastTimer);
+      this._toastTimer = setTimeout(() => {
+        modalOverlayToast.classList?.remove?.('is-visible');
+        modalOverlayToast.classList?.add?.('is-hidden');
+      }, 3600);
+    }
+
+    if (typeof this._externalShowToast === 'function') {
+      this._externalShowToast(cleanMsg);
+    }
   }
 
   /**
@@ -1256,10 +1835,9 @@ export class SmartScanModal {
    * @returns {HTMLSelectElement|null}
    */
   getDocTypeSelect() {
-    if (!this.doc) return null;
     return (
-      this.doc.getElementById(DOCUMENT_TYPE_SELECT_ID) ||
-      this.doc.getElementById('smart-scan-doc-type-select')
+      this.findElement(DOCUMENT_TYPE_SELECT_ID) ||
+      this.findElement('smart-scan-doc-type-select')
     );
   }
 
@@ -1268,10 +1846,9 @@ export class SmartScanModal {
    * @returns {HTMLSelectElement|null}
    */
   getAccountSelect() {
-    if (!this.doc) return null;
     return (
-      this.doc.getElementById(ASSOCIATED_ACCOUNT_SELECT_ID) ||
-      this.doc.getElementById('smart-scan-account-select')
+      this.findElement(ASSOCIATED_ACCOUNT_SELECT_ID) ||
+      this.findElement('smart-scan-account-select')
     );
   }
 
@@ -1304,7 +1881,9 @@ export class SmartScanModal {
       !dialogEl.querySelector('#smart-scan-confirm-form') ||
       !dialogEl.querySelector('#smart-scan-statement-section') ||
       !dialogEl.querySelector(`#${DOCUMENT_TYPE_SELECT_ID}`) ||
-      !dialogEl.querySelector(`#${ASSOCIATED_ACCOUNT_SELECT_ID}`)
+      !dialogEl.querySelector(`#${ASSOCIATED_ACCOUNT_SELECT_ID}`) ||
+      !dialogEl.querySelector(`#${SMART_SCAN_PROCESS_BUTTON_ID}`) ||
+      dialogEl.querySelector('#smart-scan-match-badges')
     ) {
       dialogEl.innerHTML = renderSmartScanModalMarkup();
       delete dialogEl.dataset.smartScanModalBound;
@@ -1316,7 +1895,8 @@ export class SmartScanModal {
 
   /**
    * Enlaza eventos interactivos del formulario de confirmación, selectores de archivo (`change`),
-   * soporte de arrastrar y soltar (`drop`) y de la tabla de Estado de Cuenta.
+   * botón único `#btn-process-file` (`⚡ Procesar y Evaluar Documento`), soporte de arrastrar y soltar (`drop`)
+   * y de la tabla de Estado de Cuenta.
    * @param {HTMLElement} [dialogEl]
    */
   bindEvents(dialogEl = null) {
@@ -1342,6 +1922,7 @@ export class SmartScanModal {
     const cancelCreateAccBtn = modal.querySelector('#btn-cancel-create-account');
     const modalFileInput = modal.querySelector(`#${SMART_SCAN_MODAL_FILE_INPUT_ID}`);
     const pickFileBtn = modal.querySelector('#btn-smart-scan-pick-file');
+    const processFileBtn = modal.querySelector(`#${SMART_SCAN_PROCESS_BUTTON_ID}`);
     const previewImg = modal.querySelector('#smart-scan-preview-img');
 
     modal.querySelectorAll(`[data-close-modal="${SMART_SCAN_MODAL_ID}"]`).forEach((btn) => {
@@ -1364,10 +1945,18 @@ export class SmartScanModal {
     pickFileBtn?.addEventListener('click', triggerModalFilePicker);
     previewImg?.addEventListener('click', triggerModalFilePicker);
 
+    // Botón único de evaluación: ⚡ Procesar y Evaluar Documento (#btn-process-file)
+    processFileBtn?.addEventListener('click', async (event) => {
+      event?.preventDefault?.();
+      await this.handleProcessFileButtonClick(event);
+    });
+
     // Captura de archivo en el evento `change` del <input type="file"> dentro del modal
     modalFileInput?.addEventListener('change', async (event) => {
       const file = extractFileFromInputOrDropEvent(event);
       if (file) {
+        this.currentFile = file;
+        this.lastSelectedFile = file;
         await this.processFileAndOpen(file);
       }
       modalFileInput.value = '';
@@ -1389,6 +1978,8 @@ export class SmartScanModal {
       modal.classList?.remove?.('is-dragover');
       const file = extractFileFromInputOrDropEvent(event);
       if (file) {
+        this.currentFile = file;
+        this.lastSelectedFile = file;
         await this.processFileAndOpen(file);
       }
     });
@@ -1400,7 +1991,14 @@ export class SmartScanModal {
         this.currentExtracted.tipoDocumento = selectedType;
       }
       if (selectedType === SMART_SCAN_DOCUMENT_TYPES.BANK_STATEMENT) {
-        if (this.statementRows.length === 0) {
+        const currentCurrency =
+          modal.querySelector('#smart-scan-currency-select')?.value || 'HNL';
+        const parsedFromRawText = this.currentExtracted?.rawText
+          ? parseStatementTransactions(this.currentExtracted.rawText, currentCurrency)
+          : [];
+        if (parsedFromRawText.length > 0) {
+          this.statementRows = parsedFromRawText;
+        } else if (this.statementRows.length === 0) {
           this.statementRows = [
             {
               id: 'stmt_tx_1',
@@ -1413,8 +2011,7 @@ export class SmartScanModal {
               monto: sanitizeSmartScanAmount(
                 amountInput?.value || this.currentExtracted?.monto || 0
               ),
-              moneda:
-                modal.querySelector('#smart-scan-currency-select')?.value || 'HNL',
+              moneda: currentCurrency,
               tipo: TRANSACTION_TYPES.EXPENSE,
             },
           ];
@@ -1577,7 +2174,7 @@ export class SmartScanModal {
    * Renderiza las filas de transacciones en `#smart-scan-statement-tbody` y actualiza el contador del botón y resumen.
    */
   renderStatementTable() {
-    const tbody = this.doc?.getElementById('smart-scan-statement-tbody');
+    const tbody = this.findElement('smart-scan-statement-tbody');
     if (tbody) {
       tbody.innerHTML = renderStatementTransactionsRowsMarkup(this.statementRows);
     }
@@ -1664,8 +2261,8 @@ export class SmartScanModal {
    * - Estado de Cuenta: "Guardar X Movimientos Seleccionados" + "Total Seleccionado: L X,XXX.XX | N.º de Movimientos: X"
    */
   updateSubmitButtonLabel() {
-    const saveBtn = this.doc?.getElementById('btn-save-smart-scan-tx');
-    const footerSummaryEl = this.doc?.getElementById(STATEMENT_FOOTER_SUMMARY_ID);
+    const saveBtn = this.findElement('btn-save-smart-scan-tx');
+    const footerSummaryEl = this.findElement(STATEMENT_FOOTER_SUMMARY_ID);
     const isStmt = this.isStatementMode();
     const selectedRows = this.getSelectedStatementRows();
     const selectedCount = selectedRows.length;
@@ -1676,7 +2273,8 @@ export class SmartScanModal {
 
     if (footerSummaryEl) {
       const currency =
-        this.doc?.getElementById('smart-scan-currency-select')?.value ||
+        this.findElement('smart-scan-currency-select')?.value ||
+        this.findElement('smart-scan-currency')?.value ||
         this.currentExtracted?.moneda ||
         'HNL';
       footerSummaryEl.textContent = formatStatementFooterSummary(
@@ -1684,56 +2282,87 @@ export class SmartScanModal {
         currency
       );
       if (isStmt) {
-        footerSummaryEl.classList.remove('is-hidden');
+        footerSummaryEl.classList?.remove?.('is-hidden');
       } else {
-        footerSummaryEl.classList.add('is-hidden');
+        footerSummaryEl.classList?.add?.('is-hidden');
       }
     }
   }
 
   /**
    * Muestra u oculta el banner de aviso cuando la cuenta identificada no existe en el workspace de Firestore.
-   * - Aviso: "⚠️ La cuenta N.º {accountNumber} no se encuentra en tu espacio financiero."
+   * - Aviso: "⚠️ La cuenta N.º {accountNumber} ({bankName}) no está registrada. Se creará automáticamente al guardar."
    * - Botón: "✨ Crear Cuenta N.º {accountNumber} y Asociar Movimientos"
    *
    * @param {string} cuentaIdentificada
    * @param {object} accountMatch
+   * @param {string} [bankName]
    */
-  updateMissingAccountBanner(cuentaIdentificada = '', accountMatch = null) {
-    const bannerEl = this.doc?.getElementById('smart-scan-missing-account-banner');
-    const workspaceNoticeEl = this.doc?.getElementById(
+  updateMissingAccountBanner(cuentaIdentificada = '', accountMatch = null, bankName = '') {
+    const bannerEl = this.findElement('smart-scan-missing-account-banner');
+    const unregisteredNoticeEl = this.findElement(
+      'smart-scan-unregistered-account-notice'
+    );
+    const workspaceNoticeEl = this.findElement(
       'smart-scan-missing-account-workspace-notice'
     );
-    const alertEl = this.doc?.getElementById('smart-scan-missing-account-alert');
-    const msgEl = this.doc?.getElementById('smart-scan-missing-account-message');
-    const createBtnEl = this.doc?.getElementById('btn-accept-create-account');
-    if (!bannerEl) return;
+    const alertEl = this.findElement('smart-scan-missing-account-alert');
+    const msgEl = this.findElement('smart-scan-missing-account-message');
+    const createBtnEl = this.findElement('btn-accept-create-account');
 
     const cleanNum = String(cuentaIdentificada || '').trim();
     const isMatched = Boolean(accountMatch?.matched);
+    const resolvedBank = String(
+      bankName ||
+        this.currentExtracted?.bankName ||
+        this.currentExtracted?.detectedBank ||
+        ''
+    ).trim();
+    const effectiveBank =
+      resolvedBank && resolvedBank !== 'Banco Local' ? resolvedBank : '';
 
     if (cleanNum && !isMatched && !this.createMissingAccountAccepted) {
+      this.createMissingAccountConfirmed = true;
+      const unregisteredText = formatUnregisteredAccountNotice(cleanNum, effectiveBank);
+      if (unregisteredNoticeEl) {
+        unregisteredNoticeEl.textContent = unregisteredText;
+      }
       if (workspaceNoticeEl) {
         workspaceNoticeEl.textContent = formatMissingAccountWorkspaceNotice(cleanNum);
       }
       if (alertEl) {
-        alertEl.textContent = formatMissingAccountAlertText(cleanNum);
+        alertEl.textContent = formatMissingAccountAlertText(cleanNum, effectiveBank);
       }
       if (msgEl) {
-        msgEl.textContent = formatMissingAccountBannerMessage(cleanNum);
+        msgEl.textContent = formatMissingAccountBannerMessage(cleanNum, {
+          bankName: effectiveBank,
+        });
       }
       if (createBtnEl) {
         createBtnEl.textContent = formatCreateAndAssociateAccountButtonLabel(cleanNum);
       }
-      bannerEl.classList.remove('is-hidden');
-    } else {
-      bannerEl.classList.add('is-hidden');
+      if (bannerEl) {
+        if (!unregisteredNoticeEl && !workspaceNoticeEl && !alertEl && !msgEl) {
+          bannerEl.innerHTML = unregisteredText;
+        }
+        bannerEl.hidden = false;
+        if (bannerEl.style) {
+          bannerEl.style.zIndex = '9999';
+          bannerEl.style.filter = 'none';
+          bannerEl.style.backdropFilter = 'none';
+          bannerEl.style.opacity = '1';
+        }
+        bannerEl.classList?.remove?.('is-hidden');
+      }
+      this.displayForegroundToast(unregisteredText);
+    } else if (bannerEl) {
+      bannerEl.classList?.add?.('is-hidden');
     }
   }
 
   /**
    * Acción del botón `[✨ Crear Cuenta N.º {accountNumber} y Asociar Movimientos]`:
-   * Crea primero la cuenta detectada en Firestore (`accounts`) con su banco, tipo y saldo,
+   * Crea primero la cuenta detectada en Firestore (`accounts`) con su banco, tipo, límite de crédito y saldo,
    * la selecciona automáticamente en `<select id="associated-account">` y, si `options.submitMovements`
    * es `true`, inserta también la transacción o lote de transacciones de inmediato.
    *
@@ -1744,24 +2373,52 @@ export class SmartScanModal {
     const state = this.getState();
     if (!Array.isArray(state.accounts)) state.accounts = [];
 
+    const accountInfo = this.currentExtracted?.accountInfo || {};
     const cuentaIdentificada = (
       this.doc?.getElementById('smart-scan-identified-account-input')?.value ||
       this.currentExtracted?.cuentaIdentificada ||
+      accountInfo?.accountNumber ||
       ''
     ).trim();
     const moneda =
       this.doc?.getElementById('smart-scan-currency-select')?.value ||
       this.currentExtracted?.moneda ||
+      accountInfo?.currency ||
       'HNL';
     const metadata = detectBankAndAccountMetadata(this.currentExtracted?.rawText || '');
     const detectedBank =
-      this.currentExtracted?.detectedBank || metadata.bankName || 'Banco Local';
-    const detectedAccountType =
-      this.currentExtracted?.detectedAccountType || metadata.accountType || 'bank';
+      this.currentExtracted?.bankName ||
+      this.currentExtracted?.detectedBank ||
+      metadata.bankName ||
+      'Banco Local';
+    const creditLimit = sanitizeSmartScanAmount(
+      this.currentExtracted?.creditLimit ?? accountInfo?.creditLimit ?? 0
+    );
+    const minimumPayment = sanitizeSmartScanAmount(
+      this.currentExtracted?.minimumPayment ?? accountInfo?.minimumPayment ?? 0
+    );
+    const cutoffDate = String(
+      this.currentExtracted?.cutoffDate || accountInfo?.cutoffDate || ''
+    ).trim();
+    const paymentDueDate = String(
+      this.currentExtracted?.paymentDueDate || accountInfo?.paymentDueDate || ''
+    ).trim();
+    const owner = String(
+      this.currentExtracted?.owner || accountInfo?.owner || ''
+    ).trim();
+    const isCreditCard =
+      creditLimit > 0 ||
+      this.currentExtracted?.detectedAccountType === 'card' ||
+      /Tarjeta|PLATINUM|VISA|MASTERCARD|AMEX/i.test(
+        `${this.currentExtracted?.statementDocumentType || ''} ${accountInfo?.accountName || ''} ${this.currentExtracted?.detectedAccountTypeLabel || ''}`
+      ) ||
+      metadata.accountType === 'card';
+    const detectedAccountType = isCreditCard ? 'card' : 'bank';
     const detectedAccountTypeLabel =
+      accountInfo?.accountName ||
       this.currentExtracted?.detectedAccountTypeLabel ||
       metadata.accountTypeLabel ||
-      'Cuenta de Ahorro';
+      (isCreditCard ? 'Tarjeta de Crédito' : 'Cuenta de Ahorro');
     const last4 = extractLast4Digits(cuentaIdentificada) || cuentaIdentificada;
 
     this.createMissingAccountAccepted = true;
@@ -1786,8 +2443,14 @@ export class SmartScanModal {
       targetAcc = {
         ...baseAcc,
         bankName: detectedBank,
+        accountName: detectedAccountTypeLabel,
         accountType: detectedAccountTypeLabel,
         accountNumber: cuentaIdentificada || last4,
+        creditLimit,
+        minimumPayment,
+        cutoffDate,
+        paymentDueDate,
+        owner,
         currentBalance: 0,
         archived: false,
         isArchived: false,
@@ -1924,7 +2587,6 @@ export class SmartScanModal {
   renderAccountSelector(activeAccounts = [], matchedAccountId = '', accountMatch = null) {
     const accSelect = this.getAccountSelect();
     const hintEl = this.doc?.getElementById('smart-scan-account-match-hint');
-    const badgesEl = this.doc?.getElementById('smart-scan-match-badges');
     if (!accSelect) return;
 
     const accounts = filterActiveAccounts(activeAccounts).filter(
@@ -1964,22 +2626,6 @@ export class SmartScanModal {
         hintEl.textContent =
           'ℹ️ Sin coincidencia automática de cuenta. Selecciona manualmente una cuenta o acepta crearla.';
       }
-    }
-
-    if (badgesEl) {
-      const docType =
-        this.getDocTypeSelect()?.value ||
-        this.currentExtracted?.tipoDocumento ||
-        SMART_SCAN_DOCUMENT_TYPES.INVOICE_RECEIPT;
-      const matchLabel =
-        accountMatch?.matched && accountMatch.matchedAccount
-          ? `✅ Asociada: ${accountMatch.matchedAccount.name}`
-          : '🔎 Selección o creación de cuenta';
-
-      badgesEl.innerHTML = `
-        <div class="voucher-pill">📄 ${docType}</div>
-        <div class="voucher-pill">${matchLabel}</div>
-      `;
     }
   }
 
@@ -2036,35 +2682,42 @@ export class SmartScanModal {
    * @param {object} extracted
    */
   openWithExtractedData(extracted = {}) {
-    const dialogEl = this.ensureDialogElement();
-    if (!dialogEl) return;
-
-    const normalizedDate = normalizeSmartScanDate(
-      extracted.fecha || extracted.date || new Date().toISOString().slice(0, 10)
-    );
-    const normalizedMerchant = String(
-      extracted.comercio || extracted.merchant || extracted.bankName || extracted.detectedBank || ''
-    ).trim();
-    const normalizedAmount = sanitizeSmartScanAmount(extracted.monto ?? extracted.amount ?? 0);
-    const normalizedCurrency =
-      extracted.moneda === 'USD' || extracted.currency === 'USD' ? 'USD' : 'HNL';
-    const normalizedAccountNum = String(
-      extracted.cuentaIdentificada || extracted.accountNumber || ''
-    ).trim();
+    const dialogEl = this.ensureDialogElement() || this.modalEl;
 
     const state = this.getState();
-    const incomingRows = Array.isArray(extracted.statementItems)
-      ? extracted.statementItems
-      : Array.isArray(extracted.statementTransactions)
-        ? extracted.statementTransactions
-        : Array.isArray(extracted.transactions)
-          ? extracted.transactions
-          : [];
+    // 3a) Abstracción del Encabezado (Datos de Cuenta)
+    const headerData = abstractDocumentHeaderAccountData(extracted, state);
+    // 3b) Abstracción del Detalle del Contenido (Lista de Transacciones)
+    const bodyTransactions = abstractDocumentBodyTransactions(extracted, headerData);
+
+    const accountInfo = extracted.accountInfo || {};
+    const normalizedDate = normalizeSmartScanDate(
+      extracted.fecha ||
+        extracted.date ||
+        accountInfo.cutoffDate ||
+        new Date().toISOString().slice(0, 10)
+    );
+    const normalizedMerchant = String(
+      extracted.comercio ||
+        extracted.merchant ||
+        accountInfo.accountName ||
+        headerData.bankName ||
+        ''
+    ).trim();
+    const normalizedAmount = sanitizeSmartScanAmount(
+      extracted.monto ?? extracted.amount ?? accountInfo.currentBalance ?? 0
+    );
+    const normalizedCurrency = headerData.currency;
+    const normalizedAccountNum = headerData.accountNumber;
+
     const requestedDocType = extracted.tipoDocumento || extracted.documentType || '';
     const isAutoStatement =
       requestedDocType === SMART_SCAN_DOCUMENT_TYPES.BANK_STATEMENT ||
+      /Estado\s+de\s+Cuenta/i.test(requestedDocType) ||
+      /Estado\s+de\s+Cuenta/i.test(String(extracted.statementDocumentType || '')) ||
       extracted.isMultiRowStatement === true ||
-      incomingRows.length >= 2;
+      bodyTransactions.length >= 2 ||
+      (bodyTransactions.length >= 1 && Boolean(extracted.accountInfo));
 
     const tipoDocumento = isAutoStatement
       ? SMART_SCAN_DOCUMENT_TYPES.BANK_STATEMENT
@@ -2085,8 +2738,13 @@ export class SmartScanModal {
       extracted.suggestedCategory ||
       inferredCat.categoriaSugerida;
 
+    const accountExistsInFirestore = Boolean(headerData.accountMatch?.matched);
     this.currentExtracted = {
       ...extracted,
+      bankName: headerData.bankName,
+      detectedBank: headerData.bankName,
+      detectedAccountType: headerData.accountType,
+      detectedAccountTypeLabel: headerData.accountTypeLabel,
       fecha: normalizedDate,
       date: normalizedDate,
       comercio: normalizedMerchant,
@@ -2102,40 +2760,28 @@ export class SmartScanModal {
       tipoTransaccion,
       categoryId: resolvedCategoryId,
       categoriaSugerida: resolvedCategoriaSugerida,
+      headerAbstraction: {
+        ...headerData,
+        accountExistsInFirestore,
+      },
+      bodyTransactions,
     };
     this.createMissingAccountAccepted = false;
-
-    this.statementRows = incomingRows.map((row, idx) => ({
-      id: row.id || `stmt_tx_${idx + 1}`,
-      selected: row.selected !== false,
-      fecha: normalizeSmartScanDate(row.fecha || row.date || normalizedDate),
-      date: normalizeSmartScanDate(row.fecha || row.date || normalizedDate),
-      comercio: String(row.comercio || row.merchant || row.concept || 'Movimiento').trim(),
-      concept: String(row.comercio || row.merchant || row.concept || 'Movimiento').trim(),
-      monto: sanitizeSmartScanAmount(row.monto ?? row.amount ?? 0),
-      amount: sanitizeSmartScanAmount(row.monto ?? row.amount ?? 0),
-      moneda: row.moneda === 'USD' || row.currency === 'USD' ? 'USD' : normalizedCurrency,
-      currency: row.moneda === 'USD' || row.currency === 'USD' ? 'USD' : normalizedCurrency,
-      tipo:
-        row.tipo === TRANSACTION_TYPES.INCOME || row.type === TRANSACTION_TYPES.INCOME
-          ? TRANSACTION_TYPES.INCOME
-          : TRANSACTION_TYPES.EXPENSE,
-      type:
-        row.tipo === TRANSACTION_TYPES.INCOME || row.type === TRANSACTION_TYPES.INCOME
-          ? TRANSACTION_TYPES.INCOME
-          : TRANSACTION_TYPES.EXPENSE,
-      categoryId: row.categoryId || 'groceries',
-      categoriaSugerida: row.categoriaSugerida || 'Supermercado',
-    }));
+    this.createMissingAccountConfirmed = Boolean(
+      normalizedAccountNum && !accountExistsInFirestore
+    );
+    this.statementRows = bodyTransactions;
 
     const docTypeSelect = this.getDocTypeSelect();
-    const dateInput = this.doc.getElementById('smart-scan-date-input');
-    const merchantInput = this.doc.getElementById('smart-scan-merchant-input');
-    const amountInput = this.doc.getElementById('smart-scan-amount-input');
-    const currencySelect = this.doc.getElementById('smart-scan-currency-select');
-    const identifiedInput = this.doc.getElementById('smart-scan-identified-account-input');
-    const previewImg = this.doc.getElementById(SMART_SCAN_PREVIEW_IMG_ID);
-    const taxSummaryEl = this.doc.getElementById('smart-scan-tax-summary');
+    const dateInput = this.findElement('smart-scan-date-input');
+    const merchantInput = this.findElement('smart-scan-merchant-input');
+    const amountInput = this.findElement('smart-scan-amount-input');
+    const currencySelect = this.findElement('smart-scan-currency-select');
+    const currencyFallbackSelect = this.findElement('smart-scan-currency');
+    const identifiedInput = this.findElement('smart-scan-identified-account-input');
+    const accountHintInput = this.findElement('smart-scan-account-hint');
+    const previewImg = this.findElement(SMART_SCAN_PREVIEW_IMG_ID);
+    const taxSummaryEl = this.findElement('smart-scan-tax-summary');
 
     if (docTypeSelect) docTypeSelect.value = tipoDocumento;
     if (dateInput) dateInput.value = normalizedDate;
@@ -2144,7 +2790,9 @@ export class SmartScanModal {
       amountInput.value = normalizedAmount > 0 ? String(normalizedAmount) : '';
     }
     if (currencySelect) currencySelect.value = normalizedCurrency;
+    if (currencyFallbackSelect) currencyFallbackSelect.value = normalizedCurrency;
     if (identifiedInput) identifiedInput.value = normalizedAccountNum;
+    if (accountHintInput) accountHintInput.value = normalizedAccountNum;
     const previewUrl = extracted.thumbnailDataUrl || extracted.originalDataUrl;
     if (previewImg && previewUrl) {
       previewImg.src = previewUrl;
@@ -2156,43 +2804,22 @@ export class SmartScanModal {
       resolvedCategoriaSugerida
     );
 
-    const activeAccounts =
-      extracted.accountMatch?.activeAccounts ||
-      filterActiveAccounts(state?.accounts || []);
-
-    // Evaluar coincidencia contra las cuentas del workspace si aún no viene resuelta
-    let effectiveAccountMatch = extracted.accountMatch || null;
-    if (!effectiveAccountMatch && normalizedAccountNum) {
-      const targetLast4 = extractLast4Digits(normalizedAccountNum);
-      const matchedAcc = activeAccounts.find((acc) => {
-        const accDigits = String(acc.accountNumber || '').replace(/\D/g, '');
-        const rawDigits = normalizedAccountNum.replace(/\D/g, '');
-        if (accDigits && rawDigits && (accDigits === rawDigits || accDigits.endsWith(rawDigits))) {
-          return true;
-        }
-        const accLast4 = extractLast4Digits(acc.accountNumber || '');
-        return Boolean(targetLast4 && accLast4 && accLast4 === targetLast4);
-      });
-      effectiveAccountMatch = {
-        matched: Boolean(matchedAcc),
-        accountId: matchedAcc?.id || '',
-        matchedAccount: matchedAcc || null,
-        activeAccounts,
-        matchedDigits: targetLast4 || normalizedAccountNum,
-      };
-    }
-
-    const matchedAccountId = effectiveAccountMatch?.matched
-      ? effectiveAccountMatch.accountId
-      : extracted.accountId || '';
-
-    this.renderAccountSelector(activeAccounts, matchedAccountId, effectiveAccountMatch);
-    this.updateMissingAccountBanner(normalizedAccountNum, effectiveAccountMatch);
+    this.renderAccountSelector(
+      headerData.activeAccounts,
+      headerData.matchedAccountId,
+      headerData.accountMatch
+    );
+    this.updateMissingAccountBanner(
+      normalizedAccountNum,
+      headerData.accountMatch,
+      headerData.bankName
+    );
+    this.renderStatementTable();
 
     if (taxSummaryEl) {
       const { subtotal = 0, isv = 0, devolIsv = 0 } = extracted.breakdown || {};
       if (!isAutoStatement && (subtotal > 0 || isv > 0)) {
-        taxSummaryEl.classList.remove('is-hidden');
+        taxSummaryEl.classList?.remove?.('is-hidden');
         taxSummaryEl.innerHTML = `
           <strong>Desglose detectado:</strong>
           Subtotal: ${Money.format(subtotal, normalizedCurrency)} ·
@@ -2201,11 +2828,11 @@ export class SmartScanModal {
           <strong>Total: ${Money.format(normalizedAmount || 0, normalizedCurrency)}</strong>
         `;
       } else {
-        taxSummaryEl.classList.add('is-hidden');
+        taxSummaryEl.classList?.add?.('is-hidden');
       }
     }
 
-    const createNewRadio = dialogEl.querySelector(
+    const createNewRadio = dialogEl?.querySelector?.(
       'input[name="duplicateResolution"][value="create_new"]'
     );
     if (createNewRadio) createNewRadio.checked = true;
@@ -2213,15 +2840,165 @@ export class SmartScanModal {
     this.syncAdaptiveViewMode();
     this.refreshDuplicateWarning();
 
-    if (typeof dialogEl.showModal === 'function' && !dialogEl.open) {
-      dialogEl.showModal();
-    } else {
-      dialogEl.setAttribute('open', '');
+    if (dialogEl) {
+      if (typeof dialogEl.showModal === 'function' && !dialogEl.open) {
+        dialogEl.showModal();
+      } else if (typeof dialogEl.setAttribute === 'function') {
+        dialogEl.setAttribute('open', '');
+      }
     }
   }
 
   /**
-   * Procesa un archivo (PNG, JPG, WEBP, PDF) con la estrategia híbrida (OCR Local -> Gemini 2.5 Flash),
+   * Handler conectado al botón `#btn-process-file` (`"⚡ Procesar y Evaluar Documento"`):
+   * a) Muestra el indicador visual `"⏳ Analizando PDF..."` en el botón.
+   * b) Ejecuta `extractPdfData(currentFile)`.
+   * c) Actualiza atómicamente el estado del modal y los campos del DOM.
+   * d) Evalúa si la cuenta existe en Firestore `accounts` y muestra el aviso nítido en primer plano.
+   *
+   * @param {Event|null} [event=null]
+   * @param {object} [extraOptions={}]
+   * @returns {Promise<object|null>}
+   */
+  async handleProcessFileButtonClick(event = null, extraOptions = {}) {
+    event?.preventDefault?.();
+    const modal = this.findElement(SMART_SCAN_MODAL_ID) || this.modalEl;
+    const modalFileInput = modal?.querySelector?.(`#${SMART_SCAN_MODAL_FILE_INPUT_ID}`);
+    const externalFileInput = this.findElement(SMART_SCAN_FILE_INPUT_ID);
+    const pendingInputFile =
+      modalFileInput?.files?.[0] || externalFileInput?.files?.[0] || null;
+    const currentFile =
+      pendingInputFile ||
+      this.currentFile ||
+      this.lastSelectedFile ||
+      this.currentExtracted ||
+      null;
+
+    if (!currentFile) {
+      const inputEl = modalFileInput || externalFileInput;
+      if (inputEl) {
+        inputEl.value = '';
+        inputEl.click?.();
+      }
+      return null;
+    }
+
+    return this.evaluateAndPopulateDocument(currentFile, extraOptions);
+  }
+
+  /**
+   * Evalúa el contenido del documento al hacer clic en `"⚡ Procesar y Evaluar Documento"` (`#btn-process-file`):
+   * a) Muestra `"⏳ Analizando PDF..."` en el botón `#btn-process-file`.
+   * b) Ejecuta `extractPdfData(currentFile)`.
+   * c) Actualiza atómicamente el estado del modal y los campos del DOM:
+   *    - Selector "Moneda": "Lempiras (HNL)" (`HNL`) o "Dólares (USD)" (`USD`)
+   *    - Campo "Cuenta / Últimos 4 Dígitos": ej. "310074459"
+   *    - Tabla de Movimientos: reemplaza la fila por defecto por las transacciones reales extraídas
+   *    - Totales: "Total Seleccionado: L 1,620.42 | N.º de Movimientos: 1"
+   * d) Revisa si la cuenta existe en Firestore `accounts` y muestra el aviso nítido en primer plano si no está registrada.
+   *
+   * @param {File|Blob|object|string} [fileOrExtracted=null]
+   * @param {object} [extraOptions={}]
+   * @returns {Promise<object|null>}
+   */
+  async evaluateAndPopulateDocument(fileOrExtracted = null, extraOptions = {}) {
+    const currentFile =
+      fileOrExtracted ||
+      this.currentFile ||
+      this.lastSelectedFile ||
+      this.currentExtracted;
+    if (!currentFile) {
+      return null;
+    }
+
+    this.ensureDialogElement();
+    this.setProcessButtonLoadingState(true);
+    if (typeof extraOptions.onAnalyzingState === 'function') {
+      extraOptions.onAnalyzingState(SMART_SCAN_ANALYZING_PDF_LABEL);
+    }
+
+    try {
+      const fileName = String(currentFile?.name || '').toLowerCase();
+      const mimeType = String(currentFile?.type || '').toLowerCase();
+      const isImageFile =
+        mimeType.startsWith('image/') || /\.(png|jpe?g|webp|bmp|gif)$/i.test(fileName);
+
+      if (isImageFile && !currentFile?.rawText && !currentFile?.accountInfo) {
+        this.currentFile = currentFile;
+        this.lastSelectedFile = currentFile;
+        return await this.processFileAndOpen(currentFile, extraOptions);
+      }
+
+      if (
+        (typeof Blob !== 'undefined' && currentFile instanceof Blob) ||
+        typeof currentFile?.arrayBuffer === 'function'
+      ) {
+        this.currentFile = currentFile;
+        this.lastSelectedFile = currentFile;
+      }
+
+      const previewCanvas = this.findElement(SMART_SCAN_PREVIEW_CANVAS_ID);
+      const pdfExtracted =
+        typeof extraOptions.pdfExtractorRunner === 'function'
+          ? await extraOptions.pdfExtractorRunner(currentFile, {
+              ...extraOptions,
+              doc: this.doc,
+              canvas: previewCanvas,
+            })
+          : await extractPdfData(currentFile, {
+              ...extraOptions,
+              doc: this.doc,
+              canvas: previewCanvas,
+            });
+
+      const state = this.getState();
+      const accountNumber = String(
+        pdfExtracted.accountNumber || pdfExtracted.cuentaIdentificada || ''
+      ).trim();
+
+      let candidateAccounts = Array.isArray(state?.accounts) ? [...state.accounts] : [];
+      if (typeof extraOptions.firestoreAccountChecker === 'function') {
+        const externalAccounts = await extraOptions.firestoreAccountChecker(accountNumber);
+        if (Array.isArray(externalAccounts) && externalAccounts.length > 0) {
+          candidateAccounts = [...candidateAccounts, ...externalAccounts];
+        }
+      }
+
+      const accountMatch = await matchAccountFromWorkspace(
+        accountNumber,
+        candidateAccounts,
+        {
+          firestoreDb: extraOptions.firestoreDb || this.firestoreDb,
+          firestoreModule: extraOptions.firestoreModule || this.firestoreModule,
+          workspaceId: extraOptions.workspaceId || this.getActiveWorkspaceId(),
+        }
+      );
+
+      const enrichedExtraction = {
+        ...pdfExtracted,
+        accountMatch,
+        accountExists: Boolean(accountMatch.matched),
+        accountId: accountMatch.matched ? accountMatch.accountId : '',
+        unregisteredAccountNotice:
+          accountNumber && !accountMatch.matched
+            ? formatUnregisteredAccountNotice(accountNumber, pdfExtracted.bankName)
+            : '',
+      };
+
+      this.openWithExtractedData(enrichedExtraction);
+      if (accountNumber && !accountMatch.matched) {
+        this.displayForegroundToast(enrichedExtraction.unregisteredAccountNotice);
+      }
+      return this.currentExtracted;
+    } finally {
+      if (extraOptions.keepAnalyzingIndicator !== true) {
+        this.setProcessButtonLoadingState(false);
+      }
+    }
+  }
+
+  /**
+   * Procesa un archivo (PNG, JPG, WEBP, PDF) con la estrategia híbrida (PDF Nativo -> Plantillas -> OCR Local -> Gemini 2.5 Flash),
    * genera la miniatura del documento (incluyendo primera página de PDF en `<canvas>`)
    * y sincroniza de inmediato los campos del modal.
    *
@@ -2230,6 +3007,8 @@ export class SmartScanModal {
    * @returns {Promise<object>}
    */
   async processFileAndOpen(file, extraOptions = {}) {
+    this.currentFile = file;
+    this.lastSelectedFile = file;
     const dialogEl = this.ensureDialogElement();
     const progressBox = this.doc?.getElementById('smart-scan-progress-box');
     const progressStatus = this.doc?.getElementById('smart-scan-progress-status');
@@ -2237,6 +3016,13 @@ export class SmartScanModal {
     const progressBar = this.doc?.getElementById('smart-scan-progress-bar');
     const saveBtn = this.doc?.getElementById('btn-save-smart-scan-tx');
     const previewCanvas = this.doc?.getElementById(SMART_SCAN_PREVIEW_CANVAS_ID);
+
+    const fileName = String(file?.name || '').toLowerCase();
+    const mimeType = String(file?.type || '').toLowerCase();
+    const isPdf =
+      mimeType === 'application/pdf' ||
+      fileName.endsWith('.pdf') ||
+      (typeof file === 'string' && file.trim().startsWith('data:application/pdf'));
 
     const state = this.getState();
     // Pre-poblar selectores de categoría y cuentas para que el modal jamás luzca vacío durante la carga
@@ -2251,8 +3037,15 @@ export class SmartScanModal {
       }
     }
 
+    if (isPdf) {
+      this.setProcessButtonLoadingState(true);
+    }
     if (progressBox) progressBox.classList.remove('is-hidden');
-    if (progressStatus) progressStatus.textContent = LOCAL_OCR_LOADING_STATUS;
+    if (progressStatus) {
+      progressStatus.textContent = isPdf
+        ? SMART_SCAN_ANALYZING_PDF_LABEL
+        : LOCAL_OCR_LOADING_STATUS;
+    }
     if (progressPct) progressPct.textContent = '10%';
     if (progressBar) progressBar.value = 10;
     if (saveBtn) saveBtn.disabled = true;
@@ -2264,13 +3057,55 @@ export class SmartScanModal {
         canvas: previewCanvas,
       });
 
+      // Si es un archivo .pdf vectorial (> 50 caracteres), extraer directamente con extractPdfData omitiendo Tesseract.js
+      if (isPdf && !extraOptions.localOcrRunner && !extraOptions.tesseractWorker && !extraOptions.forceGeminiFallback) {
+        const pdfExtracted = await extractPdfData(file, {
+          ...extraOptions,
+          doc: this.doc,
+          canvas: previewCanvas,
+        });
+        if (pdfExtracted.isVectorPdf) {
+          const accountNumber = String(
+            pdfExtracted.accountNumber || pdfExtracted.cuentaIdentificada || ''
+          ).trim();
+          const accountMatch = await matchAccountFromWorkspace(
+            accountNumber,
+            state?.accounts || [],
+            {
+              firestoreDb: extraOptions.firestoreDb || this.firestoreDb,
+              firestoreModule: extraOptions.firestoreModule || this.firestoreModule,
+              workspaceId: extraOptions.workspaceId || this.getActiveWorkspaceId(),
+            }
+          );
+          const vectorResult = {
+            ...pdfExtracted,
+            thumbnailDataUrl:
+              pdfExtracted.thumbnailDataUrl || thumbPreview?.thumbnailDataUrl || null,
+            originalDataUrl:
+              pdfExtracted.originalDataUrl || thumbPreview?.thumbnailDataUrl || null,
+            accountMatch,
+            accountExists: Boolean(accountMatch.matched),
+            accountId: accountMatch.matched ? accountMatch.accountId : '',
+            unregisteredAccountNotice:
+              accountNumber && !accountMatch.matched
+                ? formatUnregisteredAccountNotice(accountNumber, pdfExtracted.bankName)
+                : '',
+          };
+          this.openWithExtractedData(vectorResult);
+          if (accountNumber && !accountMatch.matched) {
+            this.displayForegroundToast(vectorResult.unregisteredAccountNotice);
+          }
+          return vectorResult;
+        }
+      }
+
       const extracted = await extractSmartScanDocument(
         file,
         state,
         {
           firestoreDb: this.firestoreDb,
           firestoreModule: this.firestoreModule,
-          workspaceId: this.getWorkspaceId(),
+          workspaceId: this.getActiveWorkspaceId(),
           storage: this.storage,
           indexedDb: this.indexedDb,
           doc: this.doc,
@@ -2301,6 +3136,9 @@ export class SmartScanModal {
       this.showToast(`Aviso al escanear documento: ${error.message}`);
       throw error;
     } finally {
+      if (isPdf) {
+        this.setProcessButtonLoadingState(false);
+      }
       if (progressBox) progressBox.classList.add('is-hidden');
       if (saveBtn) saveBtn.disabled = false;
     }

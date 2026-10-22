@@ -10,8 +10,10 @@
 export const CURRENCIES = Object.freeze({
   USD: { code: 'USD', symbol: '$', name: 'Dólar estadounidense', rateToUsd: 1.0 },
   HNL: { code: 'HNL', symbol: 'L', name: 'Lempira hondureño', rateToUsd: 0.0403 },
+  GTQ: { code: 'GTQ', symbol: 'Q', name: 'Quetzal guatemalteco', rateToUsd: 0.1285 },
   EUR: { code: 'EUR', symbol: '€', name: 'Euro', rateToUsd: 1.08 },
   CRC: { code: 'CRC', symbol: '₡', name: 'Colón costarricense', rateToUsd: 0.00195 },
+  NIO: { code: 'NIO', symbol: 'C$', name: 'Córdoba nicaragüense', rateToUsd: 0.0272 },
   MXN: { code: 'MXN', symbol: '$', name: 'Peso mexicano', rateToUsd: 0.056 },
   COP: { code: 'COP', symbol: '$', name: 'Peso colombiano', rateToUsd: 0.00025 },
   CLP: { code: 'CLP', symbol: '$', name: 'Peso chileno', rateToUsd: 0.00105 },

@@ -21,6 +21,29 @@ import {
   deriveTemplateKeywords,
   computeLayoutFingerprint,
 } from './templateLearner.js';
+import {
+  VECTOR_PDF_MIN_CHARS,
+  extractNativePdfTextLayer,
+  organizeTextItemsIntoLines,
+  organizeLinesIntoHierarchicalBlocks,
+  extractPdfData,
+} from './pdfExtractor.js';
+import {
+  parseBankStatementTextData,
+  parseStatementHeaderAccountData,
+  parseStatementTransactions,
+  detectActiveStatementCurrency,
+  normalizeBankStatementDate,
+} from './bankParsers.js';
+import {
+  PROMERICA_CREDIT_CARD_SAMPLE_EXTRACTION,
+  DEFAULT_STATEMENT_TEMPLATES,
+  loadKnownStatementTemplates,
+  matchStatementTemplate,
+  extractStatementWithTemplate,
+  learnAndSaveStatementPatternToBankTemplates,
+  processPdfStatementWithPatternLearning,
+} from './bankTemplateMatcher.js';
 
 /**
  * Estados visuales de carga explícitos para la estrategia híbrida (OCR Local -> Gemini 2.5 Flash).
@@ -753,8 +776,11 @@ export function applySmartScanRegexCleaners(rawText = '', state = {}) {
   const hasBankOrMerchant = Boolean(!isGenericMerchant || bankMeta.hasExplicitBank);
 
   const resolvedMerchant = merchant || rawMerchant || 'Comercio / Movimiento';
-  const currency =
-    parsedVoucher.currency === 'USD' || /\b(?:USD|US\$|D[OÓ]LARES)\b/i.test(text)
+  const hasBothLempirasAndDolares =
+    /\b(?:LEMPIRAS|HNL|LPS)\b/i.test(text) && /\b(?:D[OÓ]LARES|USD|US\$)\b/i.test(text);
+  const currency = hasBothLempirasAndDolares
+    ? detectActiveStatementCurrency(text)
+    : parsedVoucher.currency === 'USD' || /\b(?:USD|US\$|D[OÓ]LARES)\b/i.test(text)
       ? 'USD'
       : 'HNL';
   const inferredType =
@@ -861,8 +887,12 @@ export function evaluateLocalOcrCompleteness(
     (r) => r && sanitizeSmartScanAmount(r.monto ?? r.amount ?? 0) > 0 && (r.fecha || r.date)
   );
 
-  // Si es Estado de Cuenta con múltiples movimientos válidos extraídos, la extracción local es completa
-  if (validStatementRows.length >= 2) {
+  // Si es Estado de Cuenta con movimientos válidos extraídos, la extracción local es completa
+  if (
+    validStatementRows.length >= 2 ||
+    (validStatementRows.length >= 1 &&
+      Boolean(cleaners.hasAccountNumber || parsedResult?.cuentaIdentificada))
+  ) {
     return {
       isComplete: true,
       needsGeminiFallback: false,
@@ -983,8 +1013,45 @@ export function extractStatementTransactionsFromText(rawText = '', state = {}, o
 
   // 2. Parser flexible adicional para líneas de estados de cuenta bancarios (incluyendo créditos/ingresos y fechas ISO o DD/MM/YYYY)
   const defaultYear = options.fallbackYear || new Date().getFullYear();
-  const isUsdDefault = /\bMONEDA\s*:\s*(?:USD|D[OÓ]LARES)\b/i.test(text);
-  const defaultCurrency = isUsdDefault ? 'USD' : 'HNL';
+  const defaultCurrency =
+    typeof state === 'string' && (state === 'USD' || state === 'HNL')
+      ? state
+      : /\bMONEDA\s*:\s*(?:USD|D[OÓ]LARES)\b/i.test(text)
+        ? 'USD'
+        : detectActiveStatementCurrency(text);
+
+  // Incluir filas detectadas por bankParsers.js (soporta montos con o sin coma de miles como 1620.42)
+  const bankParsedRows = parseStatementTransactions(text, defaultCurrency);
+  for (const bpRow of bankParsedRows) {
+    const bpKey = `${bpRow.fecha}|${bpRow.comercio.toUpperCase()}|${bpRow.monto}`;
+    if (seenKeys.has(bpKey) || seenKeys.has(`${bpRow.fecha}|${bpRow.monto}`)) continue;
+    seenKeys.add(bpKey);
+    seenKeys.add(`${bpRow.fecha}|${bpRow.monto}`);
+    const inferredRowCat = inferSmartScanCategory(
+      bpRow.comercio,
+      bpRow.comercio,
+      bpRow.tipo,
+      Array.isArray(state?.categories) ? state.categories : []
+    );
+    rows.push({
+      id: `stmt_tx_${rows.length + 1}`,
+      selected: true,
+      fecha: bpRow.fecha,
+      date: bpRow.date,
+      time: bpRow.time || '12:00 AM',
+      comercio: bpRow.comercio,
+      concept: bpRow.concept,
+      monto: bpRow.monto,
+      amount: bpRow.amount,
+      moneda: bpRow.moneda || defaultCurrency,
+      currency: bpRow.currency || defaultCurrency,
+      tipo: bpRow.tipo,
+      type: bpRow.type,
+      categoryId: inferredRowCat.categoryId,
+      categoriaSugerida: inferredRowCat.categoriaSugerida,
+      isDuplicate: false,
+    });
+  }
 
   const monthMap = {
     ENE: '01',
@@ -1048,7 +1115,7 @@ export function extractStatementTransactionsFromText(rawText = '', state = {}, o
 
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   const flexLineRegex =
-    /^(?:Ref\.?\s*[\w-]+\s+|\d{1,6}\s+)?(\d{4}[/-]\d{2}[/-]\d{2}|\d{1,2}[/.-]\d{1,2}(?:[/.-]\d{2,4})?|[A-Z]{3}[/.-]\d{1,2}(?:[/.-](\d{2,4}))?|\d{1,2}[/.-][A-Z]{3}(?:[/.-](\d{2,4}))?)\s+(.+?)\s+(?:(USD|US\$|HNL|LPS|L\.?|\$)\s*)?([+-]?\d{1,3}(?:,\d{3})*\.\d{2}|[+-]?\d+\.\d{2})\s*(CR|DB|CREDITO|DEBITO|INGRESO|GASTO|\+|-)?$/i;
+    /^(?:Ref\.?\s*[\w-]+\s+|\d{1,6}\s+)?(\d{4}[/-]\d{2}[/-]\d{2}|\d{1,2}[/.-]\d{1,2}(?:[/.-]\d{2,4})?|[A-Z]{3}[/.-]\d{1,2}(?:[/.-](\d{2,4}))?|\d{1,2}[/.-][A-Z]{3}(?:[/.-](\d{2,4}))?)\s+(.+?)\s+(?:(USD|US\$|HNL|LPS|L\.?|\$)\s*)?([+-]?\d+(?:,\d{3})*\.\d{2})\s*(CR|DB|CREDITO|DEBITO|INGRESO|GASTO|\+|-)?$/i;
 
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
@@ -2216,6 +2283,28 @@ export async function runLocalTesseractOcrStage(
     };
 
     if (isPdf) {
+      // 1. Extracción nativa de capa de texto en PDF mediante pdfjs-dist (todas las páginas)
+      const nativePdfLayer = await extractNativePdfTextLayer(fileOrInput, options);
+      const nativeFullText = String(
+        nativePdfLayer?.fullText || pdfThumbResult?.digitalText || ''
+      ).trim();
+
+      // Si el texto extraído tiene más de 50 caracteres (PDF vectorial nativo), omitir Tesseract.js
+      if (nativeFullText.length > VECTOR_PDF_MIN_CHARS) {
+        const resolvedNativeThumb =
+          nativePdfLayer?.thumbnailDataUrl || thumbnailDataUrl || originalDataUrl;
+        return {
+          rawText: nativeFullText,
+          confidence: 95,
+          thumbnailDataUrl: resolvedNativeThumb,
+          originalDataUrl: resolvedNativeThumb,
+          preprocessedDataUrl: preprocessedDataUrl || resolvedNativeThumb,
+          hadError: false,
+          isVectorPdf: true,
+          skipTesseractOcr: true,
+        };
+      }
+
       let decoded = null;
       let stmtDecoded = null;
       try {
@@ -2236,7 +2325,7 @@ export async function runLocalTesseractOcrStage(
 
       const textA = String(decoded?.rawText || '').trim();
       const textB = String(stmtDecoded?.rawText || '').trim();
-      const textC = String(pdfThumbResult?.digitalText || '').trim();
+      const textC = nativeFullText;
       const combinedPdfText = [textA, textB, textC].sort((a, b) => b.length - a.length)[0] || '';
       const resolvedPdfThumb =
         decoded?.originalDataUrl || thumbnailDataUrl || originalDataUrl;
@@ -2348,23 +2437,85 @@ export function parseSmartScanText(rawText = '', state = {}, options = {}) {
     regexCleaners.accountNumber ||
     extractIdentifiedAccountNumber(rawText, parsedVoucher.cardLast4);
 
-  // Consultar plantillas aprendidas en bank_templates (localStorage / IndexedDB) para enriquecer banco y tipo
+  // Consultar plantillas aprendidas en bank_templates (localStorage / IndexedDB) y plantillas de Estado de Cuenta
   const localTemplates = getLocalBankTemplatesSync(options?.storage);
   const matchedTemplate = matchBankTemplateFromText(rawText, localTemplates);
+  const matchedStmtTemplate = matchStatementTemplate(rawText, [
+    ...DEFAULT_STATEMENT_TEMPLATES,
+    ...(Array.isArray(localTemplates) ? localTemplates : []),
+  ]);
+  const extractedStmt = matchedStmtTemplate
+    ? extractStatementWithTemplate(rawText, matchedStmtTemplate)
+    : null;
+
   const bankMetadata = detectBankAndAccountMetadata(rawText);
   const detectedBank =
     matchedTemplate?.bankName ||
     parsedVoucher.detectedBank ||
     bankMetadata.bankName ||
+    extractedStmt?.bankName ||
     'Banco Local';
-  const detectedAccountType = bankMetadata.accountType;
+  const detectedAccountType =
+    extractedStmt?.accountInfo?.creditLimit > 0 ? 'card' : bankMetadata.accountType;
   const detectedAccountTypeLabel =
-    matchedTemplate?.learnedAccounts?.[0]?.accountType || bankMetadata.accountTypeLabel;
+    extractedStmt?.accountInfo?.accountName ||
+    matchedTemplate?.learnedAccounts?.[0]?.accountType ||
+    bankMetadata.accountTypeLabel;
+
+  const resolvedCuentaIdentificada =
+    cuentaIdentificada || extractedStmt?.accountInfo?.accountNumber || '';
+  const accountInfo = {
+    accountName: extractedStmt?.accountInfo?.accountName || detectedAccountTypeLabel,
+    accountNumber: resolvedCuentaIdentificada,
+    owner: extractedStmt?.accountInfo?.owner || '',
+    cutoffDate: extractedStmt?.accountInfo?.cutoffDate || '',
+    paymentDueDate: extractedStmt?.accountInfo?.paymentDueDate || '',
+    currency: extractedStmt?.accountInfo?.currency || moneda,
+    currentBalance:
+      extractedStmt?.accountInfo?.currentBalance > 0
+        ? extractedStmt.accountInfo.currentBalance
+        : monto,
+    minimumPayment: extractedStmt?.accountInfo?.minimumPayment || 0,
+    creditLimit: extractedStmt?.accountInfo?.creditLimit || 0,
+  };
+
+  if (
+    statementRows.length === 0 &&
+    Array.isArray(extractedStmt?.transactions) &&
+    extractedStmt.transactions.length > 0
+  ) {
+    for (const tx of extractedStmt.transactions) {
+      const rowCat = inferSmartScanCategory(
+        tx.concept,
+        tx.concept,
+        tx.type === 'income' ? TRANSACTION_TYPES.INCOME : TRANSACTION_TYPES.EXPENSE,
+        state?.categories || []
+      );
+      statementRows.push({
+        id: `stmt_tx_${statementRows.length + 1}`,
+        selected: true,
+        fecha: tx.date,
+        date: tx.date,
+        time: tx.time || '12:00 AM',
+        comercio: tx.concept,
+        concept: tx.concept,
+        monto: tx.amount,
+        amount: tx.amount,
+        moneda: tx.currency || moneda,
+        currency: tx.currency || moneda,
+        tipo: tx.type === 'income' ? TRANSACTION_TYPES.INCOME : TRANSACTION_TYPES.EXPENSE,
+        type: tx.type === 'income' ? TRANSACTION_TYPES.INCOME : TRANSACTION_TYPES.EXPENSE,
+        categoryId: rowCat.categoryId,
+        categoriaSugerida: rowCat.categoriaSugerida,
+        isDuplicate: false,
+      });
+    }
+  }
 
   const activeAccounts = filterActiveAccounts(
     Array.isArray(state?.accounts) ? state.accounts : []
   ).filter((acc) => acc && !acc.archived && !acc.isArchived);
-  const rawDigits = String(cuentaIdentificada || '').replace(/\D/g, '');
+  const rawDigits = String(resolvedCuentaIdentificada || '').replace(/\D/g, '');
   const targetLast4 = extractLast4Digits(rawDigits);
   let matchedAccount = null;
   if (rawDigits && activeAccounts.length > 0) {
@@ -2439,9 +2590,16 @@ export function parseSmartScanText(rawText = '', state = {}, options = {}) {
     currency: moneda,
     tipoDocumento,
     documentType: tipoDocumento,
+    statementDocumentType: extractedStmt?.documentType || tipoDocumento,
     tipoTransaccion,
-    cuentaIdentificada,
-    accountNumber: cuentaIdentificada,
+    cuentaIdentificada: resolvedCuentaIdentificada,
+    accountNumber: resolvedCuentaIdentificada,
+    accountInfo,
+    creditLimit: accountInfo.creditLimit,
+    minimumPayment: accountInfo.minimumPayment,
+    cutoffDate: accountInfo.cutoffDate,
+    paymentDueDate: accountInfo.paymentDueDate,
+    owner: accountInfo.owner,
     categoryId,
     categoriaSugerida,
     suggestedCategory: categoriaSugerida,
@@ -2456,7 +2614,8 @@ export function parseSmartScanText(rawText = '', state = {}, options = {}) {
     bankName: detectedBank,
     detectedAccountType,
     detectedAccountTypeLabel,
-    matchedTemplateId: matchedTemplate?.bankId || null,
+    matchedTemplateId:
+      matchedStmtTemplate?.bankId || matchedTemplate?.bankId || null,
     breakdown: parsedVoucher.breakdown || { subtotal: 0, isv: 0, devolIsv: 0 },
     statementItems: statementRows,
     statementTransactions: statementRows,
@@ -2601,8 +2760,52 @@ async function mergeGeminiResultIntoParsed(parsed, geminiData, state = {}, optio
   parsed.extractionSource = 'gemini-2.5-flash';
   parsed.usedGeminiFallback = true;
 
+  if (parsed.isMultiRowStatement || parsed.tipoDocumento === SMART_SCAN_DOCUMENT_TYPES.BANK_STATEMENT) {
+    try {
+      parsed.learnedTemplate = await learnAndSaveStatementPatternToBankTemplates(
+        {
+          bankName: parsed.bankName,
+          documentType: parsed.statementDocumentType || parsed.tipoDocumento,
+          accountInfo: {
+            ...(parsed.accountInfo || {}),
+            accountName:
+              parsed.accountInfo?.accountName || parsed.detectedAccountTypeLabel || 'Estado de Cuenta',
+            accountNumber: parsed.cuentaIdentificada || '',
+            currency: parsed.moneda,
+            currentBalance: parsed.monto || 0,
+          },
+          transactions: parsed.statementItems || [],
+        },
+        parsed.rawText || '',
+        options
+      );
+    } catch {
+      // Fallback local-first silencioso
+    }
+  }
+
   return parsed;
 }
+
+export {
+  VECTOR_PDF_MIN_CHARS,
+  extractPdfData,
+  extractNativePdfTextLayer,
+  organizeTextItemsIntoLines,
+  organizeLinesIntoHierarchicalBlocks,
+  parseBankStatementTextData,
+  parseStatementHeaderAccountData,
+  parseStatementTransactions,
+  detectActiveStatementCurrency,
+  normalizeBankStatementDate,
+  PROMERICA_CREDIT_CARD_SAMPLE_EXTRACTION,
+  DEFAULT_STATEMENT_TEMPLATES,
+  loadKnownStatementTemplates,
+  matchStatementTemplate,
+  extractStatementWithTemplate,
+  learnAndSaveStatementPatternToBankTemplates,
+  processPdfStatementWithPatternLearning,
+};
 
 /**
  * Motor Unificado de Clasificación y Extracción Híbrida (`extractSmartScanDocument`).
