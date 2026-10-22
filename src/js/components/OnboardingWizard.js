@@ -38,6 +38,7 @@ import {
   removeOnboardingWizardFromDom,
   verifyUserOnboardingOnSignIn,
   cleanupOnboardingOnLogout,
+  syncLogoutButtonVisibility,
 } from '../services/auth.js';
 
 export {
@@ -56,6 +57,7 @@ export {
   removeOnboardingWizardFromDom,
   verifyUserOnboardingOnSignIn,
   cleanupOnboardingOnLogout,
+  syncLogoutButtonVisibility,
 };
 
 export const ONBOARDING_WIZARD_DIALOG_ID = 'onboarding-wizard-dialog';
@@ -522,6 +524,13 @@ export class OnboardingWizard {
   }
 
   open(options = {}) {
+    const candidateProfile =
+      options.profile !== undefined ? options.profile : this.activeProfile;
+    if (candidateProfile?.hasCompletedOnboarding === true && !options.force) {
+      this.removeModalFromDom(options.docRef);
+      return this;
+    }
+
     this.init();
     if (options.user !== undefined) this.activeUser = options.user;
     if (options.profile !== undefined) this.activeProfile = options.profile;
@@ -708,19 +717,7 @@ export class OnboardingWizard {
   }
 
   renderWithTransition() {
-    if (typeof document !== 'undefined' && typeof document.startViewTransition === 'function') {
-      document.documentElement.dataset.onboardingTransition = this.transitionDirection;
-      const transition = document.startViewTransition(() => {
-        this.render();
-      });
-      transition?.finished
-        ?.finally?.(() => {
-          delete document.documentElement.dataset.onboardingTransition;
-        })
-        ?.catch?.(() => {});
-      return;
-    }
-    this.render();
+    return this.render();
   }
 
   render() {
@@ -732,17 +729,85 @@ export class OnboardingWizard {
 
     if (this.dialogEl) {
       this.dialogEl.innerHTML = markup;
+      this.bindRenderedControls();
     }
     return markup;
+  }
+
+  bindRenderedControls() {
+    if (!this.dialogEl || typeof this.dialogEl.querySelector !== 'function') return;
+
+    const finishBtn =
+      this.dialogEl.querySelector(`#${ONBOARDING_FINISH_BUTTON_ID}`) ||
+      this.dialogEl.querySelector('[data-onboarding-action="finish"]');
+    if (finishBtn) {
+      finishBtn.onclick = (event) => {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        if (this.isFinishing) return;
+        void this.finish({ buttonEl: finishBtn });
+      };
+    }
+
+    const nextBtn =
+      this.dialogEl.querySelector('#btn-onboarding-next') ||
+      this.dialogEl.querySelector('[data-onboarding-action="next"]');
+    if (nextBtn) {
+      nextBtn.onclick = (event) => {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        this.nextStep();
+      };
+    }
+
+    const prevBtn =
+      this.dialogEl.querySelector('#btn-onboarding-prev') ||
+      this.dialogEl.querySelector('[data-onboarding-action="prev"]');
+    if (prevBtn) {
+      prevBtn.onclick = (event) => {
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        this.prevStep();
+      };
+    }
+
+    if (typeof this.dialogEl.querySelectorAll === 'function') {
+      const stepDots = this.dialogEl.querySelectorAll('[data-onboarding-step]');
+      stepDots.forEach((dot) => {
+        dot.onclick = (event) => {
+          event?.preventDefault?.();
+          event?.stopPropagation?.();
+          const targetIdx = Number.parseInt(dot.dataset?.onboardingStep, 10);
+          if (Number.isFinite(targetIdx)) {
+            this.goToStep(targetIdx);
+          }
+        };
+      });
+    }
+
+    const countrySelect = this.dialogEl.querySelector('#onboarding-country-select');
+    if (countrySelect) {
+      countrySelect.onchange = (event) => {
+        this.setCountry(event?.target?.value ?? countrySelect.value);
+      };
+    }
+
+    const currencySelect = this.dialogEl.querySelector('#onboarding-currency-select');
+    if (currencySelect) {
+      currencySelect.onchange = (event) => {
+        this.setCurrency(event?.target?.value ?? currencySelect.value);
+      };
+    }
   }
 
   /**
    * Completes the Onboarding Wizard when the user clicks "🚀 Comenzar a usar Pisto":
    * a) Disables the button temporarily to prevent multiple clicks.
    * b) Obtains `uid` from Firebase Auth (`auth.currentUser.uid`).
-   * c) Executes explicit async update in Firestore:
+   * c) Immediately persists `hasCompletedOnboarding: true` locally and closes the modal so UI never hangs.
+   * d) Executes explicit async update in Firestore:
    *    `await updateDoc(doc(db, "users", auth.currentUser.uid), { hasCompletedOnboarding: true });`
-   * d) Removes the modal from the DOM and shows the application Dashboard.
+   * e) Shows the application Dashboard.
    */
   async finish(customContext = {}) {
     if (this.isFinishing && !customContext.force) {
@@ -761,13 +826,35 @@ export class OnboardingWizard {
     }
 
     try {
-      const auth =
+      const fsContext =
+        customContext.firestoreContext ||
+        (this.authService && typeof this.authService.getFirestoreContext === 'function'
+          ? this.authService.getFirestoreContext()
+          : {});
+
+      const storage =
+        customContext.storage ??
+        fsContext.storage ??
+        (typeof localStorage !== 'undefined' ? localStorage : null);
+
+      let sessionUser = null;
+      if (storage && typeof storage.getItem === 'function') {
+        try {
+          const rawSession = storage.getItem('pisto_auth_session_v1');
+          if (rawSession) sessionUser = JSON.parse(rawSession);
+        } catch {
+          sessionUser = null;
+        }
+      }
+
+      const rawAuth =
         customContext.auth ||
         this.authService?.firebaseAuth ||
         globalThis.__PISTO_FIREBASE_AUTH__ || {
           currentUser:
             this.authService?.getCurrentUser?.() ||
-            this.activeUser || {
+            this.activeUser ||
+            sessionUser || {
               uid:
                 customContext.uid ||
                 this.activeProfile?.uid ||
@@ -777,58 +864,102 @@ export class OnboardingWizard {
         };
 
       const uid = String(
-        auth?.currentUser?.uid ||
+        rawAuth?.currentUser?.uid ||
           customContext.uid ||
           this.activeUser?.uid ||
           this.activeProfile?.uid ||
           this.authService?.getCurrentUser?.()?.uid ||
           this.authService?.getCurrentProfile?.()?.uid ||
+          sessionUser?.uid ||
           'local_default_user'
       ).trim();
 
-      const fsContext =
-        customContext.firestoreContext ||
-        (this.authService && typeof this.authService.getFirestoreContext === 'function'
-          ? this.authService.getFirestoreContext()
-          : {});
+      const email = String(
+        rawAuth?.currentUser?.email ||
+          this.activeUser?.email ||
+          this.activeProfile?.email ||
+          this.authService?.getCurrentUser?.()?.email ||
+          this.authService?.getCurrentProfile?.()?.email ||
+          sessionUser?.email ||
+          ''
+      )
+        .trim()
+        .toLowerCase();
 
-      const db = customContext.db ?? customContext.firestoreDb ?? fsContext.firestoreDb ?? null;
-      const fsMod = customContext.firestoreModule ?? fsContext.firestoreModule ?? null;
-      const doc = customContext.doc ?? fsMod?.doc;
-      const updateDoc = customContext.updateDoc ?? fsMod?.updateDoc;
+      const auth = rawAuth?.currentUser?.uid
+        ? rawAuth
+        : { ...rawAuth, currentUser: { ...(rawAuth?.currentUser || {}), uid, email } };
 
-      // c) Actualización asíncrona explícita en Firestore:
-      // await updateDoc(doc(db, "users", auth.currentUser.uid), { hasCompletedOnboarding: true });
-      const activeAuthWithUser = auth?.currentUser?.uid
-        ? auth
-        : { ...auth, currentUser: { ...(auth?.currentUser || {}), uid } };
+      const nowIso = new Date().toISOString();
+      const immediateProfile = {
+        ...(this.activeProfile || this.authService?.getCurrentProfile?.() || {}),
+        uid,
+        ...(email ? { email } : {}),
+        defaultCurrency: this.selectedCurrency,
+        country: this.selectedCountry,
+        hasCompletedOnboarding: true,
+        updatedAt: nowIso,
+      };
 
-      if (db && typeof doc === 'function' && typeof updateDoc === 'function') {
+      // Persistencia inmediata en LocalStorage antes de cualquier llamada remota
+      const state = customContext.state || this.getState();
+      const candidateUids = Array.from(
+        new Set(
+          [
+            uid,
+            sessionUser?.uid,
+            this.activeUser?.uid,
+            this.activeProfile?.uid,
+            this.authService?.getCurrentUser?.()?.uid,
+            this.authService?.getCurrentProfile?.()?.uid,
+            state?.settings?.currentUid,
+          ]
+            .map((v) => String(v || '').trim())
+            .filter(Boolean)
+        )
+      );
+
+      if (storage && typeof storage.setItem === 'function') {
         try {
-          await updateDoc(doc(db, 'users', activeAuthWithUser.currentUser.uid), {
-            hasCompletedOnboarding: true,
-          });
+          for (const targetUid of candidateUids) {
+            const docKey = `pisto_firestore_users_doc_${targetUid}`;
+            let existingCached = {};
+            if (typeof storage.getItem === 'function') {
+              const rawDoc = storage.getItem(docKey);
+              if (rawDoc) existingCached = JSON.parse(rawDoc) || {};
+            }
+            const mergedCache = {
+              ...existingCached,
+              ...immediateProfile,
+              uid: targetUid,
+              hasCompletedOnboarding: true,
+            };
+            storage.setItem(docKey, JSON.stringify(mergedCache));
+            storage.setItem(`pisto_onboarding_completed_${targetUid}`, 'true');
+          }
+          if (email) {
+            storage.setItem(`pisto_onboarding_completed_${email}`, 'true');
+          }
         } catch {
-          // Fallback manejado por completeUserOnboarding / setDoc
+          // Continuar si storage está restringido
         }
       }
 
-      const updatedProfile = await completeUserOnboarding(uid, {
-        defaultCurrency: this.selectedCurrency,
-        country: this.selectedCountry,
-        authService: customContext.authService ?? this.authService,
-        firestoreDb: db,
-        firestoreModule: fsMod,
-        storage: customContext.storage ?? fsContext.storage,
-      });
+      this.activeProfile = immediateProfile;
+      if (this.authService && typeof this.authService === 'object') {
+        this.authService.currentProfile = {
+          ...(this.authService.currentProfile || {}),
+          ...immediateProfile,
+          hasCompletedOnboarding: true,
+        };
+      }
 
-      this.activeProfile = updatedProfile;
-
-      const state = customContext.state || this.getState();
       if (state && typeof state === 'object') {
         if (state.settings && typeof state.settings === 'object') {
           state.settings.baseCurrency = this.selectedCurrency;
           state.settings.currencyFilter = this.selectedCurrency;
+          state.settings.hasCompletedOnboarding = true;
+          state.settings.onboardingCompletedUid = uid;
         }
         const repo = customContext.repo || this.repo;
         if (repo && typeof repo.saveState === 'function') {
@@ -836,7 +967,122 @@ export class OnboardingWizard {
         }
       }
 
-      // d) Remueve el modal del DOM y muestra el Dashboard de la aplicación
+      // Cerrar y remover el modal de inmediato para no bloquear la interfaz del usuario
+      this.removeModalFromDom(customContext.docRef);
+      this.showDashboardView(customContext.docRef);
+
+      if (
+        this.authService &&
+        !this.authService.firestoreDb &&
+        typeof this.authService.ensureFirebaseAuthSdkLoaded === 'function' &&
+        typeof window !== 'undefined'
+      ) {
+        try {
+          await Promise.race([
+            this.authService.ensureFirebaseAuthSdkLoaded(),
+            new Promise((resolve) => setTimeout(resolve, 1500)),
+          ]);
+        } catch {
+          // Operación Local-First si no hay configuración remota de Firebase
+        }
+      }
+
+      const refreshedFsContext =
+        customContext.firestoreContext ||
+        (this.authService && typeof this.authService.getFirestoreContext === 'function'
+          ? this.authService.getFirestoreContext()
+          : fsContext);
+
+      const db =
+        customContext.db ??
+        customContext.firestoreDb ??
+        refreshedFsContext.firestoreDb ??
+        null;
+      const fsMod =
+        customContext.firestoreModule ?? refreshedFsContext.firestoreModule ?? null;
+      const doc = customContext.doc ?? fsMod?.doc;
+      const updateDoc = customContext.updateDoc ?? fsMod?.updateDoc;
+      const setDoc = customContext.setDoc ?? fsMod?.setDoc;
+
+      // c) Actualización directa en Firestore con protección contra rechazo o bloqueo de red:
+      // await updateDoc(doc(db, "users", auth.currentUser.uid), { hasCompletedOnboarding: true });
+      if (db && typeof doc === 'function') {
+        const performFirestoreUpdate = async () => {
+          if (typeof updateDoc === 'function') {
+            try {
+              await updateDoc(doc(db, 'users', auth.currentUser.uid), {
+                hasCompletedOnboarding: true,
+              });
+            } catch {
+              if (typeof setDoc === 'function') {
+                try {
+                  await setDoc(
+                    doc(db, 'users', auth.currentUser.uid),
+                    { hasCompletedOnboarding: true },
+                    { merge: true }
+                  );
+                } catch {
+                  // Respaldo Local-First ya persistido
+                }
+              }
+            }
+          } else if (typeof setDoc === 'function') {
+            try {
+              await setDoc(
+                doc(db, 'users', auth.currentUser.uid),
+                { hasCompletedOnboarding: true },
+                { merge: true }
+              );
+            } catch {
+              // Respaldo Local-First ya persistido
+            }
+          }
+        };
+
+        if (typeof window !== 'undefined') {
+          await Promise.race([
+            performFirestoreUpdate(),
+            new Promise((resolve) => setTimeout(resolve, 2000)),
+          ]);
+        } else {
+          await performFirestoreUpdate();
+        }
+      }
+
+      let updatedProfile = immediateProfile;
+      try {
+        const completePromise = completeUserOnboarding(uid, {
+          defaultCurrency: this.selectedCurrency,
+          country: this.selectedCountry,
+          email,
+          authService: customContext.authService ?? this.authService,
+          firestoreDb: db,
+          firestoreModule: fsMod,
+          storage,
+        });
+        updatedProfile =
+          typeof window !== 'undefined'
+            ? await Promise.race([
+                completePromise,
+                new Promise((resolve) => setTimeout(() => resolve(immediateProfile), 2000)),
+              ])
+            : await completePromise;
+      } catch {
+        updatedProfile = immediateProfile;
+      }
+
+      updatedProfile = {
+        ...immediateProfile,
+        ...(updatedProfile || {}),
+        hasCompletedOnboarding: true,
+      };
+
+      this.activeProfile = updatedProfile;
+      if (this.authService && typeof this.authService === 'object') {
+        this.authService.currentProfile = updatedProfile;
+      }
+
+      // Garantizar nuevamente que el modal esté fuera del DOM
       this.removeModalFromDom(customContext.docRef);
       this.showDashboardView(customContext.docRef);
 

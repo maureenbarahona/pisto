@@ -56,33 +56,45 @@ export async function processAccountWithAgentADK(fileOrDataUrl, options = {}) {
   const apiKey = String(options.apiKey || '').trim();
   const fallbackText = String(options.ocrTextFallback || options.ocrFallbackText || '').trim();
 
-  // 1. Si hay API Key configurada, intentar extracción con Agente ADK Vision
-  if (apiKey && fileOrDataUrl) {
+  // 1. Intentar extracción con Agente ADK Vision (Gemini Flash directo o endpoint /api/ai/scan-account)
+  if (fileOrDataUrl && (apiKey || options.fetchImpl || typeof window !== 'undefined')) {
     try {
       const extracted = await extractAccountFromFile(fileOrDataUrl, {
         apiKey,
         ocrFallbackText: fallbackText,
         fetchImpl: options.fetchImpl,
+        storage: options.storage,
       });
-      return {
-        data: extracted.data,
-        source: `adk:${extracted.source}`,
-        isDemoFallback: false,
-        message: '🤖 Agente ADK Vision: Estado de cuenta extraído con éxito.',
-      };
+      const hasExtractedAccounts =
+        Array.isArray(extracted?.data?.accountsList) &&
+        extracted.data.accountsList.some(
+          (item) => Boolean(item.accountNumber) || Number(item.currentBalance) > 0
+        );
+      if (hasExtractedAccounts || extracted?.source !== 'local-ocr-fallback') {
+        return {
+          data: extracted.data,
+          source: `adk:${extracted.source}`,
+          isDemoFallback: false,
+          message: '🤖 Agente ADK Vision: Estado de cuenta extraído con éxito.',
+        };
+      }
     } catch {
       // Fallback silencioso a modo local sin llamadas a consola
     }
   }
 
-  // 2. Si hay texto OCR válido disponible
-  if (fallbackText.length >= 12) {
+  // 2. Si hay texto OCR válido disponible (incluyendo formatos nuevos inferidos por contexto)
+  if (fallbackText.length >= 8) {
     try {
       const parsedFromText = parseAccountDataFromTextFallback(fallbackText);
       const hasMeaningfulData =
         Boolean(parsedFromText.accountNumber) ||
         parsedFromText.currentBalance > 0 ||
-        parsedFromText.detectedTransactions.length > 0;
+        parsedFromText.detectedTransactions.length > 0 ||
+        (Array.isArray(parsedFromText.accountsList) &&
+          parsedFromText.accountsList.some(
+            (acc) => Boolean(acc.accountNumber) || Number(acc.currentBalance) > 0
+          ));
       if (hasMeaningfulData) {
         return {
           data: parsedFromText,

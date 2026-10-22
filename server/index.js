@@ -17,6 +17,12 @@ import {
   executeFinancialInsights,
   getAiTelemetryStatus,
 } from './ai/genkitFlows.js';
+import {
+  ACCOUNT_EXTRACTOR_SYSTEM_PROMPT,
+  EXTRACTED_ACCOUNT_JSON_SCHEMA,
+  ExtractedAccountSchema,
+  parseAccountDataFromTextFallback,
+} from '../src/js/services/accountExtractor.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,14 +97,14 @@ function sendJson(res, statusCode, payload) {
  * @param {http.IncomingMessage} req
  * @returns {Promise<Record<string, any>>}
  */
-function readJsonBody(req) {
+function readJsonBody(req, maxBytes = 32 * 1024) {
   return new Promise((resolve, reject) => {
     let raw = '';
-    const MAX_BYTES = 32 * 1024;
+    const MAX_BYTES = maxBytes;
     req.on('data', (chunk) => {
       raw += chunk;
       if (raw.length > MAX_BYTES) {
-        reject(new Error('Payload demasiado grande (máximo 32KB para optimización de tokens).'));
+        reject(new Error('Payload demasiado grande para optimización de tokens.'));
         req.destroy();
       }
     });
@@ -229,6 +235,90 @@ export async function handleRequest(req, res) {
         apiKey,
       });
       return sendJson(res, 200, { ok: true, ...result, telemetry: getAiTelemetryStatus() });
+    } catch (error) {
+      return sendJson(res, 400, { ok: false, error: error.message });
+    }
+  }
+
+  // 4b. On-Demand Gemini Vision Account & Statement Extractor (/api/ai/scan-account)
+  if (req.method === 'POST' && pathname === '/api/ai/scan-account') {
+    try {
+      const body = await readJsonBody(req, 12 * 1024 * 1024);
+      const headerKey = String(req.headers['x-gemini-api-key'] || '').trim();
+      const apiKey =
+        headerKey ||
+        String(body.apiKey || '').trim() ||
+        String(process.env.GEMINI_API_KEY || '').trim();
+      const imageBase64 = String(body.imageBase64 || '').trim();
+      const mimeType = String(body.mimeType || 'image/png').trim();
+      const ocrTextFallback = String(body.ocrTextFallback || '').trim();
+      const fewShotPrompt =
+        typeof body.fewShotPrompt === 'string' && body.fewShotPrompt.trim()
+          ? body.fewShotPrompt.trim()
+          : ACCOUNT_EXTRACTOR_SYSTEM_PROMPT;
+
+      if (apiKey && imageBase64 && typeof fetch === 'function') {
+        try {
+          const requestedModel =
+            typeof body.model === 'string' && body.model.trim()
+              ? body.model.trim()
+              : 'gemini-2.5-flash';
+          const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(requestedModel)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+          const aiRes = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [
+                {
+                  parts: [
+                    { text: fewShotPrompt },
+                    {
+                      inlineData: {
+                        mimeType,
+                        data: imageBase64,
+                      },
+                    },
+                  ],
+                },
+              ],
+              generationConfig: {
+                temperature: 0.1,
+                responseMimeType: 'application/json',
+                responseSchema: EXTRACTED_ACCOUNT_JSON_SCHEMA,
+              },
+            }),
+          });
+          if (aiRes.ok) {
+            const payload = await aiRes.json();
+            const rawJson = payload?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            if (rawJson) {
+              const parsed = JSON.parse(rawJson);
+              const validated = ExtractedAccountSchema.parse(parsed);
+              return sendJson(res, 200, {
+                ok: true,
+                data: validated,
+                source: `genkit:${requestedModel}`,
+              });
+            }
+          }
+        } catch {
+          // Fall through to OCR text fallback
+        }
+      }
+
+      if (ocrTextFallback) {
+        const validated = parseAccountDataFromTextFallback(ocrTextFallback);
+        return sendJson(res, 200, {
+          ok: true,
+          data: validated,
+          source: 'server-ocr-fallback',
+        });
+      }
+
+      return sendJson(res, 422, {
+        ok: false,
+        error: 'Se requiere GEMINI_API_KEY o texto OCR de respaldo para analizar el documento.',
+      });
     } catch (error) {
       return sendJson(res, 400, { ok: false, error: error.message });
     }

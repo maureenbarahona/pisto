@@ -416,10 +416,28 @@ export class ProfileViewController {
       emailDisplayEl.textContent = user?.email || profile?.email || 'Modo sin cuenta (Inicia sesión con Google o Correo)';
     }
 
+    const authCurrentUser =
+      this.authService?.firebaseAuth?.currentUser ??
+      this.authService?.getCurrentUser?.() ??
+      user ??
+      null;
+    const isAuthenticated = Boolean(
+      authCurrentUser !== null &&
+        authCurrentUser?.uid &&
+        authCurrentUser.uid !== 'local_default_user'
+    );
+
     if (signOutBtn) {
-      signOutBtn.classList.remove('is-hidden');
+      signOutBtn.classList.toggle('is-hidden', !isAuthenticated);
+      if (isAuthenticated) {
+        signOutBtn.removeAttribute('hidden');
+        signOutBtn.style.display = '';
+      } else {
+        signOutBtn.setAttribute('hidden', '');
+        signOutBtn.style.display = 'none';
+      }
     }
-    openAuthBtn?.classList.toggle('is-hidden', Boolean(user));
+    openAuthBtn?.classList.toggle('is-hidden', isAuthenticated);
 
     const nameInput = document.getElementById('profile-name-input');
     const countrySelect = document.getElementById('profile-country-select');

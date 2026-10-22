@@ -39,6 +39,53 @@ import {
   prepareTransactionForWorkspace,
   saveTransactionToWorkspace,
 } from '../../../public/js/services/transactions.js';
+import {
+  BANK_TEMPLATES_COLLECTION,
+  BANK_TEMPLATES_LOCAL_STORE,
+  BANK_TEMPLATES_IDB_NAME,
+  BANK_TEMPLATES_IDB_VERSION,
+  BANK_TEMPLATES_STORAGE_MIRROR_KEY,
+  DEFAULT_BANK_TEMPLATES,
+  normalizeTemplateCurrency,
+  buildBankTemplateId,
+  normalizeBankTemplate,
+  openBankTemplatesIndexedDb,
+  getLocalBankTemplatesSync,
+  saveTemplateToLocalIndexedDb,
+  getAllLocalBankTemplates,
+  fetchBankTemplatesFromFirestore,
+  saveBankTemplate,
+  buildFewShotPromptWithTemplates,
+  computeLayoutFingerprint,
+  matchBankTemplateFromText,
+  applyTemplateExtractionRules,
+  runLocalOcrEngine,
+  extractOfflineWithLearnedTemplates,
+  hasUserEditedExtractedAccounts,
+  deriveTemplateKeywords,
+  learnBankTemplateFromConfirmation,
+} from './templateLearner.js';
+import {
+  GEMINI_VISION_MODEL,
+  GEMINI_VISION_FALLBACK_MODEL,
+  DEFAULT_OCR_CONFIDENCE_THRESHOLD,
+  BANK_PRODUCT_TYPES,
+  sanitizeNumericAmount,
+  sanitizeNumericAmountString,
+  classifyBankProductType,
+  HYBRID_ACCOUNT_ITEM_JSON_SCHEMA,
+  HYBRID_TRANSACTION_ITEM_JSON_SCHEMA,
+  HYBRID_EXTRACTOR_JSON_SCHEMA,
+  HYBRID_EXTRACTOR_SYSTEM_PROMPT,
+  normalizeHybridBankName,
+  normalizeHybridAccountItem,
+  normalizeHybridTransactionItem,
+  computeOcrTextConfidence,
+  runTesseractLocalOcr,
+  parseMultiProductBankText,
+  invokeGemini25FlashFallback,
+  extractBankDataHybrid,
+} from './ocrExtractor.js';
 
 export {
   cleanAmount,
@@ -49,6 +96,49 @@ export {
   normalizeScanCurrency,
   normalizeAccountOrCardNumber,
   classifyTransactionType,
+  BANK_TEMPLATES_COLLECTION,
+  BANK_TEMPLATES_LOCAL_STORE,
+  BANK_TEMPLATES_IDB_NAME,
+  BANK_TEMPLATES_IDB_VERSION,
+  BANK_TEMPLATES_STORAGE_MIRROR_KEY,
+  DEFAULT_BANK_TEMPLATES,
+  normalizeTemplateCurrency,
+  buildBankTemplateId,
+  normalizeBankTemplate,
+  openBankTemplatesIndexedDb,
+  getLocalBankTemplatesSync,
+  saveTemplateToLocalIndexedDb,
+  getAllLocalBankTemplates,
+  fetchBankTemplatesFromFirestore,
+  saveBankTemplate,
+  buildFewShotPromptWithTemplates,
+  computeLayoutFingerprint,
+  matchBankTemplateFromText,
+  applyTemplateExtractionRules,
+  runLocalOcrEngine,
+  extractOfflineWithLearnedTemplates,
+  hasUserEditedExtractedAccounts,
+  deriveTemplateKeywords,
+  learnBankTemplateFromConfirmation,
+  GEMINI_VISION_MODEL,
+  GEMINI_VISION_FALLBACK_MODEL,
+  DEFAULT_OCR_CONFIDENCE_THRESHOLD,
+  BANK_PRODUCT_TYPES,
+  sanitizeNumericAmount,
+  sanitizeNumericAmountString,
+  classifyBankProductType,
+  HYBRID_ACCOUNT_ITEM_JSON_SCHEMA,
+  HYBRID_TRANSACTION_ITEM_JSON_SCHEMA,
+  HYBRID_EXTRACTOR_JSON_SCHEMA,
+  HYBRID_EXTRACTOR_SYSTEM_PROMPT,
+  normalizeHybridBankName,
+  normalizeHybridAccountItem,
+  normalizeHybridTransactionItem,
+  computeOcrTextConfidence,
+  runTesseractLocalOcr,
+  parseMultiProductBankText,
+  invokeGemini25FlashFallback,
+  extractBankDataHybrid,
 };
 
 /**
@@ -96,37 +186,141 @@ const DEMO_BATCH_ITEMS = Object.freeze([
 
 export const BATCH_DEMO_PRODUCTS_SUMMARY = Object.freeze({
   bankName: 'BAC Credomatic',
+  accountsList: DEMO_BATCH_ITEMS,
   accounts: DEMO_BATCH_ITEMS,
   accountsArray: DEMO_BATCH_ITEMS,
 });
 
+export const LEARNED_BANK_PATTERNS_STORAGE_KEY = 'pisto_adaptive_bank_extractor_patterns_v1';
+
+/**
+ * Lee los patrones de bancos/formatos aprendidos previamente por confirmación del usuario.
+ * @param {Storage} [storage]
+ * @returns {Array<{ bankName: string, accountTypePattern: string, currency: string }>}
+ */
+export function getLearnedBankPatterns(
+  storage = typeof localStorage !== 'undefined' ? localStorage : null
+) {
+  if (!storage || typeof storage.getItem !== 'function') return [];
+  try {
+    const raw = storage.getItem(LEARNED_BANK_PATTERNS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Registra de forma adaptativa la estructura confirmada/editada por el usuario para mejorar
+ * futuras extracciones de bancos o formatos personalizados.
+ * @param {Array<object>|object} confirmedAccounts
+ * @param {Storage} [storage]
+ */
+export function learnAdaptiveAccountPattern(
+  confirmedAccounts,
+  storageOrContextHint = typeof localStorage !== 'undefined' ? localStorage : null,
+  maybeStorage = typeof localStorage !== 'undefined' ? localStorage : null
+) {
+  const storage =
+    storageOrContextHint && typeof storageOrContextHint.setItem === 'function'
+      ? storageOrContextHint
+      : maybeStorage && typeof maybeStorage.setItem === 'function'
+        ? maybeStorage
+        : null;
+  if (!storage || typeof storage.setItem !== 'function') return [];
+  const list = Array.isArray(confirmedAccounts)
+    ? confirmedAccounts
+    : Array.isArray(confirmedAccounts?.accountsList)
+      ? confirmedAccounts.accountsList
+      : Array.isArray(confirmedAccounts?.accounts)
+        ? confirmedAccounts.accounts
+        : confirmedAccounts && typeof confirmedAccounts === 'object'
+          ? [confirmedAccounts]
+          : [];
+
+  const existing = getLearnedBankPatterns(storage);
+  const map = new Map(
+    existing.map((item) => [
+      `${String(item.bankName || '').toLowerCase()}::${String(item.accountTypePattern || '').toLowerCase()}`,
+      item,
+    ])
+  );
+
+  for (const acc of list) {
+    if (!acc || typeof acc !== 'object') continue;
+    const bankName = String(acc.bankName || '').trim();
+    const accountTypePattern = String(acc.accountType || '').trim();
+    const currency = acc.currency === 'USD' ? 'USD' : 'HNL';
+    if (!bankName || !accountTypePattern) continue;
+    const key = `${bankName.toLowerCase()}::${accountTypePattern.toLowerCase()}`;
+    map.set(key, {
+      bankName,
+      accountTypePattern,
+      currency,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  const updated = Array.from(map.values()).slice(-25);
+  try {
+    storage.setItem(LEARNED_BANK_PATTERNS_STORAGE_KEY, JSON.stringify(updated));
+  } catch {
+    // Ignore storage quota errors
+  }
+  return updated;
+}
+
 export const ACCOUNT_EXTRACTOR_SYSTEM_PROMPT = [
-  'Eres un sistema experto en visión artificial financiera para Honduras y Latinoamérica (Gemini Vision / Genkit).',
-  'Tu tarea es analizar una imagen (PNG, JPG, WEBP) o un documento PDF de un "Resumen de Productos", Estado de Cuenta o Detalle de Cuenta de banca móvil y devolver únicamente un objeto JSON estructurado.',
-  'REGLA CRÍTICA: La respuesta SIEMPRE debe incluir el arreglo `accounts` (y `accountsArray`), incluso si la captura contiene 1 sola cuenta o múltiples cuentas del resumen bancario.',
+  'Eres un sistema experto y adaptativo en visión artificial financiera (Gemini Flash / Genkit Vision) agnóstico del diseño o banco (Banco Atlántida, BAC Credomatic, Ficohsa, Banpaís, Banco de Occidente, Davivienda, Promerica, Lafise, Banrural o cualquier institución financiera).',
+  'Tu tarea es analizar CUALQUIER captura de pantalla, estado de cuenta en PDF o resumen bancario, identificando patrones de encabezados, tablas de productos, tarjetas visuales o listas de movimientos sin importar el orden, columnas o formato visual.',
   '',
-  '1. ARREGLO UNIFICADO DE CUENTAS Y TARJETAS (`bankName` + `accounts` / `accountsArray`):',
-  '   - `bankName`: Detecta el nombre del banco en la imagen o encabezado (ej. "BAC Credomatic", "Banco Atlántida", "Banco Ficohsa", "Banpaís (Banco del País)", "Banco de Occidente", "Davivienda", "Promerica").',
-  '   - `accounts` (y `accountsArray`): Arreglo de objetos donde cada elemento representa una cuenta bancaria o tarjeta de crédito detectada en la imagen/PDF (mínimo 1 elemento):',
-  '     - `bankName`: string con el nombre del banco de esa cuenta (ej. "BAC Credomatic", "Banco Atlántida").',
-  '     - `accountType`: string con el nombre o tipo del producto tal como aparece (ej. "HN - CUENTA BANCARIA", "HN - Negocio Lempiras", "Cuenta Bancaria", "Tarjeta de Crédito - AMERICAN EXPRESS", "AMERICAN EXPRESS").',
-  '     - `accountNumber`: string con el número de cuenta completo (ej. "726935871", "751666931", "758886371") o los últimos 4 dígitos en tarjetas (ej. "3244").',
-  '     - `currency`: string ("HNL" si ve "LPS", "L", "HNL" o "Lempiras"; "USD" si ve "USD" o "$").',
-  '     - `currentBalance`: number Float sanitizando comas de miles antes de convertir a Float (ej. "3,705.95" -> 3705.95, "5,963.18" -> 5963.18, "8,154.03" -> 8154.03, "401.28" -> 401.28).',
-  '     - `isCreditCard`: boolean (`true` si pertenece a la sección "Tarjetas de crédito" o es una tarjeta VISA / MASTERCARD / AMERICAN EXPRESS; `false` si pertenece a "Cuentas bancarias" / ahorro / cheques).',
+  'REGLA CRÍTICA DE EXTRACCIÓN COMPLETA SIN LÍMITE (N PRODUCTOS):',
+  '  - Procesa TODOS los bloques presentes en la imagen o PDF sin truncar ni detenerte al llegar a 2 elementos.',
+  '  - Continúa escaneando después de los encabezados "Cuentas personales", "Cuentas bancarias", "Tarjetas personales", "Tarjetas de crédito" y "Préstamos", agregando cada fila o bloque encontrado al arreglo `accountsList`.',
+  '  - Ejemplo de referencia (BAC Credomatic - extrae las 5 posiciones completas):',
+  '    1) Cuenta bancaria `726935871` -> L 401.28 HNL',
+  '    2) Cuenta bancaria `751666931` -> $ 3,705.95 USD',
+  '    3) Negocio Lempiras `758886371` -> L 5,963.18 HNL',
+  '    4) Tarjeta AMEX `3244` -> L 8,154.03 HNL (y $ 0.00 USD)',
+  '    5) Tarjeta MCARD `0618` -> L 46,852.97 HNL (y $ 11.49 USD)',
   '',
-  '2. MOVIMIENTOS / TRANSACCIONES DETECTADAS (`detectedTransactions` - Array opcional si el documento incluye movimientos de una cuenta):',
-  '   - `date`: Fecha del movimiento en formato YYYY-MM-DD (ej. "15/10/2026" -> "2026-10-15").',
-  '   - `concept`: Descripción o concepto limpio del movimiento (ej. "DEPOSITO DE AHORRO CON T/D 37170597").',
-  '   - `type`: "income" si indica Crédito, Depósito o Abono; "expense" si indica Débito, Retiro, Compra o Cargo.',
-  '   - `amount`: Monto numérico Float sin comas de miles (ej. 200.00).',
+  'FORMATO DE SALIDA OBLIGATORIO (`accountsList`):',
+  'Devuelve SIEMPRE un objeto JSON estructurado que contenga obligatoriamente la lista/arreglo `accountsList` (junto con `accounts` y `accountsArray`), garantizando que para cada cuenta o tarjeta extraiga:',
+  '  1. `bankName`: string con el nombre del banco detectado o inferido por contexto (ej. "Banco Atlántida", "BAC Credomatic", "Banco Ficohsa", "Banpaís (Banco del País)", etc.).',
+  '  2. `accountNumber`: string con el número de cuenta completo (ej. "213130058771", "726935871") o los últimos dígitos en tarjetas (ej. "3244", "0618").',
+  '  3. `accountType`: string con el tipo o nombre del producto bancario o tarjeta (ej. "CUENTA DE AHORRO SOS", "HN - CUENTA BANCARIA", "HN - Negocio Lempiras", "Tarjeta de Crédito - AMERICAN EXPRESS", "Cuenta Cheques").',
+  '  4. `currency`: string estrictamente en código ISO ("HNL" si detecta "L", "LPS", "HNL" o "Lempiras"; "USD" si detecta "$", "US$", "USD" o "Dólares").',
+  '  5. `currentBalance`: number Float sanitizando obligatoriamente las comas de miles antes de convertir a número (ej. "3,705.95" -> 3705.95, "3,901.33" -> 3901.33, "5,963.18" -> 5963.18).',
+  '  6. `isCreditCard`: boolean (`true` si es tarjeta de crédito VISA/MASTERCARD/MCARD/AMEX; `false` si es cuenta bancaria de ahorro/cheques/corriente).',
   '',
-  '3. FILTRADO DE INTERFAZ Y BARRA DE ESTADO:',
-  '   - Ignora horas de la barra de estado del teléfono (ej. `5:30`), iconos de batería/WiFi/señal (4G, 5G, LTE) y botones de navegación ("Transferir", "Pagar", "Compartir", "Detalle de cuenta").',
+  'INFERENCIA ADAPTATIVA POR CONTEXTO DE NEGOCIO:',
+  '  - Si la imagen o PDF contiene un diseño nuevo, tabla no estándar o formato no reconocido anteriormente, infiere los campos (`bankName`, `accountNumber`, `accountType`, `currency`, `currentBalance`) por contexto financiero (encabezados cercanos, etiquetas de "Saldo" / "Disponible" / "Balance", símbolos monetarios y secuencias de dígitos) para permitir al usuario editar o confirmar la estructura antes de guardarla.',
+  '  - Si el documento incluye una tabla o lista de movimientos/transacciones, extráelos en `detectedTransactions` (`date` YYYY-MM-DD, `concept`, `type`: "income"|"expense", `amount` Float sin comas).',
+  '  - Ignora ruido de interfaz móvil: hora de barra de estado (`5:30`), iconos de batería/WiFi/señal (4G, 5G, LTE) y botones ("Transferir", "Pagar", "Compartir").',
 ].join('\n');
 
-export function buildAccountExtractorSystemPrompt() {
-  return ACCOUNT_EXTRACTOR_SYSTEM_PROMPT;
+export function buildAccountExtractorSystemPrompt(options = {}) {
+  const templates =
+    Array.isArray(options.bankTemplates) && options.bankTemplates.length > 0
+      ? options.bankTemplates
+      : getLocalBankTemplatesSync(options.storage);
+  const withFewShot = buildFewShotPromptWithTemplates(
+    ACCOUNT_EXTRACTOR_SYSTEM_PROMPT,
+    templates
+  );
+  const learned = getLearnedBankPatterns(options.storage);
+  if (!Array.isArray(learned) || learned.length === 0) {
+    return withFewShot;
+  }
+  const learnedHints = learned
+    .map(
+      (item) =>
+        `- Banco: "${item.bankName}" | Producto: "${item.accountTypePattern}" | Moneda habitual: ${item.currency}`
+    )
+    .join('\n');
+  return `${withFewShot}\n\nPATRONES APRENDIDOS DEL USUARIO:\n${learnedHints}`;
 }
 
 export const EXTRACTED_ACCOUNT_ITEM_JSON_SCHEMA = Object.freeze({
@@ -134,17 +328,17 @@ export const EXTRACTED_ACCOUNT_ITEM_JSON_SCHEMA = Object.freeze({
   properties: {
     bankName: {
       type: 'STRING',
-      description: 'Nombre del banco para esta cuenta (ej. "BAC Credomatic", "Banco Atlántida")',
-    },
-    accountType: {
-      type: 'STRING',
-      description:
-        'Nombre o tipo de la cuenta o tarjeta (ej. "HN - CUENTA BANCARIA", "HN - Negocio Lempiras", "Tarjeta de Crédito - AMERICAN EXPRESS")',
+      description: 'Nombre del banco detectado o inferido (ej. "Banco Atlántida", "BAC Credomatic", "Ficohsa", "Banpaís")',
     },
     accountNumber: {
       type: 'STRING',
       description:
-        'Número de cuenta (ej. "726935871") o últimos 4 dígitos en tarjetas (ej. "3244")',
+        'Número de cuenta completo (ej. "726935871") o últimos dígitos en tarjetas (ej. "3244")',
+    },
+    accountType: {
+      type: 'STRING',
+      description:
+        'Nombre o tipo de la cuenta o tarjeta (ej. "HN - CUENTA BANCARIA", "CUENTA DE AHORRO SOS", "Tarjeta de Crédito - AMERICAN EXPRESS")',
     },
     currency: {
       type: 'STRING',
@@ -154,14 +348,23 @@ export const EXTRACTED_ACCOUNT_ITEM_JSON_SCHEMA = Object.freeze({
     currentBalance: {
       type: 'NUMBER',
       description:
-        'Saldo actual/disponible como número Float sanitizando comas ("3,705.95" -> 3705.95)',
+        'Saldo actual/disponible como número Float sanitizando comas de miles ("3,705.95" -> 3705.95)',
     },
     isCreditCard: {
       type: 'BOOLEAN',
-      description: 'true si pertenece a la sección "Tarjetas de crédito", false si es cuenta bancaria',
+      description: 'true si es tarjeta de crédito, false si es cuenta bancaria',
+    },
+    productType: {
+      type: 'STRING',
+      enum: ['Ahorro', 'Cheques', 'Tarjeta de Crédito', 'Préstamo'],
+      description: 'Tipo de producto bancario ("Ahorro", "Cheques", "Tarjeta de Crédito", "Préstamo")',
+    },
+    isLoan: {
+      type: 'BOOLEAN',
+      description: 'true si es préstamo o financiamiento',
     },
   },
-  required: ['accountType', 'accountNumber', 'currency', 'currentBalance', 'isCreditCard'],
+  required: ['bankName', 'accountNumber', 'accountType', 'currency', 'currentBalance'],
 });
 
 export const EXTRACTED_ACCOUNT_JSON_SCHEMA = Object.freeze({
@@ -169,12 +372,18 @@ export const EXTRACTED_ACCOUNT_JSON_SCHEMA = Object.freeze({
   properties: {
     bankName: {
       type: 'STRING',
-      description: 'Nombre del banco (ej. BAC Credomatic, Banco Atlántida, Banco Ficohsa, Banpaís)',
+      description: 'Nombre del banco principal (ej. Banco Atlántida, BAC Credomatic, Ficohsa, Banpaís)',
+    },
+    accountsList: {
+      type: 'ARRAY',
+      description:
+        'Lista estructurada obligatoria con todas las cuentas o tarjetas extraídas o inferidas por contexto (mínimo 1 elemento)',
+      items: EXTRACTED_ACCOUNT_ITEM_JSON_SCHEMA,
     },
     accounts: {
       type: 'ARRAY',
       description:
-        'Arreglo obligatorio con todas las cuentas bancarias y tarjetas detectadas (incluso si es 1 sola cuenta)',
+        'Arreglo con todas las cuentas bancarias y tarjetas detectadas (alias compatible con accountsList)',
       items: EXTRACTED_ACCOUNT_ITEM_JSON_SCHEMA,
     },
     accountsArray: {
@@ -188,7 +397,7 @@ export const EXTRACTED_ACCOUNT_JSON_SCHEMA = Object.freeze({
     },
     accountNumber: {
       type: 'STRING',
-      description: 'Número de cuenta principal o últimos 4 dígitos en tarjeta',
+      description: 'Número de cuenta principal o últimos dígitos en tarjeta',
     },
     currency: {
       type: 'STRING',
@@ -197,12 +406,38 @@ export const EXTRACTED_ACCOUNT_JSON_SCHEMA = Object.freeze({
     },
     currentBalance: {
       type: 'NUMBER',
-      description: 'Saldo numérico Float sanitizando comas ("3,705.95" -> 3705.95)',
+      description: 'Saldo numérico Float sanitizando comas de miles ("3,705.95" -> 3705.95)',
     },
     status: {
       type: 'STRING',
       enum: ['Activa', 'Inactiva'],
       description: 'Estado de la cuenta ("Activa" o "Inactiva")',
+    },
+    transactionsList: {
+      type: 'ARRAY',
+      items: {
+        type: 'OBJECT',
+        properties: {
+          date: {
+            type: 'STRING',
+            description: 'Fecha del movimiento en formato YYYY-MM-DD',
+          },
+          concept: {
+            type: 'STRING',
+            description: 'Descripción o concepto del movimiento',
+          },
+          type: {
+            type: 'STRING',
+            enum: ['income', 'expense'],
+            description: '"income" si dice Crédito/Depósito; "expense" si dice Débito/Retiro',
+          },
+          amount: {
+            type: 'NUMBER',
+            description: 'Monto numérico Float sin comas de miles (ej. 200.00)',
+          },
+        },
+        required: ['date', 'concept', 'type', 'amount'],
+      },
     },
     detectedTransactions: {
       type: 'ARRAY',
@@ -231,7 +466,7 @@ export const EXTRACTED_ACCOUNT_JSON_SCHEMA = Object.freeze({
       },
     },
   },
-  required: ['bankName', 'accounts', 'accountsArray'],
+  required: ['bankName', 'accountsList', 'accounts', 'accountsArray'],
 });
 
 const BANK_UI_GARBAGE_REGEX =
@@ -240,6 +475,49 @@ const BANK_UI_GARBAGE_REGEX =
 export function normalizeExtractorBankName(rawBank, contextHint = '') {
   const raw = String(rawBank ?? '').trim();
   const hint = String(contextHint ?? '').trim();
+
+  // Verificar primero si coincide con una plantilla aprendida por el usuario en bank_templates_local
+  const localTemplates = getLocalBankTemplatesSync();
+  for (const tpl of localTemplates) {
+    if (
+      Array.isArray(tpl.learnedAccounts) &&
+      tpl.learnedAccounts.length > 0 &&
+      tpl.bankName &&
+      raw.toLowerCase() === tpl.bankName.toLowerCase()
+    ) {
+      return tpl.bankName;
+    }
+  }
+
+  // Si `raw` es un nombre de entidad bancaria/financiera explícito de una sola línea, conservarlo sin que `contextHint` lo pise
+  if (raw && !/\r?\n/.test(raw) && raw !== hint) {
+    const rawLower = raw.toLowerCase();
+    if (rawLower.includes('atlantida') || rawLower.includes('atlántida')) return 'Banco Atlántida';
+    if (/\bbac\b/.test(rawLower) || rawLower.includes('credomatic')) return 'BAC Credomatic';
+    if (rawLower.includes('ficohsa')) return rawLower === 'ficohsa' ? 'Ficohsa' : 'Banco Ficohsa';
+    if (
+      rawLower.includes('banpais') ||
+      rawLower.includes('banpaís') ||
+      rawLower.includes('banco del pais') ||
+      rawLower.includes('banco del país')
+    ) {
+      return 'Banpaís (Banco del País)';
+    }
+    if (rawLower.includes('occidente')) return 'Banco de Occidente';
+    if (rawLower.includes('davivienda')) return 'Davivienda';
+    if (rawLower.includes('promerica')) {
+      return /banco\s+promerica/i.test(raw) ? 'Banco Promerica' : 'Promerica';
+    }
+    if (
+      /\b(?:banco|cooperativa|financiera|billetera|lafise|banrural|banhcaf[eé]|banhprovi|azteca|popular|tigo\s+money|tenge|kash|paypal|efectivo)\b/i.test(
+        raw
+      ) &&
+      rawLower !== 'banco general'
+    ) {
+      return raw.replace(/\s+/g, ' ').trim();
+    }
+  }
+
   const combined = `${raw} ${hint}`.toLowerCase();
 
   if (combined.includes('atlantida') || combined.includes('atlántida')) return 'Banco Atlántida';
@@ -247,7 +525,11 @@ export function normalizeExtractorBankName(rawBank, contextHint = '') {
     /\bbac\b/.test(combined) ||
     combined.includes('credomatic') ||
     combined.includes('american express') ||
-    /\bhn\s*-\s*(?:cuenta|negocio)\b/i.test(combined)
+    combined.includes('cuentas personales') ||
+    combined.includes('tarjetas personales') ||
+    combined.includes('resumen de productos') ||
+    /\b(?:mcard|amex)\b/i.test(combined) ||
+    /\bhn\s*-\s*(?:cuenta|negocio|tarjeta|mastercard|american\s+express)\b/i.test(combined)
   ) {
     return 'BAC Credomatic';
   }
@@ -264,7 +546,9 @@ export function normalizeExtractorBankName(rawBank, contextHint = '') {
   }
   if (combined.includes('occidente')) return 'Banco de Occidente';
   if (combined.includes('davivienda')) return 'Davivienda';
-  if (combined.includes('promerica')) return 'Promerica';
+  if (combined.includes('promerica')) {
+    return /banco\s+promerica/i.test(`${raw} ${hint}`) ? 'Banco Promerica' : 'Promerica';
+  }
   if (/\bsos\b/i.test(combined)) return 'Banco Atlántida';
 
   if (
@@ -300,7 +584,7 @@ export function inferIsCreditCard(item = {}, sectionHint = '') {
   }
   const combined = `${String(item?.accountType || '')} ${String(sectionHint || '')}`.toLowerCase();
   if (
-    /tarjeta\s+de\s+cr[eé]dito|tarjetas\s+de\s+cr[eé]dito|american\s+express|\bamex\b|\bvisa\b|\bmastercard\b|\bcredomatic\s+card\b/i.test(
+    /tarjeta\s+de\s+cr[eé]dito|tarjetas\s+de\s+cr[eé]dito|tarjetas?\s+personales|\btarjeta\b|american\s+express|\bamex\b|\bvisa\b|\bmastercard\b|\bmcard\b|\bcredomatic\s+card\b/i.test(
       combined
     )
   ) {
@@ -322,11 +606,29 @@ export function inferIsCreditCard(item = {}, sectionHint = '') {
  */
 export function normalizeExtractedAccountItem(rawItem = {}, index = 0, defaultBankName = '') {
   const isCreditCard = inferIsCreditCard(rawItem);
-  const fallbackType = isCreditCard ? 'Tarjeta de Crédito' : 'Cuenta de Ahorro';
+  const classification = classifyBankProductType(
+    `${rawItem?.accountType || ''} ${rawItem?.productType || ''} ${rawItem?.isLoan ? 'Préstamo' : ''} ${isCreditCard ? 'Tarjeta de Crédito' : ''}`,
+    rawItem?.accountNumber
+  );
+  const isLoan = Boolean(rawItem?.isLoan || classification.isLoan);
+  const fallbackType = isLoan
+    ? 'Préstamo'
+    : isCreditCard
+      ? 'Tarjeta de Crédito'
+      : 'Cuenta de Ahorro';
   const accountType =
     String(rawItem?.accountType || rawItem?.name || fallbackType)
       .replace(/\s+/g, ' ')
       .trim() || fallbackType;
+
+  const productType = isLoan
+    ? BANK_PRODUCT_TYPES.LOAN
+    : isCreditCard
+      ? BANK_PRODUCT_TYPES.CREDIT_CARD
+      : rawItem?.productType &&
+          Object.values(BANK_PRODUCT_TYPES).includes(rawItem.productType)
+        ? rawItem.productType
+        : classification.productType;
 
   const accountNumber = normalizeAccountOrCardNumber(
     rawItem?.accountNumber ?? '',
@@ -347,10 +649,12 @@ export function normalizeExtractedAccountItem(rawItem = {}, index = 0, defaultBa
     id: String(rawItem?.id || `batch_acc_${index}_${accountNumber || index}`),
     bankName: resolvedBankName,
     accountType,
+    productType,
     accountNumber,
     currency,
     currentBalance,
     isCreditCard,
+    isLoan,
     status,
     selected,
   };
@@ -366,11 +670,14 @@ export function validateExtractedAccount(input) {
     throw new Error('Los datos extraídos de la cuenta no son válidos.');
   }
 
-  const rawArray = Array.isArray(input.accounts) && input.accounts.length > 0
-    ? input.accounts
-    : Array.isArray(input.accountsArray) && input.accountsArray.length > 0
-      ? input.accountsArray
-      : [];
+  const rawArray =
+    Array.isArray(input.accountsList) && input.accountsList.length > 0
+      ? input.accountsList
+      : Array.isArray(input.accounts) && input.accounts.length > 0
+        ? input.accounts
+        : Array.isArray(input.accountsArray) && input.accountsArray.length > 0
+          ? input.accountsArray
+          : [];
 
   const firstItemHint =
     rawArray[0]?.accountType || input.accountType || 'Cuenta de Ahorro';
@@ -414,10 +721,12 @@ export function validateExtractedAccount(input) {
         {
           bankName,
           accountType: primaryInputType,
+          productType: input.productType,
           accountNumber,
           currency,
           currentBalance,
           isCreditCard: primaryIsCard,
+          isLoan: input.isLoan,
           status,
           selected: true,
         },
@@ -427,11 +736,13 @@ export function validateExtractedAccount(input) {
     ];
   }
 
-  const rawTxs = Array.isArray(input.detectedTransactions)
+  const rawTxs = Array.isArray(input.detectedTransactions) && input.detectedTransactions.length > 0
     ? input.detectedTransactions
-    : Array.isArray(input.transactions)
-      ? input.transactions
-      : [];
+    : Array.isArray(input.transactionsList) && input.transactionsList.length > 0
+      ? input.transactionsList
+      : Array.isArray(input.transactions)
+        ? input.transactions
+        : [];
 
   const detectedTransactions = rawTxs
     .map((tx, idx) => {
@@ -459,14 +770,18 @@ export function validateExtractedAccount(input) {
 
   return {
     bankName: accountsArray[0]?.bankName || bankName,
+    accountsList: accountsArray,
     accounts: accountsArray,
     accountsArray,
     accountType: accountsArray[0]?.accountType || primaryInputType,
+    productType: accountsArray[0]?.productType || 'Ahorro',
     accountNumber: accountsArray[0]?.accountNumber ?? accountNumber,
     currency: accountsArray[0]?.currency || currency,
     currentBalance: accountsArray[0]?.currentBalance ?? currentBalance,
     isCreditCard: Boolean(accountsArray[0]?.isCreditCard ?? primaryIsCard),
+    isLoan: Boolean(accountsArray[0]?.isLoan),
     status,
+    transactionsList: detectedTransactions,
     detectedTransactions,
   };
 }
@@ -577,13 +892,152 @@ export async function encodeFileToBase64(fileOrDataUrl) {
 }
 
 /**
- * Analiza texto OCR de un "Resumen de Productos" (múltiples cuentas bancarias y tarjetas de crédito)
- * y extrae `accountsArray`.
+ * Infiere cuentas o tarjetas por contexto de negocio cuando el documento o captura
+ * tiene un diseño nuevo, tabla personalizada o formato no reconocido previamente.
+ *
  * @param {string} rawText
- * @returns {{ bankName: string, accountsArray: Array<object> }}
+ * @param {string} [defaultBankName='']
+ * @returns {Array<object>}
  */
-export function parseBatchAccountsFromTextFallback(rawText) {
+export function inferAccountsFromUnstructuredText(rawText, defaultBankName = '') {
   const cleanedText = cleanMobileUiText(String(rawText || ''));
+  const lines = cleanedText
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !isMobileUiNoiseLine(l));
+
+  const customBankMatch = cleanedText.match(
+    /\b(Banco\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9\s]{2,28}|Cooperativa\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9\s]{2,28}|Banpa[ií]s|Ficohsa|Davivienda|Promerica|Lafise|Banrural|BAC\s*Credomatic|Atl[aá]ntida)\b/i
+  );
+  const resolvedBank = normalizeExtractorBankName(
+    customBankMatch?.[1] || defaultBankName || cleanedText,
+    cleanedText
+  );
+
+  const inferred = [];
+  const seenKeys = new Set();
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    // Skip transaction rows that begin with a date
+    if (/^(?:\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|20\d{2}-\d{2}-\d{2})\b/.test(line)) {
+      continue;
+    }
+
+    const balRegex =
+      /(?:(LPS|HNL|USD|US\$|\$|L\.?)\s*(\d{1,3}(?:,\d{3})+\.\d{2}|\d{1,9}\.\d{2})|(\d{1,3}(?:,\d{3})+\.\d{2}|\d{1,9}\.\d{2})\s*(LPS|HNL|USD|US\$|\$|L\.?))/i;
+    const lineBalMatch = line.match(balRegex);
+    if (!lineBalMatch) continue;
+
+    const rawCur = lineBalMatch[1] || lineBalMatch[4] || 'HNL';
+    const rawBal = lineBalMatch[2] || lineBalMatch[3] || '0';
+    const balance = cleanAmount(rawBal);
+
+    // Search for an account/card number on the same line or adjacent lines
+    const withoutBalance = line.replace(lineBalMatch[0], ' ');
+    const prevLine = i > 0 ? lines[i - 1] : '';
+    const nextLine = i + 1 < lines.length ? lines[i + 1] : '';
+    const contextWindow = `${prevLine} ${withoutBalance} ${nextLine}`;
+
+    const numMatch =
+      withoutBalance.match(/(?:N\.?°?\s*|No\.?\s*|#\s*|[*X•]{2,}\s*)(\d[\d-]{3,22}\d)\b/i) ||
+      withoutBalance.match(/\b(\d{6,22})\b/) ||
+      withoutBalance.match(/\b(\d{4})\b/) ||
+      contextWindow.match(/(?:N\.?°?\s*|No\.?\s*|#\s*|[*X•]{2,}\s*)(\d[\d-]{3,22}\d)\b/i) ||
+      contextWindow.match(/\b(\d{6,22})\b/) ||
+      contextWindow.match(/\b(\d{4})\b/);
+
+    if (!numMatch) continue;
+
+    const rawAccountNumber = String(numMatch[1] || '').replace(/-/g, '').trim();
+    if (!rawAccountNumber) continue;
+
+    // Infer accountType from remaining text on the line or previous header line
+    let candidateLabel = withoutBalance
+      .replace(numMatch[0], ' ')
+      .replace(/\b(?:saldo|disponible|actual|balance|cuenta|n\.?°?|no\.?|moneda|total)\b\s*[:|-]?/gi, ' ')
+      .replace(/[|•:;-]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    if (!candidateLabel || candidateLabel.length < 3 || /^\d+$/.test(candidateLabel)) {
+      const cleanedPrev = prevLine
+        .replace(balRegex, ' ')
+        .replace(/\b\d{6,22}\b/g, ' ')
+        .replace(/[|•:;-]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (
+        cleanedPrev.length >= 3 &&
+        !/^(?:resumen|estado\s+de\s+cuenta|productos|banca)/i.test(cleanedPrev)
+      ) {
+        candidateLabel = cleanedPrev;
+      }
+    }
+
+    const isCard = inferIsCreditCard({
+      accountType: candidateLabel,
+      accountNumber: rawAccountNumber,
+    });
+    const finalType =
+      candidateLabel && candidateLabel.length >= 3
+        ? candidateLabel
+        : isCard
+          ? 'Tarjeta de Crédito'
+          : 'Cuenta Bancaria';
+
+    const dedupKey = `${rawAccountNumber}::${normalizeScanCurrency(rawCur)}::${balance}`;
+    if (seenKeys.has(dedupKey)) continue;
+    seenKeys.add(dedupKey);
+
+    inferred.push({
+      ...normalizeExtractedAccountItem(
+        {
+          bankName: resolvedBank,
+          accountType: finalType,
+          accountNumber: rawAccountNumber,
+          currency: normalizeScanCurrency(rawCur),
+          currentBalance: balance,
+          isCreditCard: isCard,
+          selected: true,
+        },
+        inferred.length,
+        resolvedBank
+      ),
+      inferredByContext: true,
+    });
+  }
+
+  return inferred;
+}
+
+/**
+ * Analiza texto OCR de un "Resumen de Productos" o cualquier tabla/estado de cuenta
+ * (múltiples cuentas bancarias y tarjetas de crédito) y extrae `accountsList` (`accounts` / `accountsArray`).
+ * @param {string} rawText
+ * @returns {{ bankName: string, accountsList: Array<object>, accounts: Array<object>, accountsArray: Array<object> }}
+ */
+export function parseBatchAccountsFromTextFallback(rawText, options = {}) {
+  const cleanedText = cleanMobileUiText(String(rawText || ''));
+
+  // 0. Intentar primero el motor local de plantillas (`bank_templates_local` / `templateLearner.js`)
+  const matchedTemplate = matchBankTemplateFromText(cleanedText, options.templates);
+  if (matchedTemplate) {
+    const templateResult = applyTemplateExtractionRules(cleanedText, matchedTemplate);
+    if (templateResult.matched && templateResult.accountsList.length > 0) {
+      const normalizedFromTemplate = templateResult.accountsList.map((item, idx) =>
+        normalizeExtractedAccountItem(item, idx, templateResult.bankName)
+      );
+      return {
+        bankName: normalizedFromTemplate[0]?.bankName || templateResult.bankName,
+        accountsList: normalizedFromTemplate,
+        accounts: normalizedFromTemplate,
+        accountsArray: normalizedFromTemplate,
+        matchedTemplateId: matchedTemplate.bankId,
+      };
+    }
+  }
+
   const lines = cleanedText
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -591,99 +1045,145 @@ export function parseBatchAccountsFromTextFallback(rawText) {
 
   const bankName = normalizeExtractorBankName(cleanedText, cleanedText);
   const detectedItems = [];
+  const seenAccountKeys = new Set();
   let inCreditCardSection = false;
 
-  // Patrón 1: Líneas compactas tipo "HN - CUENTA BANCARIA | N.° 726935871 | 401.28 HNL" o "HN - CUENTA BANCARIA 726935871 LPS 401.28"
+  const pushDetectedItem = (rawItem) => {
+    const norm = normalizeExtractedAccountItem(rawItem, detectedItems.length, bankName);
+    const key = `${norm.accountNumber}::${norm.currency}`;
+    if (!seenAccountKeys.has(key)) {
+      seenAccountKeys.add(key);
+      detectedItems.push(norm);
+    }
+  };
+
+  // Patrón 1: Líneas compactas tipo "HN - CUENTA BANCARIA | N.° 726935871 | 401.28 HNL",
+  // "HN - CUENTA BANCARIA 726935871 LPS 401.28" o "1) Cuenta bancaria 726935871 -> L 401.28 HNL"
   for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    if (/^tarjetas?\s+de\s+cr[eé]dito\b/i.test(line)) {
+    const line = lines[i].replace(/^\d+\s*[).]\s*/, '').trim();
+    if (/^tarjetas?\s+(?:de\s+cr[eé]dito|personales)\b/i.test(line)) {
       inCreditCardSection = true;
       continue;
     }
-    if (/^cuentas?\s+bancarias?\b/i.test(line)) {
+    if (/^cuentas?\s+(?:bancarias?|personales)\b/i.test(line)) {
       inCreditCardSection = false;
       continue;
     }
 
-    // Formato con pipes o en una sola línea: Nombre | N.° 726935871 | LPS 401.28 (o 401.28 HNL)
+    // Formato con pipes, flecha `->` o en una sola línea: Nombre | N.° 726935871 | LPS 401.28 (o L 401.28 HNL)
     const inlineMatch = line.match(
-      /^([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9\s\-/()]+?)\s*(?:\||N\.?°?|#|-)\s*(?:N\.?°?\s*)?([*X•\s]*\d{4,20})\s*(?:\||-|\s)\s*(?:(LPS|HNL|USD|\$|L\.?)\s*([\d,]+\.\d{2})|([\d,]+\.\d{2})\s*(LPS|HNL|USD|\$|L\.?))$/i
+      /^([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9\s\-/()]+?)\s*(?:\||N\.?°?|#|-|`)?\s*(?:N\.?°?\s*)?([*X•\s-]*\d{4,20})`?\s*(?:\||->|-|\s)\s*(?:(LPS|HNL|USD|US\$|\$|L\.?)\s*([\d,]+\.\d{2})(?:\s*(?:LPS|HNL|USD))?|([\d,]+\.\d{2})\s*(LPS|HNL|USD|US\$|\$|L\.?))/i
     );
     if (inlineMatch) {
       const rawType = inlineMatch[1].trim();
-      const rawNum = inlineMatch[2].trim();
+      const rawNum = inlineMatch[2].replace(/[*X•\s-]+/g, '').trim();
       const rawCur = inlineMatch[3] || inlineMatch[6] || 'HNL';
       const rawBal = inlineMatch[4] || inlineMatch[5] || '0';
       const isCard =
         inCreditCardSection ||
         inferIsCreditCard({ accountType: rawType, accountNumber: rawNum });
-      detectedItems.push(
-        normalizeExtractedAccountItem(
-          {
-            accountType: rawType,
-            accountNumber: rawNum,
-            currency: normalizeScanCurrency(rawCur),
-            currentBalance: cleanAmount(rawBal),
-            isCreditCard: isCard,
-            selected: true,
-          },
-          detectedItems.length,
-          bankName
-        )
-      );
+      pushDetectedItem({
+        accountType: rawType,
+        accountNumber: rawNum,
+        currency: normalizeScanCurrency(rawCur),
+        currentBalance: cleanAmount(rawBal),
+        isCreditCard: isCard,
+        selected: true,
+      });
       continue;
     }
 
-    // Formato multilínea de banca móvil (BAC / Atlántida):
-    // Línea A: Nombre del producto (ej. "HN - CUENTA BANCARIA", "HN - Negocio Lempiras", "AMERICAN EXPRESS")
-    // Línea B/C: Número de cuenta/tarjeta ("726935871" o "*3244" / "3244") y Saldo ("LPS 401.28" o "USD 3,705.95")
+    // Formato multilínea de banca móvil (BAC / Atlántida / Ficohsa / Banpaís / General):
+    // Continúa escaneando después de "Tarjetas personales" y reconoce HN - Tarjeta, AMEX, MCARD, etc.
     const isProductHeader =
-      /\b(?:HN\s*-\s*CUENTA\s+BANCARIA|HN\s*-\s*Negocio[^|0-9]*|AMERICAN\s+EXPRESS|VISA[^|0-9]*|MASTERCARD[^|0-9]*|CUENTA\s+DE\s+AHORRO(?:\s+SOS)?|CUENTA\s+BANCARIA|CUENTA\s+CHEQUES|TARJETA\s+DE\s+CR[EÉ]DITO[^|0-9]*)\b/i.test(
+      /\b(?:HN\s*-\s*CUENTA\s+BANCARIA|HN\s*-\s*Cuenta\s+bancaria|HN\s*-\s*Negocio[^|0-9]*|HN\s*-\s*Tarjeta|Tarjeta\s+(?:AMEX|MCARD|MASTERCARD|VISA|AMERICAN\s+EXPRESS)|AMERICAN\s+EXPRESS|VISA[^|0-9]*|MASTERCARD[^|0-9]*|CUENTA\s+DE\s+AHORRO(?:\s+SOS)?|CUENTA\s+BANCARIA|Negocio\s+Lempiras|CUENTA\s+CHEQUES|CUENTA\s+CORRIENTE|CUENTA\s+PREFERENCIAL[^|0-9]*|AHORRO[^|0-9]*|TARJETA\s+DE\s+CR[EÉ]DITO[^|0-9]*)\b/i.test(
         line
       ) && !/^\d/.test(line);
 
     if (isProductHeader) {
-      const windowLines = lines.slice(i, Math.min(lines.length, i + 4)).join(' ');
+      const blockLines = [line];
+      for (let j = i + 1; j < Math.min(lines.length, i + 5); j += 1) {
+        const nextL = lines[j];
+        if (
+          /^(?:HN\s*-|Tarjetas?\s+(?:de\s+cr[eé]dito|personales)|Cuentas?\s+(?:bancarias?|personales)|Total(?:es)?\s+cuentas|Cuenta\s+bancaria\b|Negocio\s+Lempiras\b|Tarjeta\s+(?:AMEX|MCARD|MASTERCARD|VISA))/i.test(
+            nextL
+          )
+        ) {
+          break;
+        }
+        blockLines.push(nextL);
+      }
+
+      const windowLines = blockLines.join(' ');
+      const brandCardMatch = windowLines.match(
+        /\b(AMEX|MCARD|MASTERCARD|VISA|AMERICAN\s+EXPRESS)\s*(?:\d{4}-\d{2}[*X•]{2}-[*X•]{4}-|[*X•.°+-]+\s*-?\s*|-\s*|\s+)(\d{4})\b(?!-[\d*X•])/i
+      );
       const numMatch =
-        windowLines.match(/(?:N\.?°?\s*|[*X•]{2,}\s*)(\d{4,20})\b/i) ||
+        brandCardMatch ||
+        windowLines.match(/(?:N\.?°?\s*|[*X•]{2,}-?\s*)(\d{4,20})\b/i) ||
         windowLines.match(/\b(\d{7,20})\b/) ||
         windowLines.match(/\b(\d{4})\b/);
       const balMatch =
-        windowLines.match(/\b(LPS|HNL|USD|US\$|\$|L\.?)\s*(\d{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2})\b/i) ||
-        windowLines.match(/\b(\d{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2})\s*(LPS|HNL|USD|US\$|\$|L\.?)\b/i);
+        windowLines.match(
+          /(?:^|[^\w])(LPS|HNL|USD|US\$|\$|L\.?)\s*(\d{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2})\b/i
+        ) ||
+        windowLines.match(
+          /\b(\d{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2})\s*(LPS|HNL|USD|US\$|\$|L\.?)\b/i
+        );
 
-      if (numMatch && balMatch) {
+      const resolvedNum = brandCardMatch
+        ? brandCardMatch[2]
+        : numMatch
+          ? numMatch[1]
+          : '';
+
+      if (resolvedNum && balMatch) {
         const isFirstCur = /^(?:LPS|HNL|USD|US\$|\$|L\.?)$/i.test(balMatch[1]);
         const rawCur = isFirstCur ? balMatch[1] : balMatch[2];
         const rawBal = isFirstCur ? balMatch[2] : balMatch[1];
-        const cleanHeader = line
-          .replace(/\b(?:LPS|HNL|USD|US\$|\$)\s*[\d,]+\.\d{2}.*$/i, '')
+        let cleanHeader = line
+          .replace(/(?:LPS|HNL|USD|US\$|\$|L\.?)\s*[\d,]+\.\d{2}.*$/i, '')
           .replace(/\b\d{7,20}\b.*$/, '')
           .trim();
+        if (brandCardMatch?.[1] && /HN\s*-\s*Tarjeta/i.test(cleanHeader)) {
+          cleanHeader = `${cleanHeader} (${brandCardMatch[1].toUpperCase()})`;
+        }
         const isCard =
           inCreditCardSection ||
-          inferIsCreditCard({ accountType: cleanHeader, accountNumber: numMatch[1] });
+          Boolean(brandCardMatch) ||
+          inferIsCreditCard({ accountType: cleanHeader, accountNumber: resolvedNum });
 
-        detectedItems.push(
-          normalizeExtractedAccountItem(
-            {
-              accountType: cleanHeader || line,
-              accountNumber: numMatch[1],
-              currency: normalizeScanCurrency(rawCur),
-              currentBalance: cleanAmount(rawBal),
-              isCreditCard: isCard,
-              selected: true,
-            },
-            detectedItems.length,
-            bankName
-          )
-        );
+        pushDetectedItem({
+          accountType: cleanHeader || line,
+          accountNumber: resolvedNum,
+          currency: normalizeScanCurrency(rawCur),
+          currentBalance: cleanAmount(rawBal),
+          isCreditCard: isCard,
+          selected: true,
+        });
+        i += blockLines.length - 1;
       }
     }
   }
 
+  // Complementar con parseMultiProductBankText para asegurar que ningún bloque o tarjeta quede truncado
+  const multiFallback = parseMultiProductBankText(rawText, {
+    defaultBankName: bankName,
+    expandDualCurrencyCards: false,
+  });
+  for (const multiAcc of multiFallback.accountsList) {
+    pushDetectedItem(multiAcc);
+  }
+
+  // Si la imagen/PDF contiene un formato nuevo o no reconocido por las reglas fijas, inferir por contexto de negocio
+  if (detectedItems.length === 0) {
+    const inferredByContext = inferAccountsFromUnstructuredText(rawText, bankName);
+    detectedItems.push(...inferredByContext);
+  }
+
   return {
-    bankName,
+    bankName: detectedItems[0]?.bankName || bankName,
+    accountsList: detectedItems,
     accounts: detectedItems,
     accountsArray: detectedItems,
   };
@@ -701,10 +1201,10 @@ export function parseAccountDataFromTextFallback(rawText) {
     .map((l) => l.trim())
     .filter(Boolean);
 
-  const bankName = normalizeBankName(cleanedText);
+  const bankName = normalizeExtractorBankName(cleanedText, cleanedText);
   const currency = normalizeScanCurrency(cleanedText);
 
-  let accountType = 'Cuenta de Ahorro';
+  let accountType = batchCandidate.accountsList?.[0]?.accountType || 'Cuenta de Ahorro';
   for (const line of lines) {
     if (/\bCUENTA\s+DE\s+AHORRO\s+SOS\b/i.test(line)) {
       accountType = 'CUENTA DE AHORRO SOS';
@@ -730,9 +1230,9 @@ export function parseAccountDataFromTextFallback(rawText) {
     }
   }
 
-  let accountNumber = '';
+  let accountNumber = batchCandidate.accountsList?.[0]?.accountNumber || '';
   const isCard = /tarjeta|american\s+express|amex|visa|mastercard/i.test(accountType);
-  if (isCard) {
+  if (isCard && !accountNumber) {
     const maskedMatch = cleanedText.match(/[*X•]{1,}(?:\s*[*X•]{1,})*\s*(\d{4})\b/);
     if (maskedMatch) accountNumber = maskedMatch[1];
   }
@@ -756,7 +1256,12 @@ export function parseAccountDataFromTextFallback(rawText) {
     ),
   ].map((m) => cleanAmount(m[1]));
 
-  const currentBalance = allAmounts.length > 0 ? Math.max(...allAmounts) : 0;
+  const currentBalance =
+    batchCandidate.accountsList?.length === 1 && batchCandidate.accountsList[0].currentBalance > 0
+      ? batchCandidate.accountsList[0].currentBalance
+      : allAmounts.length > 0
+        ? Math.max(...allAmounts)
+        : 0;
 
   const detectedTransactions = [];
   const rowRegex =
@@ -787,10 +1292,27 @@ export function parseAccountDataFromTextFallback(rawText) {
   if (batchCandidate.accountsArray.length > 1) {
     return validateExtractedAccount({
       bankName: batchCandidate.bankName || bankName,
+      accountsList: batchCandidate.accountsArray,
+      accounts: batchCandidate.accountsArray,
       accountsArray: batchCandidate.accountsArray,
       detectedTransactions,
     });
   }
+
+  const singleList =
+    batchCandidate.accountsArray.length === 1
+      ? batchCandidate.accountsArray
+      : [
+          {
+            bankName,
+            accountType,
+            accountNumber,
+            currency,
+            currentBalance,
+            isCreditCard: isCard,
+            selected: true,
+          },
+        ];
 
   return validateExtractedAccount({
     bankName,
@@ -800,37 +1322,67 @@ export function parseAccountDataFromTextFallback(rawText) {
     currentBalance,
     isCreditCard: isCard,
     status: 'Activa',
-    accountsArray:
-      batchCandidate.accountsArray.length === 1
-        ? batchCandidate.accountsArray
-        : [
-            {
-              accountType,
-              accountNumber,
-              currency,
-              currentBalance,
-              isCreditCard: isCard,
-              selected: true,
-            },
-          ],
+    accountsList: singleList,
+    accounts: singleList,
+    accountsArray: singleList,
     detectedTransactions,
   });
 }
 
 /**
- * Extrae una o múltiples cuentas y tarjetas (`accountsArray`) desde una imagen o PDF
- * usando Gemini Vision / Genkit o fallback OCR local.
+ * Extrae una o múltiples cuentas y tarjetas (`accountsList`) desde una imagen o PDF
+ * usando Gemini Vision / Genkit o fallback OCR local adaptativo.
  *
  * @param {File | Blob | string} fileOrDataUrl
- * @param {{ apiKey?: string, ocrTextFallback?: string, fetchImpl?: typeof fetch }} [options]
+ * @param {{ apiKey?: string, ocrTextFallback?: string, fetchImpl?: typeof fetch, storage?: Storage }} [options]
+ */
+/**
+ * Extrae una o múltiples cuentas y tarjetas (`accountsList`) desde una imagen o PDF
+ * usando Arquitectura Híbrida Adaptativa:
+ * 1. Flujo Modo Nube (Cloud Run / Gemini 1.5 Flash Vision / Genkit):
+ *    - Consulta `bank_templates` en Firestore antes de llamar a la IA para incluir reglas conocidas (Few-Shot Prompting dinámico).
+ * 2. Flujo Modo Local / Offline (Tesseract.js / Regex Machine Learning Engine):
+ *    - Lee la imagen localmente con OCR y aplica reglas regex almacenadas en IndexedDB (`bank_templates_local`).
+ *
+ * @param {File | Blob | string} fileOrDataUrl
+ * @param {{
+ *   apiKey?: string,
+ *   ocrTextFallback?: string,
+ *   ocrReader?: Function,
+ *   fetchImpl?: typeof fetch,
+ *   storage?: Storage,
+ *   indexedDb?: IDBFactory,
+ *   firestoreDb?: any,
+ *   firestoreModule?: any,
+ *   offline?: boolean
+ * }} [options]
  */
 export async function extractAccountFromFile(fileOrDataUrl, options = {}) {
   const { base64Data, mimeType } = await encodeFileToBase64(fileOrDataUrl);
-  const fetchFn = options.fetchImpl || (typeof fetch === 'function' ? fetch : null);
+  const isOfflineMode =
+    options.offline === true ||
+    (typeof navigator !== 'undefined' && navigator.onLine === false);
+  const fetchFn = isOfflineMode
+    ? null
+    : options.fetchImpl || (typeof fetch === 'function' ? fetch : null);
   const apiKey = String(options.apiKey || '').trim();
-  const fallbackText = String(options.ocrTextFallback || options.ocrFallbackText || '');
 
-  if (apiKey && fetchFn) {
+  // Consultar la colección `bank_templates` en Firestore (con respaldo local en IndexedDB `bank_templates_local`)
+  const bankTemplates = await fetchBankTemplatesFromFirestore({
+    firestoreDb: options.firestoreDb,
+    firestoreModule: options.firestoreModule,
+    indexedDb: options.indexedDb,
+    storage: options.storage,
+  });
+
+  const adaptivePrompt = buildAccountExtractorSystemPrompt({
+    storage: options.storage,
+    bankTemplates,
+  });
+
+  const fallbackText = await runLocalOcrEngine(fileOrDataUrl, options);
+
+  if (!isOfflineMode && apiKey && fetchFn) {
     try {
       const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
       const response = await fetchFn(endpoint, {
@@ -840,7 +1392,7 @@ export async function extractAccountFromFile(fileOrDataUrl, options = {}) {
           contents: [
             {
               parts: [
-                { text: ACCOUNT_EXTRACTOR_SYSTEM_PROMPT },
+                { text: adaptivePrompt },
                 {
                   inlineData: {
                     mimeType,
@@ -868,6 +1420,8 @@ export async function extractAccountFromFile(fileOrDataUrl, options = {}) {
             ...validated,
             data: validated,
             source: 'gemini-1.5-flash',
+            fewShotPromptUsed: adaptivePrompt,
+            templatesCount: bankTemplates.length,
           };
         }
       }
@@ -876,7 +1430,7 @@ export async function extractAccountFromFile(fileOrDataUrl, options = {}) {
     }
   }
 
-  if (fetchFn) {
+  if (!isOfflineMode && fetchFn) {
     try {
       const headers = { 'Content-Type': 'application/json' };
       if (apiKey) {
@@ -889,6 +1443,8 @@ export async function extractAccountFromFile(fileOrDataUrl, options = {}) {
           imageBase64: base64Data,
           mimeType,
           ocrTextFallback: fallbackText,
+          fewShotPrompt: adaptivePrompt,
+          bankTemplates,
           apiKey: apiKey || undefined,
         }),
       });
@@ -900,15 +1456,38 @@ export async function extractAccountFromFile(fileOrDataUrl, options = {}) {
             ...validated,
             data: validated,
             source: body.source || 'genkit:gemini-1.5-flash',
+            fewShotPromptUsed: adaptivePrompt,
+            templatesCount: bankTemplates.length,
           };
         }
       }
     } catch {
-      // Fallback to local OCR parser
+      // Fallback to local OCR / Regex Machine Learning Engine
     }
   }
 
   if (fallbackText && fallbackText.trim().length > 0) {
+    const offlineTemplateMatch = await extractOfflineWithLearnedTemplates(fallbackText, {
+      indexedDb: options.indexedDb,
+      storage: options.storage,
+      templates: bankTemplates,
+    });
+    if (offlineTemplateMatch.matched && offlineTemplateMatch.accountsList.length > 0) {
+      const validated = ExtractedAccountSchema.parse({
+        bankName: offlineTemplateMatch.bankName,
+        accountsList: offlineTemplateMatch.accountsList,
+        accounts: offlineTemplateMatch.accountsList,
+        accountsArray: offlineTemplateMatch.accountsList,
+        detectedTransactions: offlineTemplateMatch.detectedTransactions,
+      });
+      return {
+        ...validated,
+        data: validated,
+        matchedTemplate: offlineTemplateMatch.template,
+        source: `local-template-engine:${offlineTemplateMatch.template.bankId}`,
+      };
+    }
+
     const validated = parseAccountDataFromTextFallback(fallbackText);
     return {
       ...validated,
@@ -1085,6 +1664,8 @@ export async function saveBatchAccountsToFirestore(
     workspaceId,
     state,
   });
+  const initialExistingNumbers = new Set(existingNumbers);
+  const batchSeenNumberCurrency = new Set();
 
   const createdAccounts = [];
   const skippedAccounts = [];
@@ -1093,8 +1674,13 @@ export async function saveBatchAccountsToFirestore(
   for (let i = 0; i < candidateItems.length; i += 1) {
     const item = candidateItems[i];
     const cleanNum = String(item.accountNumber || '').replace(/[\s-]/g, '').trim();
+    const itemCurrency = item.currency === 'USD' ? 'USD' : 'HNL';
+    const numCurrencyKey = `${cleanNum}::${itemCurrency}`;
 
-    if (cleanNum && existingNumbers.has(cleanNum)) {
+    if (
+      cleanNum &&
+      (initialExistingNumbers.has(cleanNum) || batchSeenNumberCurrency.has(numCurrencyKey))
+    ) {
       skippedAccounts.push({
         ...item,
         reason: 'duplicate_account_number',
@@ -1104,11 +1690,21 @@ export async function saveBatchAccountsToFirestore(
 
     if (cleanNum) {
       existingNumbers.add(cleanNum);
+      batchSeenNumberCurrency.add(numCurrencyKey);
     }
 
     const itemBankName = item.bankName || bankName || 'BAC Credomatic';
-    const isCard = Boolean(item.isCreditCard || inferIsCreditCard(item));
-    const internalType = isCard ? ACCOUNT_TYPES.CARD : ACCOUNT_TYPES.BANK;
+    const isLoan = Boolean(
+      item.isLoan ||
+        item.productType === 'Préstamo' ||
+        /pr[eé]stamo|financiamiento|hipoteca/i.test(String(item.accountType || ''))
+    );
+    const isCard = !isLoan && Boolean(item.isCreditCard || inferIsCreditCard(item));
+    const internalType = isLoan
+      ? ACCOUNT_TYPES.DEBT
+      : isCard
+        ? ACCOUNT_TYPES.CARD
+        : ACCOUNT_TYPES.BANK;
     const rawLabel = String(item.accountType || '').trim();
     const displayName =
       rawLabel.toLowerCase().includes(itemBankName.toLowerCase()) ||
@@ -1118,6 +1714,14 @@ export async function saveBatchAccountsToFirestore(
         : `${itemBankName} - ${rawLabel}`.slice(0, 48);
 
     const sanitizedBalance = cleanAmount(item.currentBalance);
+    const productType = isLoan
+      ? BANK_PRODUCT_TYPES.LOAN
+      : isCard
+        ? BANK_PRODUCT_TYPES.CREDIT_CARD
+        : /cheque|corriente|negocio/i.test(rawLabel)
+          ? BANK_PRODUCT_TYPES.CHECKING
+          : BANK_PRODUCT_TYPES.SAVINGS;
+
     const accountEntity = {
       ...createAccount({
         id: `acc_batch_${Date.now().toString(36)}_${i}_${Math.random().toString(36).slice(2, 6)}`,
@@ -1125,12 +1729,12 @@ export async function saveBatchAccountsToFirestore(
         type: internalType,
         institution: resolveCanonicalInstitution(itemBankName),
         accountNumber: cleanNum || item.accountNumber || '',
-        currency: item.currency === 'USD' ? 'USD' : 'HNL',
+        currency: itemCurrency,
         initialBalance: sanitizedBalance,
         targetAmount: 0,
         includeInTotal: true,
-        color: isCard ? '#8b5cf6' : '#10b981',
-        icon: isCard ? 'card' : 'bank',
+        color: isLoan ? '#f59e0b' : isCard ? '#8b5cf6' : '#10b981',
+        icon: isLoan ? 'debt' : isCard ? 'card' : 'bank',
         isArchived: false,
         status: 'active',
         workspaceId,
@@ -1139,9 +1743,12 @@ export async function saveBatchAccountsToFirestore(
         updatedAt: nowIso,
       }),
       bankName: itemBankName,
-      accountType: rawLabel || (isCard ? 'Tarjeta de Crédito' : 'Cuenta Bancaria'),
+      accountType:
+        rawLabel || (isLoan ? 'Préstamo' : isCard ? 'Tarjeta de Crédito' : 'Cuenta Bancaria'),
+      productType,
       currentBalance: sanitizedBalance,
       isCreditCard: isCard,
+      isLoan,
     };
 
     createdAccounts.push(accountEntity);

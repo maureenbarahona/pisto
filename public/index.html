@@ -99,8 +99,10 @@
           <button
             type="button"
             id="btn-profile-signout"
-            class="header-logout-btn"
+            class="header-logout-btn is-hidden"
             data-action="logout"
+            hidden
+            style="display: none;"
             aria-label="Cerrar sesión y limpiar claves locales sensibles"
             title="Cerrar sesión activa"
           >
@@ -777,6 +779,9 @@
         <strong>Pisto — Arquitectura Local-First &amp; Privacidad</strong>
         <span>
           Tus cuentas y movimientos operan localmente en tu navegador (<code>IndexedDB</code> + <code>localStorage</code>) sin cookies de rastreo de terceros. Las claves sensibles (Gemini API Key y Firebase personalizado) se aíslan en tu navegador y se limpian automáticamente al cerrar sesión.
+        </span>
+        <span class="app-footer-credits">
+          Hecho con Gemini 2.5 Flash / Agent Development Kit · Prompt por Maureen Barahona · Website: <a href="https://maureenbarahona.foo" target="_blank" rel="noopener">https://maureenbarahona.foo</a>
         </span>
       </div>
       <div class="app-footer-actions">
