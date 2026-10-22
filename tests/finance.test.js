@@ -3327,4 +3327,1318 @@ describe('Conditional Logout Visibility, Adaptive Account Extractor (accountsLis
   });
 });
 
+// ---------------------------------------------------------------------------
+// 26. Extractor con Aprendizaje de Formatos (`templateLearner.js`),
+//     Arquitectura Híbrida (Cloud Few-Shot + Local IndexedDB/OCR) y UI de Lote
+// ---------------------------------------------------------------------------
+describe('Adaptive Format-Learning Extractor (templateLearner.js, bank_templates & ImportAccountModal)', () => {
+  function createMockStorage() {
+    const map = new Map();
+    return {
+      getItem: (k) => (map.has(k) ? map.get(k) : null),
+      setItem: (k, v) => map.set(k, String(v)),
+      removeItem: (k) => map.delete(k),
+    };
+  }
+
+  function createMockIndexedDb() {
+    const stores = new Map();
+    return {
+      stores,
+      open(_name, _version) {
+        const req = {
+          result: null,
+          onupgradeneeded: null,
+          onsuccess: null,
+          onerror: null,
+        };
+        queueMicrotask(() => {
+          const db = {
+            objectStoreNames: {
+              contains: (storeName) => stores.has(storeName),
+            },
+            createObjectStore(storeName) {
+              if (!stores.has(storeName)) {
+                stores.set(storeName, new Map());
+              }
+              return stores.get(storeName);
+            },
+            transaction(storeName) {
+              if (!stores.has(storeName)) {
+                stores.set(storeName, new Map());
+              }
+              const storeMap = stores.get(storeName);
+              const tx = {
+                oncomplete: null,
+                onerror: null,
+                objectStore() {
+                  return {
+                    put(val) {
+                      storeMap.set(val.bankId, val);
+                      queueMicrotask(() => tx.oncomplete && tx.oncomplete());
+                    },
+                    getAll() {
+                      const getReq = { result: Array.from(storeMap.values()), onsuccess: null };
+                      queueMicrotask(() => getReq.onsuccess && getReq.onsuccess());
+                      return getReq;
+                    },
+                  };
+                },
+              };
+              return tx;
+            },
+          };
+          req.result = db;
+          if (typeof req.onupgradeneeded === 'function') req.onupgradeneeded();
+          if (typeof req.onsuccess === 'function') req.onsuccess();
+        });
+        return req;
+      },
+    };
+  }
+
+  it('1. consulta bank_templates en Firestore antes de llamar a Gemini 1.5 Flash Vision e inyecta Few-Shot Prompting dinámico', async () => {
+    const {
+      BANK_TEMPLATES_COLLECTION,
+      extractOfflineWithLearnedTemplates,
+      normalizeBankTemplate,
+    } = await import('../src/js/services/templateLearner.js');
+    const { extractAccountFromFile: extractFromService } = await import(
+      '../src/js/services/accountExtractor.js'
+    );
+    assert.equal(BANK_TEMPLATES_COLLECTION, 'bank_templates');
+    assert.equal(typeof extractOfflineWithLearnedTemplates, 'function');
+    assert.equal(typeof extractFromService, 'function');
+
+    const firestoreQueriedCollections = [];
+    const mockFirestoreModule = {
+      collection(_db, colName) {
+        firestoreQueriedCollections.push(colName);
+        return { colName };
+      },
+      async getDocs(colRef) {
+        if (colRef.colName === 'bank_templates') {
+          return {
+            docs: [
+              {
+                id: 'ficohsa_empresarial',
+                data: () =>
+                  normalizeBankTemplate({
+                    bankId: 'ficohsa_empresarial',
+                    bankName: 'Banco Ficohsa',
+                    keywords: ['Interbanca Ficohsa', 'Cuenta Corporativa Pyme'],
+                    extractionRules: {
+                      accountNumber: '\\b(\\d{10,14})\\b',
+                      accountType: '(Cuenta\\s+Corporativa\\s+Pyme)',
+                      currency: '(LPS|HNL|USD|\\$)',
+                      currentBalance: '(\\d{1,3}(?:,\\d{3})+\\.\\d{2})',
+                    },
+                  }),
+              },
+            ],
+          };
+        }
+        return { docs: [] };
+      },
+    };
+
+    let capturedPromptText = '';
+    const mockFetch = async (_url, init) => {
+      const bodyObj = JSON.parse(init.body);
+      capturedPromptText = bodyObj.contents?.[0]?.parts?.[0]?.text || '';
+      return {
+        ok: true,
+        async json() {
+          return {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: JSON.stringify({
+                        bankName: 'Banco Ficohsa',
+                        accountsList: [
+                          {
+                            bankName: 'Banco Ficohsa',
+                            accountType: 'Cuenta Corporativa Pyme',
+                            accountNumber: '0102998877',
+                            currency: 'HNL',
+                            currentBalance: 45200.75,
+                            isCreditCard: false,
+                          },
+                        ],
+                      }),
+                    },
+                  ],
+                },
+              },
+            ],
+          };
+        },
+      };
+    };
+
+    const cloudRes = await extractFromService('data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==', {
+      apiKey: 'AIzaSyFakeTestGeminiKey',
+      fetchImpl: mockFetch,
+      firestoreDb: { name: 'mock-db' },
+      firestoreModule: mockFirestoreModule,
+      storage: createMockStorage(),
+      indexedDb: createMockIndexedDb(),
+    });
+
+    assert.ok(
+      firestoreQueriedCollections.includes('bank_templates'),
+      'Debe consultar la colección bank_templates en Firestore antes de llamar a la IA'
+    );
+    assert.ok(
+      capturedPromptText.includes('FEW-SHOT BANK TEMPLATES (bank_templates)'),
+      'El prompt enviado a Gemini 1.5 Flash debe incluir la sección FEW-SHOT BANK TEMPLATES'
+    );
+    assert.ok(
+      capturedPromptText.includes('ficohsa_empresarial') &&
+        capturedPromptText.includes('Cuenta Corporativa Pyme'),
+      'El prompt debe incluir las reglas aprendidas en bank_templates'
+    );
+    assert.equal(cloudRes.source, 'gemini-1.5-flash');
+    assert.equal(cloudRes.accountsList.length, 1);
+    assert.equal(cloudRes.accountsList[0].accountNumber, '0102998877');
+  });
+
+  it('2. extrae en Modo Local / Offline (Tesseract.js / IndexedDB bank_templates_local) los diseños reales de Banco Promerica App, BAC Web y BAC Móvil sin internet', async () => {
+    const {
+      BANK_TEMPLATES_LOCAL_STORE,
+      extractOfflineWithLearnedTemplates,
+    } = await import('../src/js/services/templateLearner.js');
+    const { extractAccountFromFile } = await import('../src/js/services/accountExtractor.js');
+
+    assert.equal(BANK_TEMPLATES_LOCAL_STORE, 'bank_templates_local');
+
+    const mockIdb = createMockIndexedDb();
+    const mockStorage = createMockStorage();
+
+    // Captura 1: Banco Promerica App Móvil (número antes del tipo y saldo LPS 14,326.70)
+    const promericaOcrText = [
+      '3:46',
+      'Banco Promerica',
+      'Buenas tardes BARAHONA ALVARADO MAUREEN FLOR',
+      'Último Ingreso: 15/10/2026 a las 11:13:45(181.115.63.192)',
+      'Cuentas de cheques y ahorros',
+      '10000000206587',
+      'Ahorros',
+      'Cuenta de Ahorros Personal (Lempiras)',
+      'LPS 14,326.70',
+      'Préstamos',
+      'Tarjetas de crédito',
+    ].join('\n');
+
+    const promericaOffline = await extractAccountFromFile(
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==',
+      {
+        offline: true,
+        ocrReader: async () => promericaOcrText,
+        indexedDb: mockIdb,
+        storage: mockStorage,
+      }
+    );
+
+    assert.equal(promericaOffline.source, 'local-template-engine:promerica_app');
+    assert.equal(promericaOffline.bankName, 'Banco Promerica');
+    assert.equal(promericaOffline.accountsList.length, 1);
+    assert.equal(promericaOffline.accountsList[0].bankName, 'Banco Promerica');
+    assert.equal(
+      promericaOffline.accountsList[0].accountType,
+      'Cuenta de Ahorros Personal (Lempiras)'
+    );
+    assert.equal(promericaOffline.accountsList[0].accountNumber, '10000000206587');
+    assert.equal(promericaOffline.accountsList[0].currency, 'HNL');
+    assert.equal(promericaOffline.accountsList[0].currentBalance, 14326.7);
+
+    // Captura 2: BAC Credomatic Banca en Línea Web ("Resumen de productos" con Cuentas bancarias + Tarjetas de crédito)
+    const bacWebOcrText = [
+      'Resumen de productos',
+      'En esta sección se muestran los productos que puede consultar en Banca en Línea.',
+      'Cuentas bancarias',
+      'MAUREEN FLOR BARAHONA ALVARADO',
+      'Descripción Producto Saldo Ver Transferir',
+      'HN - CUENTA BANCARIA 726935871 401.28 LPS',
+      'HN - CUENTA BANCARIA 751666931 3,705.95 USD',
+      'HN - Negocio Lempiras 758886371 5,963.18 LPS',
+      'Total cuentas bancarias 3,941.43 USD',
+      'Tarjetas de crédito',
+      'MAUREEN/BARAHONA ALVARADO',
+      'HN - AMERICAN EXPRESS 3777-43**-****-3244 8,154.03 LPS 0.00 USD',
+      'HN - MASTERCARD 5140-00**-****-2869 1,255.70 LPS 225.90 USD',
+      'HN - MASTERCARD 5491-50**-****-0618 46,852.97 LPS 11.49 USD',
+    ].join('\n');
+
+    const bacWebOffline = await extractOfflineWithLearnedTemplates(bacWebOcrText, {
+      indexedDb: mockIdb,
+      storage: mockStorage,
+    });
+    assert.equal(bacWebOffline.matched, true);
+    assert.equal(bacWebOffline.template.bankId, 'bac_web');
+    assert.equal(bacWebOffline.accountsList.length, 6);
+    assert.equal(bacWebOffline.accountsList[0].accountNumber, '726935871');
+    assert.equal(bacWebOffline.accountsList[0].currency, 'HNL');
+    assert.equal(bacWebOffline.accountsList[0].currentBalance, 401.28);
+    assert.equal(bacWebOffline.accountsList[1].accountNumber, '751666931');
+    assert.equal(bacWebOffline.accountsList[1].currency, 'USD');
+    assert.equal(bacWebOffline.accountsList[1].currentBalance, 3705.95);
+    assert.equal(bacWebOffline.accountsList[3].accountNumber, '3244');
+    assert.equal(bacWebOffline.accountsList[3].isCreditCard, true);
+    assert.equal(bacWebOffline.accountsList[5].accountNumber, '0618');
+    assert.equal(bacWebOffline.accountsList[5].currentBalance, 46852.97);
+
+    // Captura 3: BAC Credomatic App Móvil ("Cuentas personales" + "Tarjetas personales")
+    const bacMobileOcrText = [
+      'Buenas tardes, Maureen',
+      'Cuentas personales',
+      'Maureen Flor Barahona Alvarado',
+      'HN - Cuenta bancaria',
+      '726935871',
+      'L401.28',
+      'HN - Cuenta bancaria',
+      '751666931',
+      '$3,705.95',
+      'HN - Negocio Lempiras',
+      '758886371',
+      'L5,963.18',
+      'Tarjetas personales',
+      'Maureen/Barahona Alvarado',
+      'HN - Tarjeta L8,154.03',
+      'AMEX ****-3244 $0.00',
+      'HN - Tarjeta L46,852.97',
+      'MCARD ****-0618 $11.49',
+    ].join('\n');
+
+    const bacMobileOffline = await extractOfflineWithLearnedTemplates(bacMobileOcrText, {
+      indexedDb: mockIdb,
+      storage: mockStorage,
+    });
+    assert.equal(bacMobileOffline.matched, true);
+    assert.equal(bacMobileOffline.template.bankId, 'bac_mobile');
+    assert.equal(bacMobileOffline.accountsList.length, 5);
+    assert.equal(bacMobileOffline.accountsList[0].accountNumber, '726935871');
+    assert.equal(bacMobileOffline.accountsList[1].currency, 'USD');
+    assert.equal(bacMobileOffline.accountsList[1].currentBalance, 3705.95);
+    assert.equal(bacMobileOffline.accountsList[3].accountNumber, '3244');
+    assert.equal(bacMobileOffline.accountsList[3].isCreditCard, true);
+    assert.equal(bacMobileOffline.accountsList[4].accountNumber, '0618');
+    assert.equal(bacMobileOffline.accountsList[4].currentBalance, 46852.97);
+  });
+
+  it('3. Flujo "Aprender sobre este Formato": guarda correcciones del usuario en bank_templates (Firestore + IndexedDB) y reconoce futuras capturas con 100% de precisión, guardando cuentas en lote con writeBatch', async () => {
+    const fs = await import('node:fs/promises');
+    const { ImportAccountModal } = await import('../src/js/components/ImportAccountModal.js');
+    const { extractOfflineWithLearnedTemplates } = await import(
+      '../src/js/services/templateLearner.js'
+    );
+
+    const mockStorage = createMockStorage();
+    const mockIdb = createMockIndexedDb();
+    const savedFirestoreDocs = new Map();
+    let writeBatchCommitCount = 0;
+
+    const mockFirestoreModule = {
+      collection(_db, name) {
+        return { name };
+      },
+      query(col) {
+        return col;
+      },
+      where() {
+        return {};
+      },
+      async getDocs() {
+        return { docs: [] };
+      },
+      doc(_db, col, id) {
+        return { path: `${col}/${id}`, col, id };
+      },
+      async setDoc(ref, data) {
+        savedFirestoreDocs.set(ref.path, data);
+      },
+      writeBatch() {
+        const staged = [];
+        return {
+          set(ref, data) {
+            staged.push({ ref, data });
+          },
+          async commit() {
+            writeBatchCommitCount += 1;
+            for (const item of staged) {
+              savedFirestoreDocs.set(item.ref.path, item.data);
+            }
+          },
+        };
+      },
+    };
+
+    const state = {
+      accounts: [],
+      transactions: [],
+      categories: [],
+      settings: { workspaceId: 'ws_learning_test' },
+    };
+
+    const modal = new ImportAccountModal({
+      getState: () => state,
+      getImportContext: () => ({
+        workspaceId: 'ws_learning_test',
+        firestoreDb: { name: 'mock-firestore' },
+        firestoreModule: mockFirestoreModule,
+        indexedDb: mockIdb,
+        storage: mockStorage,
+      }),
+    });
+
+    // Simulamos una captura nueva cuyo OCR tenía datos parciales que el usuario corrige en el modal
+    const customBankOcr = [
+      'Banca Digital Banrural Honduras',
+      'Mis Productos Activos',
+      'Producto: Ahorro Amigo Preferencial',
+      'Ref: 5049900112233',
+      'Disponible: LPS 28,450.00',
+    ].join('\n');
+
+    modal.lastOcrTextFallback = customBankOcr;
+    modal.populateForm({
+      bankName: 'Banco Atlántida', // Dato inicial impreciso antes de la corrección del usuario
+      accountsList: [
+        {
+          bankName: 'Banco Atlántida',
+          accountType: 'Cuenta de Ahorro',
+          accountNumber: '5049900112233',
+          currency: 'HNL',
+          currentBalance: 28450.0,
+          isCreditCard: false,
+          selected: true,
+        },
+      ],
+    });
+
+    // El usuario corrige el banco y el tipo de cuenta, y agrega una segunda cuenta en el modal
+    modal.editAccountRow(0, {
+      bankName: 'Banrural Honduras',
+      accountType: 'Ahorro Amigo Preferencial',
+      accountNumber: '5049900112233',
+      currency: 'HNL',
+      currentBalance: 28450.0,
+    });
+    modal.addAccountRow({
+      bankName: 'Banrural Honduras',
+      accountType: 'Cuenta Cheques Corporativa',
+      accountNumber: '5049900112244',
+      currency: 'USD',
+      currentBalance: 1500.0,
+    });
+
+    assert.equal(modal.accountsList.length, 2);
+
+    // El usuario presiona "Confirmar y Crear X Cuentas"
+    const confirmResult = await modal.handleConfirmCreate();
+    assert.ok(confirmResult);
+    assert.equal(confirmResult.createdCount, 2);
+    assert.equal(confirmResult.batchCommitted, true);
+    assert.ok(writeBatchCommitCount >= 1, 'Debe guardar las cuentas en lote mediante writeBatch');
+
+    // Verificar que el patrón ajustado se guardó en `bank_templates` (Firestore + IndexedDB `bank_templates_local`)
+    assert.ok(confirmResult.learnedTemplate, 'Debe retornar la plantilla aprendida');
+    assert.equal(confirmResult.learnedTemplate.bankName, 'Banrural Honduras');
+    assert.ok(
+      Array.isArray(confirmResult.learnedTemplate.keywords) &&
+        confirmResult.learnedTemplate.keywords.includes('Banrural Honduras')
+    );
+    assert.ok(confirmResult.learnedTemplate.extractionRules.accountNumber);
+    assert.ok(confirmResult.learnedTemplate.extractionRules.accountType);
+    assert.ok(confirmResult.learnedTemplate.extractionRules.currency);
+    assert.ok(confirmResult.learnedTemplate.extractionRules.currentBalance);
+    assert.ok(
+      savedFirestoreDocs.has(`bank_templates/${confirmResult.learnedTemplate.bankId}`),
+      'Debe guardar el documento de formato aprendido en la colección bank_templates de Firestore'
+    );
+    assert.ok(
+      mockIdb.stores.get('bank_templates_local')?.has(confirmResult.learnedTemplate.bankId),
+      'Debe guardar el documento de formato aprendido en bank_templates_local de IndexedDB'
+    );
+
+    // La próxima vez que cualquier usuario suba una captura con esa misma estructura visual/texto,
+    // el sistema reconoce el patrón instantáneamente con 100% de precisión
+    const nextUploadRecognition = await extractOfflineWithLearnedTemplates(customBankOcr, {
+      indexedDb: mockIdb,
+      storage: mockStorage,
+    });
+    assert.equal(nextUploadRecognition.matched, true);
+    assert.equal(nextUploadRecognition.bankName, 'Banrural Honduras');
+    assert.equal(nextUploadRecognition.accountsList[0].bankName, 'Banrural Honduras');
+    assert.equal(
+      nextUploadRecognition.accountsList[0].accountType,
+      'Ahorro Amigo Preferencial'
+    );
+    assert.equal(nextUploadRecognition.accountsList[0].accountNumber, '5049900112233');
+    assert.equal(nextUploadRecognition.accountsList[0].currentBalance, 28450.0);
+
+    // Verificar cero llamados a console.log en todos los módulos entregados
+    for (const relPath of [
+      'src/js/services/templateLearner.js',
+      'public/js/services/templateLearner.js',
+      'src/js/services/accountExtractor.js',
+      'src/js/components/ImportAccountModal.js',
+    ]) {
+      const src = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const withoutComments = src
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        withoutComments.includes('console.log('),
+        false,
+        `El archivo ${relPath} no debe contener llamados a console.log`
+      );
+    }
+  });
+});
+
+describe('27. Extractor Híbrido de Cuentas Bancarias (Tesseract.js Local + Gemini 2.5 Flash Vision Fallback)', () => {
+  it('procesa en Etapa Primaria con Tesseract.js + bank_templates a costo 0 y cae en Etapa Secundaria con Gemini 2.5 Flash para formatos nuevos o baja confianza', async () => {
+    const fs = await import('node:fs/promises');
+    const {
+      GEMINI_VISION_MODEL,
+      BANK_PRODUCT_TYPES,
+      sanitizeNumericAmount,
+      sanitizeNumericAmountString,
+      classifyBankProductType,
+      parseMultiProductBankText,
+      extractBankDataHybrid,
+    } = await import('../src/js/services/ocrExtractor.js');
+    const { ImportAccountModal } = await import('../src/js/components/ImportAccountModal.js');
+
+    assert.equal(GEMINI_VISION_MODEL, 'gemini-2.5-flash');
+
+    // 1. Sanitización estricta de montos numéricos (eliminando comas de miles para evitar recortar cifras)
+    assert.equal(sanitizeNumericAmount('3,901.33'), 3901.33);
+    assert.equal(sanitizeNumericAmountString('3,901.33'), '3901.33');
+    assert.equal(sanitizeNumericAmount('L 14,326.70'), 14326.7);
+    assert.equal(sanitizeNumericAmount('$ 3,705.95'), 3705.95);
+
+    // 2. Clasificación de Tipos de Producto: Ahorro, Cheques, Tarjeta de Crédito, Préstamo
+    assert.equal(
+      classifyBankProductType('Cuenta de Ahorros Personal', '10000000206587').productType,
+      BANK_PRODUCT_TYPES.SAVINGS
+    );
+    assert.equal(
+      classifyBankProductType('HN - Negocio Lempiras (Cuenta Cheques)', '758886371').productType,
+      BANK_PRODUCT_TYPES.CHECKING
+    );
+    assert.equal(
+      classifyBankProductType('AMERICAN EXPRESS', '3244').productType,
+      BANK_PRODUCT_TYPES.CREDIT_CARD
+    );
+    assert.equal(
+      classifyBankProductType('Préstamo Personal Hipotecario', '900112233').productType,
+      BANK_PRODUCT_TYPES.LOAN
+    );
+
+    // 3. Soporte Multiproducto y Multicuenta: Ahorro, Cheques, Tarjeta con DOBLE SALDO (HNL y USD) y Préstamo + Movimientos
+    const multiProductBatchText = [
+      'BAC Credomatic - Resumen de productos',
+      'Cuentas bancarias',
+      'HN - CUENTA BANCARIA 726935871 3,901.33 LPS',
+      'HN - Negocio Lempiras 758886371 5,963.18 LPS',
+      'Tarjetas de crédito',
+      'HN - AMERICAN EXPRESS 3777-43**-****-3244 8,154.03 LPS 425.50 USD',
+      'Préstamos',
+      'HN - PRÉSTAMO PERSONAL 990011223 85,400.00 LPS',
+      '15/10/2026 DEPOSITO DE AHORRO CON T/D Crédito L 200.00',
+      '16/10/2026 SUPERMERCADOS LA COLONIA Débito L 1,250.40',
+    ].join('\n');
+
+    const multiParsed = parseMultiProductBankText(multiProductBatchText, {
+      expandDualCurrencyCards: true,
+    });
+
+    // Debe extraer: 1 Ahorro + 1 Cheques + 2 registros de la Tarjeta AMEX (HNL y USD) + 1 Préstamo = 5 productos
+    assert.equal(multiParsed.accountsList.length, 5);
+    assert.equal(multiParsed.accountsList[0].currentBalance, 3901.33);
+    assert.equal(multiParsed.accountsList[0].productType, 'Ahorro');
+    assert.equal(multiParsed.accountsList[1].productType, 'Cheques');
+
+    const amexHnl = multiParsed.accountsList.find(
+      (a) => a.accountNumber === '3244' && a.currency === 'HNL'
+    );
+    const amexUsd = multiParsed.accountsList.find(
+      (a) => a.accountNumber === '3244' && a.currency === 'USD'
+    );
+    assert.ok(amexHnl, 'Debe extraer el saldo en HNL de la tarjeta de doble saldo');
+    assert.ok(amexUsd, 'Debe extraer el saldo en USD de la tarjeta de doble saldo');
+    assert.equal(amexHnl.currentBalance, 8154.03);
+    assert.equal(amexUsd.currentBalance, 425.5);
+    assert.equal(amexHnl.productType, 'Tarjeta de Crédito');
+    assert.equal(amexUsd.productType, 'Tarjeta de Crédito');
+
+    const loanProduct = multiParsed.accountsList.find((a) => a.accountNumber === '990011223');
+    assert.ok(loanProduct, 'Debe extraer el producto de Préstamo');
+    assert.equal(loanProduct.productType, 'Préstamo');
+    assert.equal(loanProduct.isLoan, true);
+    assert.equal(loanProduct.currentBalance, 85400.0);
+
+    assert.equal(multiParsed.transactionsList.length, 2);
+    assert.equal(multiParsed.transactionsList[0].amount, 200.0);
+    assert.equal(multiParsed.transactionsList[0].type, 'income');
+    assert.equal(multiParsed.transactionsList[1].amount, 1250.4);
+    assert.equal(multiParsed.transactionsList[1].type, 'expense');
+
+    // 4. Etapa Primaria (Tesseract.js Local + bank_templates a costo 0 sin llamar a Gemini API)
+    let geminiApiCalls = 0;
+    const mockTesseractWorker = {
+      async recognize() {
+        return {
+          data: {
+            text: multiProductBatchText,
+            confidence: 91,
+          },
+        };
+      },
+    };
+
+    const stage1Result = await extractBankDataHybrid(
+      { name: 'bac_multi.png', type: 'image/png' },
+      {
+        tesseractWorker: mockTesseractWorker,
+        expandDualCurrencyCards: true,
+        fetchImpl: async () => {
+          geminiApiCalls += 1;
+          throw new Error('No debe llamar a Gemini cuando Etapa Primaria tiene alta confianza y plantilla conocida');
+        },
+      }
+    );
+
+    assert.equal(stage1Result.stage, 'primary-local-ocr');
+    assert.equal(stage1Result.usedGeminiFallback, false);
+    assert.equal(stage1Result.apiCost, 0);
+    assert.equal(geminiApiCalls, 0);
+    assert.equal(stage1Result.bankName, 'BAC Credomatic');
+    assert.equal(stage1Result.accountsList.length, 5);
+    assert.equal(stage1Result.transactionsList.length, 2);
+
+    // 5. Etapa Secundaria (Fallback con Gemini 2.5 Flash cuando la confianza del OCR local es baja o el formato es nuevo)
+    let geminiEndpointCalled = '';
+    let geminiSchemaChecked = false;
+    const unknownFormatOcrText = 'Cooperativa Sagrada Familia\nCta Aportaciones #88004411\nDisp: L 3,901.33';
+
+    const stage2Result = await extractBankDataHybrid(
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      {
+        apiKey: 'test-gemini-25-key',
+        tesseractWorker: {
+          async recognize() {
+            return {
+              data: {
+                text: unknownFormatOcrText,
+                confidence: 45, // Baja confianza -> dispara Fallback a Gemini 2.5 Flash
+              },
+            };
+          },
+        },
+        fetchImpl: async (url, init) => {
+          geminiEndpointCalled = String(url);
+          const reqBody = JSON.parse(init.body);
+          if (
+            reqBody?.generationConfig?.responseMimeType === 'application/json' &&
+            reqBody?.generationConfig?.responseSchema?.properties?.accountsList &&
+            reqBody?.generationConfig?.responseSchema?.properties?.transactionsList
+          ) {
+            geminiSchemaChecked = true;
+          }
+          return {
+            ok: true,
+            async json() {
+              return {
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        {
+                          text: JSON.stringify({
+                            bankName: 'Cooperativa Sagrada Familia',
+                            accountsList: [
+                              {
+                                bankName: 'Cooperativa Sagrada Familia',
+                                accountNumber: '88004411',
+                                accountType: 'Cuenta de Aportaciones',
+                                productType: 'Ahorro',
+                                currency: 'HNL',
+                                currentBalance: '3,901.33',
+                                isCreditCard: false,
+                                isLoan: false,
+                              },
+                              {
+                                bankName: 'Cooperativa Sagrada Familia',
+                                accountNumber: '88009900',
+                                accountType: 'Préstamo Fiduciario',
+                                productType: 'Préstamo',
+                                currency: 'HNL',
+                                currentBalance: '25,000.00',
+                                isCreditCard: false,
+                                isLoan: true,
+                              },
+                            ],
+                            transactionsList: [
+                              {
+                                date: '2026-10-20',
+                                concept: 'ABONO A APORTACIONES',
+                                type: 'income',
+                                amount: '500.00',
+                                currency: 'HNL',
+                              },
+                            ],
+                          }),
+                        },
+                      ],
+                    },
+                  },
+                ],
+              };
+            },
+          };
+        },
+      }
+    );
+
+    assert.equal(stage2Result.stage, 'secondary-gemini-vision');
+    assert.equal(stage2Result.usedGeminiFallback, true);
+    assert.ok(
+      geminiEndpointCalled.includes('gemini-2.5-flash:generateContent'),
+      'Debe invocar el modelo gemini-2.5-flash en la Etapa Secundaria'
+    );
+    assert.equal(
+      geminiSchemaChecked,
+      true,
+      'Debe forzar respuesta estructurada en JSON con accountsList y transactionsList'
+    );
+    assert.equal(stage2Result.accountsList.length, 2);
+    assert.equal(stage2Result.accountsList[0].currentBalance, 3901.33);
+    assert.equal(stage2Result.accountsList[0].productType, 'Ahorro');
+    assert.equal(stage2Result.accountsList[1].productType, 'Préstamo');
+    assert.equal(stage2Result.accountsList[1].isLoan, true);
+    assert.equal(stage2Result.transactionsList.length, 1);
+    assert.equal(stage2Result.transactionsList[0].amount, 500.0);
+
+    // 6. Vista Previa Editable en ImportAccountModal.js + Aprendizaje Automático en bank_templates + writeBatch atómico
+    const savedFirestoreDocs = new Map();
+    let batchCommits = 0;
+    const mockFirestoreDb = { type: 'mock-hybrid-firestore' };
+    const mockFirestoreModule = {
+      collection: (_db, col) => ({ col }),
+      query: (colRef) => colRef,
+      where: () => ({}),
+      getDocs: async () => ({ docs: [] }),
+      doc: (_db, col, id) => ({ path: `${col}/${id}`, col, id }),
+      setDoc: async (ref, data) => {
+        savedFirestoreDocs.set(ref.path, data);
+      },
+      writeBatch: () => {
+        const ops = [];
+        return {
+          set(ref, data) {
+            ops.push({ ref, data });
+          },
+          async commit() {
+            batchCommits += 1;
+            for (const op of ops) {
+              savedFirestoreDocs.set(op.ref.path, op.data);
+            }
+          },
+        };
+      },
+    };
+
+    const mockStorageMap = new Map();
+    const mockStorage = {
+      getItem: (k) => (mockStorageMap.has(k) ? mockStorageMap.get(k) : null),
+      setItem: (k, v) => mockStorageMap.set(k, String(v)),
+    };
+
+    const appState = {
+      accounts: [],
+      transactions: [],
+      settings: { workspaceId: 'ws_hybrid_test', currentUid: 'uid_hybrid_1' },
+    };
+
+    const modal = new ImportAccountModal({
+      getState: () => appState,
+      getImportContext: () => ({
+        workspaceId: 'ws_hybrid_test',
+        firestoreDb: mockFirestoreDb,
+        firestoreModule: mockFirestoreModule,
+        storage: mockStorage,
+      }),
+    });
+
+    modal.lastOcrTextFallback = unknownFormatOcrText;
+    modal.renderPreview(stage2Result, stage2Result.source);
+
+    assert.equal(modal.accountsList.length, 2);
+    assert.equal(modal.transactionsList.length, 1);
+
+    // Editar valores en la vista previa editable, desmarcar o eliminar una fila y agregar otra
+    modal.editAccountRow(0, {
+      currentBalance: '4,150.75',
+    });
+    assert.equal(modal.accountsList[0].currentBalance, 4150.75);
+
+    // Confirmar en el modal: guarda las cuentas con writeBatch y aprende el formato en bank_templates
+    const confirmRes = await modal.handleConfirmCreate();
+    assert.ok(confirmRes);
+    assert.equal(confirmRes.createdCount, 2);
+    assert.equal(confirmRes.batchCommitted, true);
+    assert.ok(batchCommits >= 1, 'Debe usar writeBatch para guardado atómico en Firestore');
+    assert.ok(confirmRes.learnedTemplate, 'Debe aprender y guardar la plantilla en bank_templates');
+    assert.ok(
+      savedFirestoreDocs.has(`bank_templates/${confirmRes.learnedTemplate.bankId}`),
+      'El nuevo patrón debe quedar almacenado en la colección bank_templates'
+    );
+
+    // Verificar que una futura lectura de ese mismo banco ahora se ejecuta en Etapa Primaria (Local) a costo cero
+    let subsequentGeminiCalls = 0;
+    const subsequentRead = await extractBankDataHybrid(
+      { name: 'cooperativa_2.png', type: 'image/png' },
+      {
+        storage: mockStorage,
+        tesseractWorker: {
+          async recognize() {
+            return {
+              data: {
+                text: unknownFormatOcrText,
+                confidence: 88,
+              },
+            };
+          },
+        },
+        fetchImpl: async () => {
+          subsequentGeminiCalls += 1;
+          throw new Error('No debe llamar a Gemini API después de haber aprendido el formato');
+        },
+      }
+    );
+
+    assert.equal(subsequentRead.stage, 'primary-local-ocr');
+    assert.equal(subsequentRead.usedGeminiFallback, false);
+    assert.equal(subsequentRead.apiCost, 0);
+    assert.equal(subsequentGeminiCalls, 0);
+    assert.equal(subsequentRead.bankName, 'Cooperativa Sagrada Familia');
+    assert.equal(subsequentRead.accountsList[0].accountNumber, '88004411');
+
+    // 7. Verificar cero llamadas a console.log en ocrExtractor.js y módulos relacionados
+    for (const relPath of [
+      'src/js/services/ocrExtractor.js',
+      'public/js/services/ocrExtractor.js',
+      'src/js/services/templateLearner.js',
+      'src/js/services/accountExtractor.js',
+      'src/js/components/ImportAccountModal.js',
+    ]) {
+      const src = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const withoutComments = src
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        withoutComments.includes('console.log('),
+        false,
+        `El archivo ${relPath} no debe contener llamadas a console.log`
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 28. Extracción Completa de N Productos sin Límite (5 Posiciones BAC Credomatic)
+//     y Reparación del Catálogo del Selector de Bancos en ImportAccountModal
+// ---------------------------------------------------------------------------
+describe('28. Extracción Completa de N Productos sin Límite y Reparación del Selector de Bancos en ImportAccountModal', () => {
+  it('extrae las 5 posiciones completas de BAC Credomatic (incluyendo después de Tarjetas personales) y renderiza el catálogo completo de bancos de Honduras en <select> permitiendo onChange', async () => {
+    const fs = await import('node:fs/promises');
+    const {
+      HYBRID_EXTRACTOR_SYSTEM_PROMPT,
+      parseMultiProductBankText,
+      extractBankDataHybrid,
+    } = await import('../src/js/services/ocrExtractor.js');
+    const {
+      ACCOUNT_EXTRACTOR_SYSTEM_PROMPT,
+      parseBatchAccountsFromTextFallback,
+    } = await import('../src/js/services/accountExtractor.js');
+    const {
+      extractBacAccounts,
+      applyTemplateExtractionRules,
+      DEFAULT_BANK_TEMPLATES,
+    } = await import('../src/js/services/templateLearner.js');
+    const {
+      ImportAccountModal,
+      HONDURAS_BANKS_LIST,
+      HONDURAS_BANK_CATALOG_GROUPS,
+      renderBankSelectOptionsMarkup,
+    } = await import('../src/js/components/ImportAccountModal.js');
+    const { HONDURAS_FINANCIAL_ENTITIES } = await import('../public/js/domain/models.js');
+
+    // 1. Verificar prompts del sistema actualizados para continuar después de "Tarjetas personales" sin truncar en 2 elementos
+    assert.ok(HYBRID_EXTRACTOR_SYSTEM_PROMPT.includes('Tarjetas personales'));
+    assert.ok(HYBRID_EXTRACTOR_SYSTEM_PROMPT.includes('726935871'));
+    assert.ok(HYBRID_EXTRACTOR_SYSTEM_PROMPT.includes('751666931'));
+    assert.ok(HYBRID_EXTRACTOR_SYSTEM_PROMPT.includes('758886371'));
+    assert.ok(HYBRID_EXTRACTOR_SYSTEM_PROMPT.includes('3244'));
+    assert.ok(HYBRID_EXTRACTOR_SYSTEM_PROMPT.includes('0618'));
+
+    assert.ok(ACCOUNT_EXTRACTOR_SYSTEM_PROMPT.includes('Tarjetas personales'));
+    assert.ok(ACCOUNT_EXTRACTOR_SYSTEM_PROMPT.includes('726935871'));
+    assert.ok(ACCOUNT_EXTRACTOR_SYSTEM_PROMPT.includes('0618'));
+
+    // 2. Imagen de ejemplo BAC Credomatic (App móvil con "Cuentas personales" y "Tarjetas personales")
+    const bacFivePositionsOcrText = [
+      'BAC Credomatic',
+      'Cuentas personales',
+      'HN - Cuenta',
+      'bancaria 726935871 L401.28',
+      'HN - Cuenta',
+      'bancaria 751666931 $3,705.95',
+      'HN - Negocio',
+      'Lempiras 758886371 L5,963.18',
+      'Tarjetas personales',
+      'HN - Tarjeta L8,154.03',
+      'AMEX ****-3244 $0.00',
+      'HN - Tarjeta L46,852.97',
+      'MCARD ****-0618 $11.49',
+    ].join('\n');
+
+    // 2.a) Verificar parseMultiProductBankText en ocrExtractor.js
+    const multiParsedObj = parseMultiProductBankText(bacFivePositionsOcrText, {
+      defaultBankName: 'BAC Credomatic',
+    });
+    const multiParsed = multiParsedObj.accountsList;
+    assert.ok(
+      multiParsed.length >= 5,
+      `Se esperaban las 5 posiciones de BAC Credomatic en parseMultiProductBankText, se obtuvieron ${multiParsed.length}`
+    );
+
+    const pos1 = multiParsed.find((a) => a.accountNumber === '726935871');
+    const pos2 = multiParsed.find((a) => a.accountNumber === '751666931');
+    const pos3 = multiParsed.find((a) => a.accountNumber === '758886371');
+    const pos4 = multiParsed.find((a) => a.accountNumber === '3244');
+    const pos5 = multiParsed.find((a) => a.accountNumber === '0618');
+
+    assert.ok(pos1, 'Falta posición 1: Cuenta bancaria 726935871');
+    assert.equal(pos1.currency, 'HNL');
+    assert.equal(pos1.currentBalance, 401.28);
+    assert.equal(pos1.isCreditCard, false);
+
+    assert.ok(pos2, 'Falta posición 2: Cuenta bancaria 751666931');
+    assert.equal(pos2.currency, 'USD');
+    assert.equal(pos2.currentBalance, 3705.95);
+    assert.equal(pos2.isCreditCard, false);
+
+    assert.ok(pos3, 'Falta posición 3: Negocio Lempiras 758886371');
+    assert.equal(pos3.currency, 'HNL');
+    assert.equal(pos3.currentBalance, 5963.18);
+    assert.equal(pos3.isCreditCard, false);
+
+    assert.ok(pos4, 'Falta posición 4: Tarjeta AMEX 3244');
+    assert.equal(pos4.currency, 'HNL');
+    assert.equal(pos4.currentBalance, 8154.03);
+    assert.equal(pos4.isCreditCard, true);
+    assert.ok(pos4.dualBalances);
+    assert.equal(pos4.dualBalances.HNL, 8154.03);
+    assert.equal(pos4.dualBalances.USD, 0);
+
+    assert.ok(pos5, 'Falta posición 5: Tarjeta MCARD 0618');
+    assert.equal(pos5.currency, 'HNL');
+    assert.equal(pos5.currentBalance, 46852.97);
+    assert.equal(pos5.isCreditCard, true);
+    assert.ok(pos5.dualBalances);
+    assert.equal(pos5.dualBalances.HNL, 46852.97);
+    assert.equal(pos5.dualBalances.USD, 11.49);
+
+    // 2.b) Verificar extractBacAccounts y applyTemplateExtractionRules en templateLearner.js
+    const bacTemplateAccounts = extractBacAccounts(bacFivePositionsOcrText);
+    assert.equal(bacTemplateAccounts.length, 5);
+    const bacMobileTemplate = DEFAULT_BANK_TEMPLATES.find((t) => t.bankId === 'bac_mobile');
+    const ruleResult = applyTemplateExtractionRules(bacFivePositionsOcrText, bacMobileTemplate);
+    assert.equal(ruleResult.accountsList.length, 5);
+
+    // 2.c) Verificar parseBatchAccountsFromTextFallback en accountExtractor.js
+    const batchFallback = parseBatchAccountsFromTextFallback(bacFivePositionsOcrText);
+    assert.equal(batchFallback.bankName, 'BAC Credomatic');
+    assert.equal(batchFallback.accountsList.length, 5);
+    assert.deepEqual(
+      batchFallback.accountsList.map((a) => a.accountNumber),
+      ['726935871', '751666931', '758886371', '3244', '0618']
+    );
+
+    // 2.d) Verificar extractBankDataHybrid end-to-end
+    const hybridRes = await extractBankDataHybrid(
+      { name: 'bac_5_posiciones.png', type: 'image/png' },
+      {
+        tesseractWorker: {
+          async recognize() {
+            return {
+              data: {
+                text: bacFivePositionsOcrText,
+                confidence: 92,
+              },
+            };
+          },
+        },
+      }
+    );
+    assert.equal(hybridRes.bankName, 'BAC Credomatic');
+    assert.equal(hybridRes.accountsList.length, 5);
+
+    // 3. Reparación del Selector "Nombre de Banco" en la UI (ImportAccountModal.js)
+    //    Verificar que contiene exactamente las mismas entidades que "Entidad Bancaria" en "Modificar Cuenta o Meta"
+    const expectedAllEntities = [
+      ...HONDURAS_FINANCIAL_ENTITIES.bancos,
+      ...HONDURAS_FINANCIAL_ENTITIES.cooperativas,
+      ...HONDURAS_FINANCIAL_ENTITIES.financierasYBilleteras,
+    ];
+    for (const entity of expectedAllEntities) {
+      assert.ok(
+        HONDURAS_BANKS_LIST.includes(entity),
+        `El catálogo del selector de bancos debe incluir "${entity}"`
+      );
+    }
+    assert.equal(HONDURAS_BANK_CATALOG_GROUPS.length, 3);
+
+    // Verificar que renderBankSelectOptionsMarkup SIEMPRE renderiza el catálogo completo y marca como selected el banco detectado por la IA
+    const selectMarkup = renderBankSelectOptionsMarkup('BAC Credomatic');
+    for (const entity of expectedAllEntities) {
+      assert.ok(
+        selectMarkup.includes(`value="${entity}"`),
+        `El <select> debe incluir <option value="${entity}"> incluso cuando la IA detectó BAC Credomatic`
+      );
+    }
+    assert.ok(
+      selectMarkup.includes('<option value="BAC Credomatic" selected>BAC Credomatic</option>'),
+      'El banco detectado por la IA (BAC Credomatic) debe marcarse como selected'
+    );
+
+    // Verificar que en ImportAccountModal el evento onChange / cambio de banco permite elegir cualquier otro banco sin bloquear ni limpiar las opciones
+    const modal = new ImportAccountModal({
+      getState: () => ({ accounts: [], transactions: [] }),
+    });
+    modal.renderPreview(hybridRes, hybridRes.source);
+    assert.equal(modal.accountsList.length, 5);
+    assert.equal(modal.accountsList[0].bankName, 'BAC Credomatic');
+
+    // Simular cambio de banco en la fila 0 y globalmente a "Banco Atlántida" y luego a "Cooperativa Sagrada Familia"
+    modal.updateAccountAtIndex(0, 'bankName', 'Banco Atlántida');
+    assert.equal(modal.accountsList[0].bankName, 'Banco Atlántida');
+
+    const rowTableHtmlAfterChange = modal.renderAccountsListTable();
+    for (const entity of expectedAllEntities) {
+      assert.ok(
+        rowTableHtmlAfterChange.includes(`value="${entity}"`),
+        `Después de cambiar el banco, el <select> debe seguir conteniendo todas las opciones del catálogo (${entity})`
+      );
+    }
+    assert.ok(
+      rowTableHtmlAfterChange.includes('<option value="Banco Atlántida" selected>Banco Atlántida</option>'),
+      'El nuevo banco seleccionado debe quedar marcado como selected'
+    );
+
+    modal.updateAccountAtIndex(0, 'bankName', 'Cooperativa Sagrada Familia');
+    assert.equal(modal.accountsList[0].bankName, 'Cooperativa Sagrada Familia');
+
+    // 4. Cero llamados a console.log
+    for (const relPath of [
+      'src/js/services/ocrExtractor.js',
+      'src/js/services/accountExtractor.js',
+      'src/js/services/templateLearner.js',
+      'src/js/components/ImportAccountModal.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Cero llamados a console.log permitidos en ${relPath}`
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 29. Limpieza Completa de Estado en Logout y Estado Inicial para Visitantes
+//     No Autenticados (src/js/services/auth.js, dashboard.js, app.js)
+// ---------------------------------------------------------------------------
+describe('29. Limpieza Completa de Estado en Logout y Estado Inicial para Visitantes No Autenticados', () => {
+  it('limpia variables en memoria, resetea contadores y contenedores DOM a cero/vacío, limpia localStorage/sessionStorage en signOut y redirige al modal de Login para usuarios no autenticados', async () => {
+    const fs = await import('node:fs/promises');
+    const {
+      cleanupOnboardingOnLogout,
+      performCompleteLogoutCleanup,
+      handleUnauthenticatedVisitorState,
+      signOutWithCompleteCleanup,
+      clearUserAndWorkspaceStorageKeys,
+      resetInMemoryStateOnLogout,
+      redirectToLoginModal,
+    } = await import('../src/js/services/auth.js');
+    const {
+      resetDashboardDomToZeroAndEmpty,
+      clearDashboardDomContainers,
+    } = await import('../src/js/services/dashboard.js');
+
+    // 1. Crear almacenamiento simulado con datos residuales de una sesión previa
+    const storageMap = new Map([
+      ['Pisto_open_finance_state_v1', JSON.stringify({ accounts: [{ id: 'acc_1', balance: 57843.49 }] })],
+      ['pisto_local_auth_session_v1', JSON.stringify({ uid: 'uid_prev', email: 'prev@pisto.hn' })],
+      ['pisto_gemini_api_key_v1', 'AIzaSySecretKey'],
+      ['pisto_custom_firebase_config', '{"apiKey":"abc"}'],
+      ['pisto_firestore_accounts_ws_ws_uid_prev', '[{"id":"acc_1"}]'],
+      ['pisto_firestore_transactions_ws_ws_uid_prev', '[{"id":"tx_1"}]'],
+      ['pisto_firestore_budgets_ws_ws_uid_prev', '{"food":5000}'],
+      ['pisto_dashboard_metrics_ws_ws_uid_prev', '{"totalIncludedBalance":57843.49}'],
+    ]);
+    const mockStorage = {
+      map: storageMap,
+      get length() {
+        return storageMap.size;
+      },
+      key(idx) {
+        return Array.from(storageMap.keys())[idx] ?? null;
+      },
+      getItem(k) {
+        return storageMap.has(k) ? storageMap.get(k) : null;
+      },
+      setItem(k, v) {
+        storageMap.set(k, String(v));
+      },
+      removeItem(k) {
+        storageMap.delete(k);
+      },
+      clear() {
+        storageMap.clear();
+      },
+    };
+
+    let sessionCleared = false;
+    const mockSessionStorage = {
+      clear() {
+        sessionCleared = true;
+      },
+    };
+
+    // 2. Crear elementos DOM simulados con datos residuales (ej. L 57,843.49 y 6 tarjetas de cuentas)
+    const domElements = {
+      'kpi-total-balance': { textContent: 'L 57,843.49' },
+      'kpi-period-income': { textContent: '+ L 18,500.00' },
+      'kpi-period-expense': { textContent: '- L 6,200.00' },
+      'kpi-savings-rate': { textContent: '66%' },
+      'accounts-grid': {
+        innerHTML: '<article class="account-card">Banco Promerica</article><article class="account-card">Banco Ficohsa</article>',
+      },
+      'ledger-groups-mount': {
+        innerHTML: '<section class="ledger-day-group">Transacción residual</section>',
+      },
+      'account-detail-tx-tbody': { innerHTML: '<tr><td>Detalle residual</td></tr>' },
+      'statement-items-tbody': { innerHTML: '<tr><td>Estado de cuenta residual</td></tr>' },
+      'import-account-accounts-tbody': { innerHTML: '<tr><td>Cuenta importada residual</td></tr>' },
+      'import-account-tx-tbody': { innerHTML: '<tr><td>Movimiento importado residual</td></tr>' },
+      'dashboard-empty-state-banner': {
+        innerHTML: '<div>Banner</div>',
+        classList: { add() {}, remove() {} },
+      },
+      'archived-accounts-count-badge': {
+        textContent: '(3)',
+        classList: { add() {}, toggle() {} },
+      },
+      'btn-profile-signout': {
+        hidden: false,
+        style: { display: '' },
+        classList: { add() {}, remove() {} },
+        setAttribute() {},
+      },
+      'auth-dialog': {
+        open: false,
+        showModal() {
+          this.open = true;
+        },
+        setAttribute(attr) {
+          if (attr === 'open') this.open = true;
+        },
+      },
+    };
+    const mockDoc = {
+      getElementById(id) {
+        return domElements[id] || null;
+      },
+      querySelectorAll() {
+        return [];
+      },
+    };
+
+    // 3. Estado en memoria con cuentas y transacciones previas
+    const state = {
+      currentWorkspaceId: 'ws_uid_prev',
+      settings: {
+        workspaceId: 'ws_uid_prev',
+        currentUid: 'uid_prev',
+        personalViewMode: true,
+        baseCurrency: 'USD',
+        currencyFilter: 'USD',
+      },
+      accounts: [
+        { id: 'acc_promerica', name: 'Banco Promerica', initialBalance: 0 },
+        { id: 'acc_ficohsa', name: 'Banco Ficohsa', initialBalance: 57843.49 },
+      ],
+      transactions: [{ id: 'tx_prev_1', amount: 1500, currency: 'HNL' }],
+      budgets: { food: 4000 },
+    };
+
+    let authModalOpened = false;
+    const mockApp = {
+      currentWorkspaceId: 'ws_uid_prev',
+      accounts: [...state.accounts],
+      transactions: [...state.transactions],
+      activeDetailAccountId: 'acc_ficohsa',
+      lastInsightsResult: { summary: 'old' },
+      ledgerFilters: { currencyFilter: 'USD', accountFilter: 'acc_ficohsa', typeFilter: 'expense', searchQuery: 'cafe' },
+      profileView: {
+        openAuthModal(isRegister) {
+          authModalOpened = true;
+          assert.equal(isRegister, false);
+          domElements['auth-dialog'].showModal();
+        },
+      },
+    };
+
+    let firebaseSignOutCalled = false;
+    const mockAuthService = {
+      currentUser: { uid: 'uid_prev', email: 'prev@pisto.hn' },
+      currentProfile: { uid: 'uid_prev', workspaceId: 'ws_uid_prev' },
+      currentWorkspaceId: 'ws_uid_prev',
+      accounts: [...state.accounts],
+      transactions: [...state.transactions],
+      firebaseAuth: { currentUser: { uid: 'uid_prev' } },
+      authModule: {
+        async signOut() {
+          firebaseSignOutCalled = true;
+        },
+      },
+    };
+
+    // 4. Ejecutar cierre de sesión con limpieza completa (`signOutWithCompleteCleanup`)
+    const logoutRes = await signOutWithCompleteCleanup({
+      auth: mockAuthService.firebaseAuth,
+      signOut: mockAuthService.authModule.signOut,
+      state,
+      app: mockApp,
+      authService: mockAuthService,
+      profileView: mockApp.profileView,
+      storage: mockStorage,
+      sessionStorage: mockSessionStorage,
+      workspaceId: 'ws_uid_prev',
+      docRef: mockDoc,
+    });
+
+    assert.equal(firebaseSignOutCalled, true);
+
+    // 4a. Verificar limpieza de todas las variables de estado en memoria
+    assert.equal(logoutRes.currentWorkspaceId, null);
+    assert.deepEqual(logoutRes.accounts, []);
+    assert.deepEqual(logoutRes.transactions, []);
+    assert.equal(state.currentWorkspaceId, null);
+    assert.deepEqual(state.accounts, []);
+    assert.deepEqual(state.transactions, []);
+    assert.deepEqual(state.budgets, {});
+    assert.equal(state.settings.workspaceId, null);
+    assert.equal(state.settings.currentUid, null);
+    assert.equal(mockApp.currentWorkspaceId, null);
+    assert.deepEqual(mockApp.accounts, []);
+    assert.deepEqual(mockApp.transactions, []);
+    assert.equal(mockAuthService.currentUser, null);
+    assert.equal(mockAuthService.currentProfile, null);
+    assert.equal(mockAuthService.currentWorkspaceId, null);
+
+    // 4b. Verificar reseteo explícito de los elementos del Dashboard en el DOM a cero/vacío
+    assert.equal(domElements['kpi-total-balance'].textContent, 'L 0.00');
+    assert.equal(domElements['kpi-period-income'].textContent, '+ L 0.00');
+    assert.equal(domElements['kpi-period-expense'].textContent, '- L 0.00');
+    assert.equal(domElements['kpi-savings-rate'].textContent, '0%');
+    assert.equal(domElements['accounts-grid'].innerHTML, '');
+    assert.equal(domElements['ledger-groups-mount'].innerHTML, '');
+    assert.equal(domElements['account-detail-tx-tbody'].innerHTML, '');
+    assert.equal(domElements['statement-items-tbody'].innerHTML, '');
+    assert.equal(domElements['import-account-accounts-tbody'].innerHTML, '');
+    assert.equal(domElements['import-account-tx-tbody'].innerHTML, '');
+
+    // 4c. Verificar limpieza de claves residuales en localStorage y sessionStorage
+    assert.equal(sessionCleared, true);
+    assert.equal(mockStorage.getItem('Pisto_open_finance_state_v1'), null);
+    assert.equal(mockStorage.getItem('pisto_local_auth_session_v1'), null);
+    assert.equal(mockStorage.getItem('pisto_gemini_api_key_v1'), null);
+    assert.equal(mockStorage.getItem('pisto_custom_firebase_config'), null);
+    assert.equal(mockStorage.getItem('pisto_firestore_accounts_ws_ws_uid_prev'), null);
+    assert.equal(mockStorage.getItem('pisto_firestore_transactions_ws_ws_uid_prev'), null);
+    assert.equal(mockStorage.getItem('pisto_firestore_budgets_ws_ws_uid_prev'), null);
+    assert.equal(mockStorage.getItem('pisto_dashboard_metrics_ws_ws_uid_prev'), null);
+
+    // 4d. Verificar redirección inmediata al modal de Inicio de Sesión / Registro
+    assert.equal(authModalOpened, true);
+    assert.equal(domElements['auth-dialog'].open, true);
+
+    // 5. Verificar Estado Inicial por Defecto para Visitantes / No Logueados (`onAuthStateChanged` con `user === null`)
+    domElements['kpi-total-balance'].textContent = 'L 57,843.49';
+    domElements['accounts-grid'].innerHTML = '<article>Residual</article>';
+    domElements['ledger-groups-mount'].innerHTML = '<section>Residual</section>';
+    domElements['auth-dialog'].open = false;
+    authModalOpened = false;
+    state.accounts = [{ id: 'acc_residual', initialBalance: 57843.49 }];
+    state.transactions = [{ id: 'tx_residual', amount: 500 }];
+
+    const visitorState = handleUnauthenticatedVisitorState({
+      state,
+      app: mockApp,
+      authService: mockAuthService,
+      profileView: mockApp.profileView,
+      storage: mockStorage,
+      docRef: mockDoc,
+    });
+
+    assert.equal(visitorState.currentWorkspaceId, null);
+    assert.equal(state.accounts.length, 0);
+    assert.equal(state.transactions.length, 0);
+    assert.equal(domElements['kpi-total-balance'].textContent, 'L 0.00');
+    assert.equal(domElements['kpi-period-income'].textContent, '+ L 0.00');
+    assert.equal(domElements['kpi-period-expense'].textContent, '- L 0.00');
+    assert.equal(domElements['kpi-savings-rate'].textContent, '0%');
+    assert.equal(domElements['accounts-grid'].innerHTML, '');
+    assert.equal(domElements['ledger-groups-mount'].innerHTML, '');
+    assert.equal(authModalOpened, true);
+    assert.equal(domElements['auth-dialog'].open, true);
+
+    // 6. Cero llamados a console.log en todos los módulos modificados
+    for (const relPath of [
+      'src/js/services/auth.js',
+      'public/js/services/authProfileService.js',
+      'src/js/services/dashboard.js',
+      'public/js/app.js',
+      'src/js/app.js',
+      'public/js/ui/profileView.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Cero llamados a console.log permitidos en ${relPath}`
+      );
+    }
+  });
+});
+
+
+
+
+
 

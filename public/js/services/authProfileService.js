@@ -486,6 +486,9 @@ export class FirebaseAuthProfileService {
     this.authListeners = new Set();
     this.currentUser = null;
     this.currentProfile = null;
+    this.currentWorkspaceId = null;
+    this.accounts = [];
+    this.transactions = [];
     this.firebaseApp = null;
     this.firebaseAuth = null;
     this.firestoreDb = null;
@@ -651,9 +654,15 @@ export class FirebaseAuthProfileService {
                   email: restoredLocalUser.email,
                   name: restoredLocalUser.displayName,
                 });
+                this.currentWorkspaceId = this.currentProfile?.workspaceId || null;
               } else {
                 this.currentUser = null;
                 this.currentProfile = null;
+                this.currentWorkspaceId = null;
+                this.accounts = [];
+                this.transactions = [];
+                this.clearResidualWorkspaceStorage(null);
+                this.resetUnauthenticatedDomIfPresent();
               }
             }
             this.notifyListeners();
@@ -678,11 +687,23 @@ export class FirebaseAuthProfileService {
             email: parsedUser.email,
             name: parsedUser.displayName,
           });
+          this.currentWorkspaceId = this.currentProfile?.workspaceId || null;
         }
       } catch {
         this.currentUser = null;
         this.currentProfile = null;
+        this.currentWorkspaceId = null;
+        this.accounts = [];
+        this.transactions = [];
       }
+    } else {
+      this.currentUser = null;
+      this.currentProfile = null;
+      this.currentWorkspaceId = null;
+      this.accounts = [];
+      this.transactions = [];
+      this.clearResidualWorkspaceStorage(null);
+      this.resetUnauthenticatedDomIfPresent();
     }
 
     this.notifyListeners();
@@ -1239,11 +1260,97 @@ export class FirebaseAuthProfileService {
     await this.updateFirebaseConfig(null);
   }
 
+  /**
+   * Purges residual workspace and session state keys (`Pisto_open_finance_state_v1`,
+   * `pisto_firestore_accounts_ws_*`, `pisto_firestore_transactions_ws_*`, `pisto_firestore_budgets_ws_*`,
+   * `pisto_dashboard_metrics_ws_*`) from local/session storage on logout or unauthenticated startup.
+   */
+  clearResidualWorkspaceStorage(workspaceId = null) {
+    const cleanWs = workspaceId ? String(workspaceId).trim() : null;
+    const keysToRemove = [
+      'Pisto_open_finance_state_v1',
+      LOCAL_AUTH_SESSION_KEY,
+      'pisto_firestore_accounts_ws_ws_default',
+      'pisto_firestore_transactions_ws_ws_default',
+      'pisto_firestore_budgets_ws_ws_default',
+      'pisto_dashboard_metrics_ws_ws_default',
+    ];
+    if (cleanWs) {
+      keysToRemove.push(
+        `pisto_firestore_accounts_ws_${cleanWs}`,
+        `pisto_firestore_transactions_ws_${cleanWs}`,
+        `pisto_firestore_budgets_ws_${cleanWs}`,
+        `pisto_dashboard_metrics_ws_${cleanWs}`,
+        `pisto_shared_ws_tx_${cleanWs}`
+      );
+    }
+    for (const k of keysToRemove) {
+      this.removeItem(k);
+    }
+
+    if (typeof sessionStorage !== 'undefined' && typeof sessionStorage.clear === 'function') {
+      try {
+        sessionStorage.clear();
+      } catch {
+        // Ignore sessionStorage errors
+      }
+    }
+  }
+
+  /**
+   * Resets Dashboard KPI counters to strict zero ("L 0.00", "+ L 0.00", "- L 0.00", "0%")
+   * and empties account cards & transaction containers (`innerHTML = ''`) in the DOM when present.
+   */
+  resetUnauthenticatedDomIfPresent(docRef = typeof document !== 'undefined' ? document : null) {
+    if (!docRef || typeof docRef.getElementById !== 'function') return;
+    const netWorthEl = docRef.getElementById('kpi-total-balance');
+    const incomeEl = docRef.getElementById('kpi-period-income');
+    const expenseEl = docRef.getElementById('kpi-period-expense');
+    const savingsRateEl = docRef.getElementById('kpi-savings-rate');
+
+    if (netWorthEl) netWorthEl.textContent = 'L 0.00';
+    if (incomeEl) incomeEl.textContent = '+ L 0.00';
+    if (expenseEl) expenseEl.textContent = '- L 0.00';
+    if (savingsRateEl) savingsRateEl.textContent = '0%';
+
+    const containerIds = [
+      'accounts-grid',
+      'ledger-groups-mount',
+      'account-detail-tx-tbody',
+      'statement-items-tbody',
+      'import-account-accounts-tbody',
+      'import-account-tx-tbody',
+      'dashboard-empty-state-banner',
+    ];
+    for (const id of containerIds) {
+      const el = docRef.getElementById(id);
+      if (el) {
+        el.innerHTML = '';
+        if (id === 'dashboard-empty-state-banner') {
+          el.classList?.add?.('is-hidden');
+        }
+      }
+    }
+
+    const signOutBtn = docRef.getElementById('btn-profile-signout');
+    if (signOutBtn) {
+      signOutBtn.classList?.add?.('is-hidden');
+      signOutBtn.hidden = true;
+      signOutBtn.setAttribute?.('hidden', '');
+      if (signOutBtn.style) {
+        signOutBtn.style.display = 'none';
+      }
+    }
+  }
+
   async signOut() {
-    if (this.firebaseAuth && this.authModule) {
-      await this.authModule.signOut(this.firebaseAuth);
+    const prevWorkspaceId = this.currentProfile?.workspaceId || this.currentWorkspaceId || null;
+    const signOutMod = this.authModule || this.firebaseAuthModule;
+    if (this.firebaseAuth && signOutMod && typeof signOutMod.signOut === 'function') {
+      await signOutMod.signOut(this.firebaseAuth);
     }
     this.removeItem(LOCAL_AUTH_SESSION_KEY);
+    this.clearResidualWorkspaceStorage(prevWorkspaceId);
     await this.clearSensitiveLocalStorage();
 
     // Limpieza segura del Onboarding Wizard en el DOM y reseteo de estados locales
@@ -1269,11 +1376,19 @@ export class FirebaseAuthProfileService {
 
     this.currentUser = null;
     this.currentProfile = null;
+    this.currentWorkspaceId = null;
+    this.accounts = [];
+    this.transactions = [];
+    this.resetUnauthenticatedDomIfPresent();
     this.notifyListeners();
   }
 
   async logout() {
     return this.signOut();
+  }
+
+  getActiveWorkspaceId() {
+    return this.currentProfile?.workspaceId || this.currentWorkspaceId || null;
   }
 
   isPersonalInitialWorkspace(wsId, uid, email) {

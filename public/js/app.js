@@ -96,7 +96,20 @@ import {
   purgeResidualTransactionsFromWorkspace,
   resetGlobalDashboardMetricsToZero,
   initializeDashboardStateForNewUser,
+  clearDashboardDomContainers,
+  resetDashboardDomToZeroAndEmpty,
+  resetDashboardDomOnLogout,
 } from './services/dashboard.js';
+import {
+  clearUserAndWorkspaceStorageKeys,
+  resetInMemoryStateOnLogout,
+  redirectToLoginModal,
+  cleanupOnboardingOnLogout,
+  performCompleteLogoutCleanup,
+  handleUnauthenticatedVisitorState,
+  signOutWithCompleteCleanup,
+  syncLogoutButtonVisibility,
+} from './services/auth.js';
 
 export {
   openImportModal,
@@ -123,6 +136,17 @@ export {
   purgeResidualTransactionsFromWorkspace,
   resetGlobalDashboardMetricsToZero,
   initializeDashboardStateForNewUser,
+  clearDashboardDomContainers,
+  resetDashboardDomToZeroAndEmpty,
+  resetDashboardDomOnLogout,
+  clearUserAndWorkspaceStorageKeys,
+  resetInMemoryStateOnLogout,
+  redirectToLoginModal,
+  cleanupOnboardingOnLogout,
+  performCompleteLogoutCleanup,
+  handleUnauthenticatedVisitorState,
+  signOutWithCompleteCleanup,
+  syncLogoutButtonVisibility,
 };
 
 export class FinanceAppController {
@@ -131,6 +155,9 @@ export class FinanceAppController {
     this.repo = new StorageRepository();
     this.authService = new FirebaseAuthProfileService();
     this.workspaceTransactionsUnsubscribe = null;
+    this.currentWorkspaceId = null;
+    this.accounts = [];
+    this.transactions = [];
     this.state = this.repo.loadState();
     if (this.state.settings.periodFilter !== 'custom') {
       this.state.settings.startDate = '';
@@ -206,9 +233,62 @@ export class FinanceAppController {
       this.handleAuthAndProfileUpdated(user, profile, 'init');
       this.profileView.renderProfileTab();
     } else {
-      this.renderAll();
+      this.handleUnauthenticatedState('init');
     }
     this.fetchServerAiStatus();
+  }
+
+  /**
+   * Returns true only when an authenticated user session is currently active.
+   */
+  isUserAuthenticated() {
+    const user = this.authService?.getCurrentUser?.() || null;
+    const profile = this.authService?.getCurrentProfile?.() || null;
+    const uid = String(
+      user?.uid || profile?.uid || this.state?.settings?.currentUid || ''
+    ).trim();
+    return Boolean((user || profile) && uid && uid !== 'local_default_user');
+  }
+
+  /**
+   * Enforces the unauthenticated visitor / post-logout state (`user === null`):
+   * - Resets in-memory state (`currentWorkspaceId = null`, `accounts = []`, `transactions = []`).
+   * - Cleans residual localStorage / sessionStorage keys.
+   * - Explicitly sets Dashboard KPIs to `"L 0.00"`, `"+ L 0.00"`, `"- L 0.00"`, `"0%"` and empties account/transaction DOM containers (`innerHTML = ''`).
+   * - Immediately redirects/opens the Login / Register modal (`#auth-dialog`).
+   */
+  handleUnauthenticatedState(reason = 'init') {
+    if (typeof this.workspaceTransactionsUnsubscribe === 'function') {
+      this.workspaceTransactionsUnsubscribe();
+      this.workspaceTransactionsUnsubscribe = null;
+    }
+
+    const prevWorkspaceId =
+      this.currentWorkspaceId ||
+      this.state?.settings?.workspaceId ||
+      this.authService?.currentWorkspaceId ||
+      null;
+
+    const cleanupResult = handleUnauthenticatedVisitorState({
+      wizard: this.onboardingWizard,
+      state: this.state,
+      app: this,
+      authService: this.authService,
+      profileView: this.profileView,
+      repo: this.repo,
+      workspaceId: prevWorkspaceId,
+      redirectToLogin: true,
+    });
+
+    this.profileView?.renderProfileTab?.();
+    this.renderAll();
+    resetDashboardDomToZeroAndEmpty();
+    redirectToLoginModal(
+      typeof document !== 'undefined' ? document : null,
+      this.profileView,
+      false
+    );
+    return cleanupResult;
   }
 
   /**
@@ -239,6 +319,8 @@ export class FinanceAppController {
 
       const isFirstTimeUser = shouldTriggerOnboarding(profile);
 
+      this.currentWorkspaceId = nextWorkspaceId;
+      this.state.currentWorkspaceId = nextWorkspaceId;
       this.state.settings.currentUid = nextUid;
       this.state.settings.personalViewMode = Boolean(profile.personalViewMode);
       this.state.settings.workspaceId = nextWorkspaceId;
@@ -300,6 +382,9 @@ export class FinanceAppController {
         }
       }
 
+      this.accounts = this.state.accounts;
+      this.transactions = this.state.transactions;
+
       if (profile.defaultCurrency) {
         this.state.settings.baseCurrency = profile.defaultCurrency;
         if (reason === 'login' || reason === 'profile-saved' || reason === 'init') {
@@ -321,18 +406,8 @@ export class FinanceAppController {
         ).catch(() => {});
       }
       this.syncWorkspaceSubscription(user, profile);
-    } else if (reason === 'logout') {
-      this.onboardingWizard?.resetOnLogout?.();
-      if (typeof this.workspaceTransactionsUnsubscribe === 'function') {
-        this.workspaceTransactionsUnsubscribe();
-        this.workspaceTransactionsUnsubscribe = null;
-      }
-      this.state.settings.currentUid = 'local_default_user';
-      this.state.settings.personalViewMode = false;
-      this.state.settings.workspaceId = 'ws_default';
-      this.state.settings.currencyFilter = 'all';
-      this.ledgerFilters.currencyFilter = 'all';
-      this.repo.saveState(this.state);
+    } else if (reason === 'logout' || (!user && !profile)) {
+      return this.handleUnauthenticatedState(reason || 'logout');
     }
     this.profileView?.renderProfileTab?.();
     this.renderAll();
@@ -2353,23 +2428,37 @@ export class FinanceAppController {
   }
 
   renderHeaderKpis(accountsSummary, analytics) {
-    const cur = analytics?.baseCurrency || this.state?.settings?.baseCurrency || 'HNL';
-    const safeIncome = Number(analytics?.totalIncome || 0);
-    const safeExpenses = Number(analytics?.totalExpense ?? analytics?.totalExpenses ?? 0);
-    const safeSavingsRate = calculateSafeSavingsRate(
-      safeIncome,
-      safeExpenses,
-      safeIncome > 0 || safeExpenses > 0
-    );
-    const labels = formatDashboardKpiLabels(
-      {
-        totalIncludedBalance: accountsSummary?.totalIncludedBalance || 0,
-        totalIncome: safeIncome,
-        totalExpenses: safeExpenses,
-        savingsRatePct: safeSavingsRate,
-      },
-      cur
-    );
+    const isAuth = this.isUserAuthenticated();
+    const cur = isAuth
+      ? analytics?.baseCurrency || this.state?.settings?.baseCurrency || 'HNL'
+      : 'HNL';
+    const safeIncome = isAuth ? Number(analytics?.totalIncome || 0) : 0;
+    const safeExpenses = isAuth
+      ? Number(analytics?.totalExpense ?? analytics?.totalExpenses ?? 0)
+      : 0;
+    const safeSavingsRate = isAuth
+      ? calculateSafeSavingsRate(
+          safeIncome,
+          safeExpenses,
+          safeIncome > 0 || safeExpenses > 0
+        )
+      : 0;
+    const labels = isAuth
+      ? formatDashboardKpiLabels(
+          {
+            totalIncludedBalance: accountsSummary?.totalIncludedBalance || 0,
+            totalIncome: safeIncome,
+            totalExpenses: safeExpenses,
+            savingsRatePct: safeSavingsRate,
+          },
+          cur
+        )
+      : {
+          patrimonioLabel: 'L 0.00',
+          ingresosLabel: '+ L 0.00',
+          gastosLabel: '- L 0.00',
+          tasaAhorroLabel: '0%',
+        };
 
     const netWorthEl = document.getElementById('kpi-total-balance');
     const incomeEl = document.getElementById('kpi-period-income');
@@ -2421,7 +2510,7 @@ export class FinanceAppController {
     const emptyStateBanner = document.getElementById('dashboard-empty-state-banner');
     const activeAccountsCount = filterActiveAccounts(this.state.accounts || []).length;
     if (emptyStateBanner) {
-      if (activeAccountsCount === 0) {
+      if (this.isUserAuthenticated() && activeAccountsCount === 0) {
         const archivedCount = filterArchivedAccounts(this.state.accounts || []).length;
         emptyStateBanner.classList.remove('is-hidden');
         emptyStateBanner.innerHTML = renderDashboardEmptyStateMarkup({
@@ -2623,16 +2712,26 @@ export class FinanceAppController {
     const accountsGrid = document.getElementById('accounts-grid');
     if (!accountsGrid) return;
 
-    const allAccounts = accountsSummary.accountsWithBalance || [];
-    const archivedCount = filterArchivedAccounts(allAccounts).length;
-    const visibleAccounts = filterAccountsForView(allAccounts, this.showArchivedAccounts);
-
     const archivedToggle = document.getElementById('toggle-show-archived-accounts');
     if (archivedToggle) {
       archivedToggle.checked = Boolean(this.showArchivedAccounts);
     }
 
     const archivedCountBadge = document.getElementById('archived-accounts-count-badge');
+
+    if (!this.isUserAuthenticated()) {
+      accountsGrid.innerHTML = '';
+      if (archivedCountBadge) {
+        archivedCountBadge.textContent = '(0)';
+        archivedCountBadge.classList.add('is-hidden');
+      }
+      return;
+    }
+
+    const allAccounts = accountsSummary.accountsWithBalance || [];
+    const archivedCount = filterArchivedAccounts(allAccounts).length;
+    const visibleAccounts = filterAccountsForView(allAccounts, this.showArchivedAccounts);
+
     if (archivedCountBadge) {
       archivedCountBadge.textContent = `(${archivedCount})`;
       archivedCountBadge.classList.toggle('is-hidden', archivedCount === 0);
@@ -2852,6 +2951,11 @@ export class FinanceAppController {
     const baseCur = this.state.settings.baseCurrency || 'USD';
     const ledgerMount = document.getElementById('ledger-groups-mount');
     if (!ledgerMount) return;
+
+    if (!this.isUserAuthenticated()) {
+      ledgerMount.innerHTML = '';
+      return;
+    }
 
     const hiddenBannerHtml =
       hiddenByDateCount > 0

@@ -257,6 +257,99 @@ export function renderDashboardMetricsToDom(
 }
 
 /**
+ * Limpia explícitamente (`innerHTML = ''`) los contenedores de tarjetas de cuentas
+ * y tablas/grupos de transacciones en el DOM.
+ *
+ * @param {Document|object|null} [docRef]
+ * @returns {Array<string>} IDs de los contenedores limpiados.
+ */
+export function clearDashboardDomContainers(
+  docRef = typeof document !== 'undefined' ? document : null
+) {
+  if (!docRef || typeof docRef.getElementById !== 'function') return [];
+
+  const containerIds = [
+    'accounts-grid',
+    'ledger-groups-mount',
+    'account-detail-tx-tbody',
+    'statement-items-tbody',
+    'import-account-accounts-tbody',
+    'import-account-tx-tbody',
+    'dashboard-empty-state-banner',
+  ];
+
+  const clearedIds = [];
+  for (const id of containerIds) {
+    const el = docRef.getElementById(id);
+    if (el) {
+      el.innerHTML = '';
+      if (id === 'dashboard-empty-state-banner') {
+        el.classList?.add?.('is-hidden');
+      }
+      clearedIds.push(id);
+    }
+  }
+
+  const archivedCountBadge = docRef.getElementById('archived-accounts-count-badge');
+  if (archivedCountBadge) {
+    archivedCountBadge.textContent = '(0)';
+    archivedCountBadge.classList?.add?.('is-hidden');
+  }
+
+  return clearedIds;
+}
+
+/**
+ * Resetea explícitamente los elementos de la interfaz del Dashboard a cero/vacío en el DOM
+ * al cerrar sesión (`signOut(auth)`) o para visitantes no autenticados (`user === null`):
+ * - Patrimonios/Cuentas (`#kpi-total-balance`): `"L 0.00"`
+ * - Ingresos del Período (`#kpi-period-income`): `"+ L 0.00"`
+ * - Gastos del Período (`#kpi-period-expense`): `"- L 0.00"`
+ * - Tasa de Ahorro (`#kpi-savings-rate`): `"0%"`
+ * - Tablas de transacciones y tarjetas de cuentas: Limpiar contenedor (`innerHTML = ''`).
+ *
+ * @param {Document|object|null} [docRef]
+ * @param {string} [currencyCode='HNL']
+ */
+export function resetDashboardDomToZeroAndEmpty(
+  docRef = typeof document !== 'undefined' ? document : null,
+  currencyCode = 'HNL'
+) {
+  const validCurrency = currencyCode === 'HNL' || !CURRENCIES[currencyCode] ? 'HNL' : currencyCode;
+  const labels =
+    validCurrency === 'HNL'
+      ? {
+          patrimonioLabel: 'L 0.00',
+          ingresosLabel: '+ L 0.00',
+          gastosLabel: '- L 0.00',
+          tasaAhorroLabel: '0%',
+        }
+      : formatDashboardKpiLabels(ZERO_DASHBOARD_METRICS, validCurrency);
+
+  if (docRef && typeof docRef.getElementById === 'function') {
+    const netWorthEl = docRef.getElementById('kpi-total-balance');
+    const incomeEl = docRef.getElementById('kpi-period-income');
+    const expenseEl = docRef.getElementById('kpi-period-expense');
+    const savingsRateEl = docRef.getElementById('kpi-savings-rate');
+
+    if (netWorthEl) netWorthEl.textContent = labels.patrimonioLabel;
+    if (incomeEl) incomeEl.textContent = labels.ingresosLabel;
+    if (expenseEl) expenseEl.textContent = labels.gastosLabel;
+    if (savingsRateEl) savingsRateEl.textContent = labels.tasaAhorroLabel;
+  }
+
+  const clearedContainers = clearDashboardDomContainers(docRef);
+
+  return {
+    ...labels,
+    clearedContainers,
+    containersCleared: true,
+  };
+}
+
+export const resetDashboardDomOnLogout = resetDashboardDomToZeroAndEmpty;
+
+/**
  * Función de recálculo seguro de métricas globales del Dashboard (`recalculateDashboardMetrics`).
  * - Filtra transacciones o cuentas residuales/demostración cuando hay un `workspaceId` de usuario activo.
  * - Si no existen transacciones registradas por el usuario, retorna `0` en todos los sumatorios

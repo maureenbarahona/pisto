@@ -252,10 +252,18 @@ export async function handleRequest(req, res) {
       const imageBase64 = String(body.imageBase64 || '').trim();
       const mimeType = String(body.mimeType || 'image/png').trim();
       const ocrTextFallback = String(body.ocrTextFallback || '').trim();
+      const fewShotPrompt =
+        typeof body.fewShotPrompt === 'string' && body.fewShotPrompt.trim()
+          ? body.fewShotPrompt.trim()
+          : ACCOUNT_EXTRACTOR_SYSTEM_PROMPT;
 
       if (apiKey && imageBase64 && typeof fetch === 'function') {
         try {
-          const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+          const requestedModel =
+            typeof body.model === 'string' && body.model.trim()
+              ? body.model.trim()
+              : 'gemini-2.5-flash';
+          const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(requestedModel)}:generateContent?key=${encodeURIComponent(apiKey)}`;
           const aiRes = await fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -263,7 +271,7 @@ export async function handleRequest(req, res) {
               contents: [
                 {
                   parts: [
-                    { text: ACCOUNT_EXTRACTOR_SYSTEM_PROMPT },
+                    { text: fewShotPrompt },
                     {
                       inlineData: {
                         mimeType,
@@ -289,7 +297,7 @@ export async function handleRequest(req, res) {
               return sendJson(res, 200, {
                 ok: true,
                 data: validated,
-                source: 'genkit:gemini-1.5-flash',
+                source: `genkit:${requestedModel}`,
               });
             }
           }

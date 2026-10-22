@@ -38,6 +38,44 @@ import {
   learnAdaptiveAccountPattern,
   getLearnedBankPatterns,
   inferAccountsFromUnstructuredText,
+  BANK_TEMPLATES_COLLECTION,
+  BANK_TEMPLATES_LOCAL_STORE,
+  BANK_TEMPLATES_IDB_NAME,
+  BANK_TEMPLATES_STORAGE_MIRROR_KEY,
+  DEFAULT_BANK_TEMPLATES,
+  normalizeTemplateCurrency,
+  buildBankTemplateId,
+  normalizeBankTemplate,
+  openBankTemplatesIndexedDb,
+  getLocalBankTemplatesSync,
+  saveTemplateToLocalIndexedDb,
+  getAllLocalBankTemplates,
+  fetchBankTemplatesFromFirestore,
+  saveBankTemplate,
+  buildFewShotPromptWithTemplates,
+  computeLayoutFingerprint,
+  matchBankTemplateFromText,
+  applyTemplateExtractionRules,
+  runLocalOcrEngine,
+  extractOfflineWithLearnedTemplates,
+  hasUserEditedExtractedAccounts,
+  deriveTemplateKeywords,
+  learnBankTemplateFromConfirmation,
+  GEMINI_VISION_MODEL,
+  GEMINI_VISION_FALLBACK_MODEL,
+  DEFAULT_OCR_CONFIDENCE_THRESHOLD,
+  BANK_PRODUCT_TYPES,
+  sanitizeNumericAmount,
+  sanitizeNumericAmountString,
+  classifyBankProductType,
+  HYBRID_ACCOUNT_ITEM_JSON_SCHEMA,
+  HYBRID_TRANSACTION_ITEM_JSON_SCHEMA,
+  HYBRID_EXTRACTOR_JSON_SCHEMA,
+  HYBRID_EXTRACTOR_SYSTEM_PROMPT,
+  runTesseractLocalOcr,
+  parseMultiProductBankText,
+  invokeGemini25FlashFallback,
+  extractBankDataHybrid,
 } from '../services/accountExtractor.js';
 import {
   BatchAccountsModal,
@@ -59,8 +97,10 @@ import {
   checkAccountTransactionDuplicate,
   resolveDuplicateTransactionAction,
 } from '../services/firestore.js';
+import { HONDURAS_FINANCIAL_ENTITIES } from '../../../public/js/domain/models.js';
 
 export {
+  HONDURAS_FINANCIAL_ENTITIES,
   useAccountAgentADK,
   ADK_INIT_LOG_MESSAGE,
   ADK_DEMO_ACCOUNT_DATA,
@@ -83,28 +123,198 @@ export {
   learnAdaptiveAccountPattern,
   getLearnedBankPatterns,
   inferAccountsFromUnstructuredText,
+  BANK_TEMPLATES_COLLECTION,
+  BANK_TEMPLATES_LOCAL_STORE,
+  BANK_TEMPLATES_IDB_NAME,
+  BANK_TEMPLATES_STORAGE_MIRROR_KEY,
+  DEFAULT_BANK_TEMPLATES,
+  normalizeTemplateCurrency,
+  buildBankTemplateId,
+  normalizeBankTemplate,
+  openBankTemplatesIndexedDb,
+  getLocalBankTemplatesSync,
+  saveTemplateToLocalIndexedDb,
+  getAllLocalBankTemplates,
+  fetchBankTemplatesFromFirestore,
+  saveBankTemplate,
+  buildFewShotPromptWithTemplates,
+  computeLayoutFingerprint,
+  matchBankTemplateFromText,
+  applyTemplateExtractionRules,
+  runLocalOcrEngine,
+  extractOfflineWithLearnedTemplates,
+  hasUserEditedExtractedAccounts,
+  deriveTemplateKeywords,
+  learnBankTemplateFromConfirmation,
+  GEMINI_VISION_MODEL,
+  GEMINI_VISION_FALLBACK_MODEL,
+  DEFAULT_OCR_CONFIDENCE_THRESHOLD,
+  BANK_PRODUCT_TYPES,
+  sanitizeNumericAmount,
+  sanitizeNumericAmountString,
+  classifyBankProductType,
+  HYBRID_ACCOUNT_ITEM_JSON_SCHEMA,
+  HYBRID_TRANSACTION_ITEM_JSON_SCHEMA,
+  HYBRID_EXTRACTOR_JSON_SCHEMA,
+  HYBRID_EXTRACTOR_SYSTEM_PROMPT,
+  runTesseractLocalOcr,
+  parseMultiProductBankText,
+  invokeGemini25FlashFallback,
+  extractBankDataHybrid,
   BatchAccountsModal,
   formatBatchAccountRowSummary,
   renderBatchAccountsRowsMarkup,
 };
 
+export const HONDURAS_BANK_CATALOG_GROUPS = Object.freeze([
+  Object.freeze({
+    label: 'Bancos de Honduras (CNBS)',
+    options: Object.freeze([
+      'Banco Atlántida',
+      'BAC Credomatic',
+      'BAC Credomatic Honduras',
+      'Banco Ficohsa',
+      'Banpaís (Banco del País)',
+      'Banco de Occidente',
+      'Banco Davivienda Honduras',
+      'Davivienda',
+      'Banco Lafise Honduras',
+      'Banco Promerica',
+      'Banco Promerica Honduras',
+      'Promerica',
+      'Ficensa (Banco Financiera Comercial Hondureña)',
+      'Banco Azteca Honduras',
+      'Banrural Honduras',
+      'Banco Popular',
+      'Banco Hondureño del Café (Banhcafé)',
+      'Banco de los Trabajadores (Bantrab)',
+      'Banhprovi (Banco Hondureño para la Producción y la Vivienda)',
+      'Banadesa (Banco Nacional de Desarrollo Agrícola)',
+    ]),
+  }),
+  Object.freeze({
+    label: 'Cooperativas de Ahorro y Crédito de Honduras (CONSUCOOP)',
+    options: HONDURAS_FINANCIAL_ENTITIES.cooperativas,
+  }),
+  Object.freeze({
+    label: 'Financieras y Billeteras Digitales (Honduras)',
+    options: HONDURAS_FINANCIAL_ENTITIES.financierasYBilleteras,
+  }),
+]);
+
 export const HONDURAS_BANKS_LIST = Object.freeze([
-  'Banco Atlántida',
-  'BAC Credomatic',
-  'Banco Ficohsa',
-  'Banpaís (Banco del País)',
-  'Banco de Occidente',
-  'Davivienda',
-  'Promerica',
-  'Otro / Personalizado',
+  ...new Set([
+    ...HONDURAS_BANK_CATALOG_GROUPS.flatMap((group) => group.options),
+    ...HONDURAS_FINANCIAL_ENTITIES.bancos,
+    ...HONDURAS_FINANCIAL_ENTITIES.cooperativas,
+    ...HONDURAS_FINANCIAL_ENTITIES.financierasYBilleteras,
+    '— Ninguna / Efectivo / Otra —',
+    'Otro / Personalizado',
+  ]),
 ]);
 
 const BANK_UI_GARBAGE_REGEX =
   /[©®™=<>|_~^•*«»]|--|\b\d{1,2}:\d{2}\b|\b(?:4G|5G|LTE|WIFI|VOLTE)\b|\bdetalle\s+de\s+cuenta\b|\bbal\s*all\b|\bsaldo\s+disponible\b|\bconsulta\s+de\b/i;
 
+/**
+ * Resuelve la opción del catálogo completo de Entidades Bancarias de Honduras que corresponde
+ * al banco detectado por la IA o seleccionado por el usuario.
+ * @param {string} rawBank
+ * @returns {string}
+ */
+export function resolveHondurasCatalogBankOption(rawBank) {
+  const trimmed = String(rawBank ?? '').trim();
+  if (!trimmed) return HONDURAS_BANKS_LIST[0];
+
+  const exactMatch = HONDURAS_BANKS_LIST.find(
+    (b) => b.toLowerCase() === trimmed.toLowerCase()
+  );
+  if (exactMatch) return exactMatch;
+
+  const lower = trimmed.toLowerCase();
+  if (lower.includes('atlantida') || lower.includes('atlántida')) return 'Banco Atlántida';
+  if (/\bbac\b/.test(lower) || lower.includes('credomatic')) {
+    return /honduras/i.test(trimmed) ? 'BAC Credomatic Honduras' : 'BAC Credomatic';
+  }
+  if (lower.includes('ficohsa')) return 'Banco Ficohsa';
+  if (
+    lower.includes('banpais') ||
+    lower.includes('banpaís') ||
+    lower.includes('banco del pais') ||
+    lower.includes('banco del país')
+  ) {
+    return 'Banpaís (Banco del País)';
+  }
+  if (lower.includes('occidente')) return 'Banco de Occidente';
+  if (lower.includes('davivienda')) {
+    return /banco\s+davivienda/i.test(trimmed) ? 'Banco Davivienda Honduras' : 'Davivienda';
+  }
+  if (lower.includes('lafise')) return 'Banco Lafise Honduras';
+  if (lower.includes('promerica')) {
+    if (/honduras/i.test(trimmed)) return 'Banco Promerica Honduras';
+    return /banco\s+promerica/i.test(trimmed) ? 'Banco Promerica' : 'Promerica';
+  }
+  if (lower.includes('ficensa')) return 'Ficensa (Banco Financiera Comercial Hondureña)';
+  if (lower.includes('azteca')) return 'Banco Azteca Honduras';
+  if (lower.includes('banrural')) return 'Banrural Honduras';
+  if (lower.includes('popular')) return 'Banco Popular';
+  if (lower.includes('banhcafe') || lower.includes('banhcafé')) {
+    return 'Banco Hondureño del Café (Banhcafé)';
+  }
+  if (lower.includes('bantrab') || lower.includes('trabajadores')) {
+    return 'Banco de los Trabajadores (Bantrab)';
+  }
+  if (lower.includes('banhprovi')) {
+    return 'Banhprovi (Banco Hondureño para la Producción y la Vivienda)';
+  }
+  if (lower.includes('banadesa')) {
+    return 'Banadesa (Banco Nacional de Desarrollo Agrícola)';
+  }
+
+  const partialCatalogMatch = HONDURAS_BANKS_LIST.find(
+    (b) =>
+      b !== 'Otro / Personalizado' &&
+      b !== '— Ninguna / Efectivo / Otra —' &&
+      b.toLowerCase().includes(lower)
+  );
+  if (partialCatalogMatch) return partialCatalogMatch;
+
+  return trimmed;
+}
+
 export function cleanBankName(rawText, contextHint = '') {
   const raw = String(rawText ?? '').trim();
   const hint = String(contextHint ?? '').trim();
+
+  // 1. Si el valor es una opción del catálogo de Entidades Bancarias de Honduras o fue elegido explícitamente, conservarlo sin que `contextHint` lo bloquee
+  if (raw && !/\r?\n/.test(raw) && !BANK_UI_GARBAGE_REGEX.test(raw) && !isMobileUiNoiseLine(raw)) {
+    const exactInCatalog = HONDURAS_BANKS_LIST.find(
+      (b) =>
+        b !== 'Otro / Personalizado' &&
+        b.toLowerCase() === raw.toLowerCase()
+    );
+    if (exactInCatalog) {
+      return exactInCatalog;
+    }
+
+    const localTemplates = getLocalBankTemplatesSync();
+    for (const tpl of localTemplates) {
+      if (tpl.bankName && raw.toLowerCase() === tpl.bankName.toLowerCase()) {
+        return tpl.bankName;
+      }
+    }
+
+    if (
+      raw !== hint &&
+      raw.toLowerCase() !== 'banco general' &&
+      /\b(?:banco|cooperativa|financiera|billetera|credomatic|banpa[ií]s|ficohsa|davivienda|promerica|lafise|banrural|banhcaf[eé]|banhprovi|banadesa|bantrab|ficensa|azteca|popular|odef|tigo\s+money|tengo|dilo|kash)\b/i.test(
+        raw
+      )
+    ) {
+      return raw.replace(/\s+/g, ' ').trim();
+    }
+  }
+
   const combined = `${raw} ${hint}`.toLowerCase();
 
   if (combined.includes('atlantida') || combined.includes('atlántida')) {
@@ -131,7 +341,7 @@ export function cleanBankName(rawText, contextHint = '') {
     return 'Davivienda';
   }
   if (combined.includes('promerica')) {
-    return 'Promerica';
+    return /banco\s+promerica/i.test(`${raw} ${hint}`) ? 'Banco Promerica' : 'Promerica';
   }
 
   if (/\bsos\b/i.test(combined) || /\bcuenta\s+de\s+ahorro\s+sos\b/i.test(combined)) {
@@ -188,6 +398,56 @@ function escapeHtmlAttr(value) {
     .replace(/"/g, '&quot;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+/**
+ * Renderiza SIEMPRE el catálogo completo de bancos y entidades financieras de Honduras
+ * (idéntico a "Entidad Bancaria" en el modal "Modificar Cuenta o Meta"), marcando como
+ * `selected` el banco detectado por la IA o elegido por el usuario.
+ *
+ * @param {string} [selectedBank='']
+ * @returns {string}
+ */
+export function renderBankSelectOptionsMarkup(selectedBank = '') {
+  const rawTarget = String(selectedBank ?? '').trim();
+  const resolvedTarget = rawTarget
+    ? resolveHondurasCatalogBankOption(rawTarget)
+    : HONDURAS_BANKS_LIST[0];
+
+  const allCatalogItems = HONDURAS_BANK_CATALOG_GROUPS.flatMap((g) => g.options);
+  const isInStandardGroups = allCatalogItems.some(
+    (opt) => opt.toLowerCase() === resolvedTarget.toLowerCase()
+  );
+  const isSpecialOption =
+    resolvedTarget === '— Ninguna / Efectivo / Otra —' ||
+    resolvedTarget === 'Otro / Personalizado';
+
+  const customOptionHtml =
+    resolvedTarget && !isInStandardGroups && !isSpecialOption
+      ? `<optgroup label="Banco Detectado / Personalizado"><option value="${escapeHtmlAttr(resolvedTarget)}" selected>${escapeHtmlAttr(resolvedTarget)}</option></optgroup>`
+      : '';
+
+  const groupsHtml = HONDURAS_BANK_CATALOG_GROUPS.map((group) => {
+    const optionsHtml = group.options
+      .map((bank) => {
+        const isSelected =
+          (isInStandardGroups && bank.toLowerCase() === resolvedTarget.toLowerCase()) ||
+          (!rawTarget && bank === HONDURAS_BANKS_LIST[0]);
+        return `<option value="${escapeHtmlAttr(bank)}"${isSelected ? ' selected' : ''}>${escapeHtmlAttr(bank)}</option>`;
+      })
+      .join('');
+    return `<optgroup label="${escapeHtmlAttr(group.label)}">${optionsHtml}</optgroup>`;
+  }).join('');
+
+  const noneSelected = resolvedTarget === '— Ninguna / Efectivo / Otra —';
+  const customSelected = resolvedTarget === 'Otro / Personalizado';
+
+  return [
+    `<option value="— Ninguna / Efectivo / Otra —"${noneSelected ? ' selected' : ''}>— Ninguna / Efectivo / Otra —</option>`,
+    customOptionHtml,
+    groupsHtml,
+    `<option value="Otro / Personalizado"${customSelected ? ' selected' : ''}>Otro / Personalizado</option>`,
+  ].join('');
 }
 
 let sharedImportModalInstance = null;
@@ -382,6 +642,9 @@ export class ImportAccountModal {
   constructor(options = {}) {
     this.options = options;
     this.currentExtracted = null;
+    this.initialExtractedSnapshot = null;
+    this.learnFormatEnabled = true;
+    this.lastLearnedTemplate = null;
     this.isImportAccountModalOpen = false;
     this.isProcessing = false;
     this.matchedExistingAccount = null;
@@ -414,6 +677,15 @@ export class ImportAccountModal {
 
   get accounts() {
     return this.accountsList;
+  }
+
+  get transactionsList() {
+    if (Array.isArray(this.currentExtracted?.transactionsList)) {
+      return this.currentExtracted.transactionsList;
+    }
+    return Array.isArray(this.currentExtracted?.detectedTransactions)
+      ? this.currentExtracted.detectedTransactions
+      : [];
   }
 
   init() {
@@ -567,10 +839,18 @@ export class ImportAccountModal {
         bankInput.value = selectedVal;
       }
       if (this.currentExtracted) {
-        const nextBank = this.readEditedBankName();
+        const nextBank =
+          selectedVal && selectedVal !== 'Otro / Personalizado'
+            ? cleanBankName(selectedVal)
+            : this.readEditedBankName();
+        const prevPrimaryBank = this.currentExtracted.bankName;
         this.currentExtracted.bankName = nextBank;
-        if (this.currentExtracted.accounts?.[0]) {
-          this.currentExtracted.accounts[0].bankName = nextBank;
+        if (Array.isArray(this.currentExtracted.accounts)) {
+          this.currentExtracted.accounts.forEach((acc, idx) => {
+            if (idx === 0 || !acc.bankName || acc.bankName === prevPrimaryBank) {
+              acc.bankName = nextBank;
+            }
+          });
           this.renderAccountsListTable();
         }
       }
@@ -583,7 +863,9 @@ export class ImportAccountModal {
         const matchedOption = HONDURAS_BANKS_LIST.find(
           (b) => b !== 'Otro / Personalizado' && b.toLowerCase() === typed.toLowerCase()
         );
-        bankSelect.value = matchedOption || 'Otro / Personalizado';
+        if (matchedOption) {
+          bankSelect.value = matchedOption;
+        }
       }
       if (this.currentExtracted) {
         const nextBank = typed || HONDURAS_BANKS_LIST[0];
@@ -603,27 +885,12 @@ export class ImportAccountModal {
     });
 
     addAccountRowBtn?.addEventListener('click', () => {
-      if (!this.currentExtracted) return;
-      this.syncAccountsFromDom();
-      const defaultBank = this.currentExtracted.bankName || HONDURAS_BANKS_LIST[0];
-      const newAccItem = {
-        id: `imp_acc_manual_${Date.now().toString(36)}`,
-        bankName: defaultBank,
-        accountType: 'Cuenta de Ahorro',
-        accountNumber: '',
-        currency: 'HNL',
-        currentBalance: 0,
-        isCreditCard: false,
-        status: 'Activa',
-        selected: true,
-      };
-      this.currentExtracted.accounts.push(newAccItem);
-      this.currentExtracted.accountsList = this.currentExtracted.accounts;
-      this.currentExtracted.accountsArray = this.currentExtracted.accounts;
-      this.syncPrimaryInputsFromFirstAccount();
-      this.renderAccountsListTable();
-      this.syncSelectAllAccountsCheckboxState();
-      this.syncSummaryBanner();
+      this.addAccountRow();
+    });
+
+    const learnFormatCheckbox = document.getElementById('import-account-learn-format-checkbox');
+    learnFormatCheckbox?.addEventListener('change', () => {
+      this.learnFormatEnabled = Boolean(learnFormatCheckbox.checked);
     });
 
     const handleAccountRowMutation = (e) => {
@@ -889,18 +1156,35 @@ export class ImportAccountModal {
     return this.renderPreview(data, source);
   }
 
-  populateBankOptions() {
+  /**
+   * Renderiza SIEMPRE el catálogo completo de bancos y entidades financieras de Honduras
+   * (idéntico a "Entidad Bancaria" en el modal "Modificar Cuenta o Meta"), marcando como
+   * `selected` el banco detectado por la IA o elegido por el usuario.
+   *
+   * @param {string} [selectedBank='']
+   * @returns {string}
+   */
+  renderBankSelectOptionsMarkup(selectedBank = '') {
+    return renderBankSelectOptionsMarkup(selectedBank);
+  }
+
+  populateBankOptions(selectedBank = '') {
     if (typeof document === 'undefined') return;
     const bankSelect = document.getElementById('import-acc-bank-select');
     const datalist = document.getElementById('import-acc-bank-datalist');
+    const targetBank =
+      selectedBank ||
+      this.currentExtracted?.accounts?.[0]?.bankName ||
+      this.currentExtracted?.bankName ||
+      HONDURAS_BANKS_LIST[0];
+    const resolvedBank = resolveHondurasCatalogBankOption(targetBank);
 
-    if (bankSelect && bankSelect.options.length === 0) {
-      bankSelect.innerHTML = HONDURAS_BANKS_LIST.map(
-        (bank) => `<option value="${escapeHtmlAttr(bank)}">${escapeHtmlAttr(bank)}</option>`
-      ).join('');
+    if (bankSelect) {
+      bankSelect.innerHTML = this.renderBankSelectOptionsMarkup(resolvedBank);
+      bankSelect.value = resolvedBank;
     }
 
-    if (datalist && datalist.children.length === 0) {
+    if (datalist) {
       datalist.innerHTML = HONDURAS_BANKS_LIST.filter((b) => b !== 'Otro / Personalizado')
         .map((bank) => `<option value="${escapeHtmlAttr(bank)}"></option>`)
         .join('');
@@ -1035,6 +1319,13 @@ export class ImportAccountModal {
                   <tbody id="import-account-accounts-tbody"></tbody>
                 </table>
               </div>
+
+              <div style="margin-top: 0.5rem; padding: 0.55rem 0.85rem; border-radius: 10px; background: var(--bg-elevated); border: 1px dashed var(--surface-border); display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; flex-wrap: wrap;">
+                <label style="display: inline-flex; align-items: center; gap: 0.45rem; font-size: 0.8125rem; cursor: pointer;">
+                  <input type="checkbox" id="import-account-learn-format-checkbox" checked />
+                  <span>🧠 Aprender sobre este Formato (guardar patrón ajustado en <code>bank_templates</code> para reconocimiento instantáneo)</span>
+                </label>
+              </div>
             </div>
 
             <!-- Campos de Cuenta Principal (sincronizados con la primera cuenta para compatibilidad directa) -->
@@ -1138,7 +1429,7 @@ export class ImportAccountModal {
               Cancelar
             </button>
             <button type="button" class="btn-primary" id="btn-confirm-import-account" disabled>
-              Confirmar y Crear Cuenta
+              Confirmar y Crear 1 Cuenta
             </button>
           </div>
         </div>
@@ -1245,22 +1536,78 @@ export class ImportAccountModal {
           // preserve initial ocrTextFallback if any
         }
       }
+      if (!ocrTextFallback) {
+        try {
+          const localOcrRes = await runTesseractLocalOcr(file, {
+            ocrReader: this.options.ocrReader,
+            tesseractWorker: this.options.tesseractWorker,
+            onProgress: (status) => {
+              if (loadingText && status) loadingText.textContent = status;
+            },
+          });
+          if (localOcrRes?.text) {
+            ocrTextFallback = String(localOcrRes.text).trim();
+          }
+        } catch {
+          // fallback
+        }
+      }
       this.lastOcrTextFallback = ocrTextFallback;
 
       const ctx = this.options.getImportContext?.() || {};
-      const adkResult = await this.agentADK.analyzeFile(file, {
-        apiKey: ctx.apiKey,
-        ocrTextFallback,
-        fetchImpl: ctx.fetchImpl,
-      });
+      let extractionData = null;
+      let extractionSource = '';
+      let isDemoFallback = false;
+      let statusMessage = '';
 
-      const sanitizedData = this.sanitizeExtractedData(adkResult.data, ocrTextFallback);
+      try {
+        const hybridResult = await extractBankDataHybrid(file, {
+          apiKey: ctx.apiKey,
+          ocrTextFallback,
+          ocrReader: this.options.ocrReader || ctx.ocrReader,
+          tesseractWorker: this.options.tesseractWorker || ctx.tesseractWorker,
+          fetchImpl: ctx.fetchImpl,
+          storage: ctx.storage,
+          indexedDb: ctx.indexedDb,
+          firestoreDb: ctx.firestoreDb,
+          firestoreModule: ctx.firestoreModule,
+        });
+        if (
+          hybridResult &&
+          Array.isArray(hybridResult.accountsList) &&
+          hybridResult.accountsList.some(
+            (a) => Boolean(a.accountNumber) || Number(a.currentBalance) > 0
+          )
+        ) {
+          extractionData = hybridResult;
+          extractionSource = hybridResult.source || 'hybrid-ocr-extractor';
+          if (hybridResult.ocrText && !this.lastOcrTextFallback) {
+            this.lastOcrTextFallback = hybridResult.ocrText;
+          }
+        }
+      } catch {
+        // Fallback al Agente ADK
+      }
+
+      if (!extractionData) {
+        const adkResult = await this.agentADK.analyzeFile(file, {
+          apiKey: ctx.apiKey,
+          ocrTextFallback,
+          fetchImpl: ctx.fetchImpl,
+        });
+        extractionData = adkResult.data;
+        extractionSource = adkResult.source;
+        isDemoFallback = Boolean(adkResult.isDemoFallback);
+        statusMessage = adkResult.message || '';
+      }
+
+      const sanitizedData = this.sanitizeExtractedData(extractionData, this.lastOcrTextFallback);
       this.currentExtracted = sanitizedData;
 
       this.reconcileAccountAndTransactionDuplicates();
-      this.renderPreview(this.currentExtracted, adkResult.source);
-      if (adkResult.isDemoFallback) {
-        this.options.showToast?.(adkResult.message);
+      this.renderPreview(this.currentExtracted, extractionSource);
+      if (isDemoFallback && statusMessage) {
+        this.options.showToast?.(statusMessage);
       }
     } catch {
       const fallbackResult = this.agentADK.loadDemoFallback();
@@ -1290,6 +1637,15 @@ export class ImportAccountModal {
       item.bankName = cleanBankName(value, item.accountType);
     } else if (field === 'accountType') {
       item.accountType = String(value ?? '').trim() || 'Cuenta de Ahorro';
+      const classification = classifyBankProductType(item.accountType, item.accountNumber);
+      item.productType = classification.productType;
+      item.isCreditCard = classification.isCreditCard;
+      item.isLoan = classification.isLoan;
+    } else if (field === 'productType') {
+      const classification = classifyBankProductType(String(value ?? ''), item.accountNumber);
+      item.productType = classification.productType;
+      item.isCreditCard = classification.isCreditCard;
+      item.isLoan = classification.isLoan;
     } else if (field === 'accountNumber') {
       item.accountNumber = String(value ?? '').trim();
     } else if (field === 'currency') {
@@ -1298,15 +1654,27 @@ export class ImportAccountModal {
       item.currentBalance = cleanAmount(value);
     } else if (field === 'isCreditCard') {
       item.isCreditCard = Boolean(value === true || value === 'true');
+      if (item.isCreditCard) {
+        item.productType = BANK_PRODUCT_TYPES.CREDIT_CARD;
+        item.isLoan = false;
+      }
+    } else if (field === 'isLoan') {
+      item.isLoan = Boolean(value === true || value === 'true');
+      if (item.isLoan) {
+        item.productType = BANK_PRODUCT_TYPES.LOAN;
+        item.isCreditCard = false;
+      }
     }
 
     if (idx === 0) {
       this.currentExtracted.bankName = item.bankName;
       this.currentExtracted.accountType = item.accountType;
+      this.currentExtracted.productType = item.productType;
       this.currentExtracted.accountNumber = item.accountNumber;
       this.currentExtracted.currency = item.currency;
       this.currentExtracted.currentBalance = item.currentBalance;
       this.currentExtracted.isCreditCard = Boolean(item.isCreditCard);
+      this.currentExtracted.isLoan = Boolean(item.isLoan);
       this.syncPrimaryInputsFromFirstAccount();
       this.reconcileAccountAndTransactionDuplicates();
     }
@@ -1324,6 +1692,44 @@ export class ImportAccountModal {
     }
     this.renderAccountsListTable();
     return updated;
+  }
+
+  /**
+   * ➕ Agrega una nueva fila editable a `accountsList` (`this.currentExtracted.accounts`).
+   * @param {object} [accountData={}]
+   */
+  addAccountRow(accountData = {}) {
+    if (!this.currentExtracted) {
+      this.currentExtracted = this.sanitizeExtractedData({
+        bankName: accountData.bankName || HONDURAS_BANKS_LIST[0],
+        accountsList: [],
+      });
+    } else {
+      this.syncAccountsFromDom();
+    }
+
+    const defaultBank =
+      accountData.bankName || this.currentExtracted.bankName || HONDURAS_BANKS_LIST[0];
+    const newAccItem = {
+      id: accountData.id || `imp_acc_manual_${Date.now().toString(36)}`,
+      bankName: cleanBankName(defaultBank, accountData.accountType || ''),
+      accountType: String(accountData.accountType || 'Cuenta de Ahorro').trim(),
+      accountNumber: String(accountData.accountNumber || '').trim(),
+      currency: accountData.currency === 'USD' ? 'USD' : 'HNL',
+      currentBalance: cleanAmount(accountData.currentBalance ?? 0),
+      isCreditCard: Boolean(accountData.isCreditCard),
+      status: accountData.status || 'Activa',
+      selected: accountData.selected !== false,
+    };
+
+    this.currentExtracted.accounts.push(newAccItem);
+    this.currentExtracted.accountsList = this.currentExtracted.accounts;
+    this.currentExtracted.accountsArray = this.currentExtracted.accounts;
+    this.syncPrimaryInputsFromFirstAccount();
+    this.renderAccountsListTable();
+    this.syncSelectAllAccountsCheckboxState();
+    this.syncSummaryBanner();
+    return newAccItem;
   }
 
   /**
@@ -1391,13 +1797,15 @@ export class ImportAccountModal {
     const currencySelect = document.getElementById('import-acc-currency-select');
     const balanceInput = document.getElementById('import-acc-balance-input');
 
-    const resolvedBank = cleanBankName(first.bankName || this.currentExtracted.bankName, first.accountType);
+    const resolvedBank = cleanBankName(
+      first.bankName || this.currentExtracted.bankName,
+      first.accountType
+    );
     if (bankInput) bankInput.value = resolvedBank;
     if (bankSelect) {
-      const matchingOption = HONDURAS_BANKS_LIST.find(
-        (b) => b !== 'Otro / Personalizado' && b.toLowerCase() === resolvedBank.toLowerCase()
-      );
-      bankSelect.value = matchingOption || 'Otro / Personalizado';
+      const catalogOption = resolveHondurasCatalogBankOption(resolvedBank);
+      bankSelect.innerHTML = this.renderBankSelectOptionsMarkup(catalogOption);
+      bankSelect.value = catalogOption;
     }
     if (typeInput) typeInput.value = first.accountType || 'Cuenta de Ahorro';
     if (numberInput) numberInput.value = first.accountNumber || '';
@@ -1521,7 +1929,14 @@ export class ImportAccountModal {
       `${cleanedAccountType} ${contextHint}`
     );
 
-    const cleanedTransactions = (rawData?.detectedTransactions || []).map((tx, idx) => ({
+    const rawTransactionsSource =
+      Array.isArray(rawData?.detectedTransactions) && rawData.detectedTransactions.length > 0
+        ? rawData.detectedTransactions
+        : Array.isArray(rawData?.transactionsList)
+          ? rawData.transactionsList
+          : [];
+
+    const cleanedTransactions = rawTransactionsSource.map((tx, idx) => ({
       id: tx.id || `imp_tx_${idx}_${Date.now().toString(36)}`,
       date: normalizeScanDateToIso(tx.date),
       concept:
@@ -1547,29 +1962,62 @@ export class ImportAccountModal {
             : null;
 
     const normalizedAccounts = sourceAccountsList
-      ? sourceAccountsList.map((item, idx) => ({
-          id: item?.id || `imp_acc_${idx}_${Date.now().toString(36)}`,
-          bankName: cleanBankName(item?.bankName || cleanedBank, item?.accountType || cleanedAccountType),
-          accountType: cleanAccountType(item?.accountType),
-          accountNumber: String(item?.accountNumber ?? '').trim(),
-          currency: item?.currency === 'USD' ? 'USD' : 'HNL',
-          currentBalance: cleanAmount(item?.currentBalance ?? 0),
-          isCreditCard: Boolean(item?.isCreditCard),
-          status: item?.status || 'Activa',
-          selected: item?.selected !== false,
-        }))
+      ? sourceAccountsList.map((item, idx) => {
+          const itemType = cleanAccountType(item?.accountType);
+          const classification = classifyBankProductType(
+            `${itemType} ${item?.productType || ''} ${item?.isLoan ? 'Préstamo' : ''} ${item?.isCreditCard ? 'Tarjeta de Crédito' : ''}`,
+            item?.accountNumber
+          );
+          const isLoan = Boolean(item?.isLoan || classification.isLoan);
+          const isCard = !isLoan && Boolean(item?.isCreditCard || classification.isCreditCard);
+          const productType = isLoan
+            ? BANK_PRODUCT_TYPES.LOAN
+            : isCard
+              ? BANK_PRODUCT_TYPES.CREDIT_CARD
+              : item?.productType || classification.productType;
+          return {
+            id: item?.id || `imp_acc_${idx}_${Date.now().toString(36)}`,
+            bankName: cleanBankName(
+              item?.bankName || cleanedBank,
+              itemType || cleanedAccountType
+            ),
+            accountType: itemType,
+            productType,
+            accountNumber: String(item?.accountNumber ?? '').trim(),
+            currency: item?.currency === 'USD' ? 'USD' : 'HNL',
+            currentBalance: cleanAmount(item?.currentBalance ?? 0),
+            isCreditCard: isCard,
+            isLoan,
+            status: item?.status || 'Activa',
+            selected: item?.selected !== false,
+          };
+        })
       : [
-          {
-            id: `imp_acc_0_${Date.now().toString(36)}`,
-            bankName: cleanedBank,
-            accountType: cleanedAccountType,
-            accountNumber: String(rawData?.accountNumber ?? '').trim(),
-            currency: rawData?.currency === 'USD' ? 'USD' : 'HNL',
-            currentBalance: cleanAmount(rawData?.currentBalance ?? 0),
-            isCreditCard: Boolean(rawData?.isCreditCard),
-            status: rawData?.status || 'Activa',
-            selected: true,
-          },
+          (() => {
+            const classification = classifyBankProductType(
+              `${cleanedAccountType} ${rawData?.productType || ''}`,
+              rawData?.accountNumber
+            );
+            const isLoan = Boolean(rawData?.isLoan || classification.isLoan);
+            const isCard = !isLoan && Boolean(rawData?.isCreditCard || classification.isCreditCard);
+            return {
+              id: `imp_acc_0_${Date.now().toString(36)}`,
+              bankName: cleanedBank,
+              accountType: cleanedAccountType,
+              productType: isLoan
+                ? BANK_PRODUCT_TYPES.LOAN
+                : isCard
+                  ? BANK_PRODUCT_TYPES.CREDIT_CARD
+                  : rawData?.productType || classification.productType,
+              accountNumber: String(rawData?.accountNumber ?? '').trim(),
+              currency: rawData?.currency === 'USD' ? 'USD' : 'HNL',
+              currentBalance: cleanAmount(rawData?.currentBalance ?? 0),
+              isCreditCard: isCard,
+              isLoan,
+              status: rawData?.status || 'Activa',
+              selected: true,
+            };
+          })(),
         ];
 
     const primaryAcc = normalizedAccounts[0];
@@ -1578,14 +2026,17 @@ export class ImportAccountModal {
       ...rawData,
       bankName: primaryAcc?.bankName || cleanedBank,
       accountType: primaryAcc?.accountType || cleanedAccountType,
+      productType: primaryAcc?.productType || 'Ahorro',
       accountNumber: primaryAcc?.accountNumber ?? String(rawData?.accountNumber ?? '').trim(),
       currency: primaryAcc?.currency || (rawData?.currency === 'USD' ? 'USD' : 'HNL'),
       currentBalance: primaryAcc?.currentBalance ?? cleanAmount(rawData?.currentBalance ?? 0),
       isCreditCard: Boolean(primaryAcc?.isCreditCard ?? rawData?.isCreditCard),
+      isLoan: Boolean(primaryAcc?.isLoan ?? rawData?.isLoan),
       accountsList: normalizedAccounts,
       accounts: normalizedAccounts,
       accountsArray: normalizedAccounts,
       status: rawData?.status || 'Activa',
+      transactionsList: cleanedTransactions,
       detectedTransactions: cleanedTransactions,
     };
   }
@@ -1609,14 +2060,14 @@ export class ImportAccountModal {
         ? document.getElementById('import-acc-bank-input')
         : null;
 
-    const typedVal = bankInput?.value?.trim() || '';
     const selectVal = bankSelect?.value?.trim() || '';
+    const typedVal = bankInput?.value?.trim() || '';
 
+    if (selectVal && selectVal !== 'Otro / Personalizado') {
+      return cleanBankName(selectVal, this.currentExtracted?.accountType || '');
+    }
     if (typedVal) {
       return cleanBankName(typedVal, this.currentExtracted?.accountType || '');
-    }
-    if (selectVal && selectVal !== 'Otro / Personalizado') {
-      return selectVal;
     }
     return cleanBankName(
       this.currentExtracted?.bankName || HONDURAS_BANKS_LIST[0],
@@ -1628,6 +2079,9 @@ export class ImportAccountModal {
     this.populateBankOptions();
     const sanitized = this.sanitizeExtractedData(data);
     this.currentExtracted = sanitized;
+    this.initialExtractedSnapshot = (sanitized.accountsList || []).map((acc) => ({
+      ...acc,
+    }));
 
     this.syncPrimaryInputsFromFirstAccount();
     this.reconcileAccountAndTransactionDuplicates();
@@ -1659,8 +2113,11 @@ export class ImportAccountModal {
   }
 
   renderAccountsListTable() {
-    if (typeof document === 'undefined' || !this.currentExtracted) return '';
-    const accountsTbody = document.getElementById('import-account-accounts-tbody');
+    if (!this.currentExtracted) return '';
+    const accountsTbody =
+      typeof document !== 'undefined'
+        ? document.getElementById('import-account-accounts-tbody')
+        : null;
     const accountsList = Array.isArray(this.currentExtracted.accounts)
       ? this.currentExtracted.accounts
       : [];
@@ -1689,16 +2146,16 @@ export class ImportAccountModal {
                     />
                   </td>
                   <td>
-                    <input
-                      type="text"
-                      class="smart-nlp-input"
+                    <select
+                      class="stmt-cat-select import-acc-bank-row-select"
                       data-import-acc-bank="${idx}"
-                      list="import-acc-bank-datalist"
-                      value="${escapeHtmlAttr(acc.bankName || this.currentExtracted.bankName || HONDURAS_BANKS_LIST[0])}"
-                      placeholder="Nombre de Banco"
                       aria-label="Nombre de Banco de cuenta ${idx + 1}"
                       style="width: 100%; padding: 0.38rem 0.6rem; font-size: 0.85rem;"
-                    />
+                    >
+                      ${this.renderBankSelectOptionsMarkup(
+                        acc.bankName || this.currentExtracted.bankName || HONDURAS_BANKS_LIST[0]
+                      )}
+                    </select>
                   </td>
                   <td>
                     <input
@@ -2024,10 +2481,11 @@ export class ImportAccountModal {
       txCountBadgeEl.textContent = `${selectedAccounts.length} cuenta(s) · ${selectedTxs.length} de ${currentPayload.detectedTransactions.length} movimiento(s) seleccionado(s)`;
     }
     if (confirmBtn) {
+      const count = selectedAccounts.length;
       confirmBtn.textContent =
-        selectedAccounts.length > 1
-          ? `💾 Guardar ${selectedAccounts.length} Cuentas Seleccionadas`
-          : 'Confirmar y Crear Cuenta';
+        count === 1
+          ? 'Confirmar y Crear 1 Cuenta'
+          : `Confirmar y Crear ${count} Cuentas`;
     }
   }
 
@@ -2096,7 +2554,10 @@ export class ImportAccountModal {
     if (!this.currentExtracted || this.isProcessing) return;
     this.isProcessing = true;
 
-    const confirmBtn = document.getElementById('btn-confirm-import-account');
+    const confirmBtn =
+      typeof document !== 'undefined'
+        ? document.getElementById('btn-confirm-import-account')
+        : null;
     if (confirmBtn) confirmBtn.disabled = true;
 
     try {
@@ -2112,14 +2573,47 @@ export class ImportAccountModal {
         return;
       }
 
+      const state = this.options.getState?.();
+      const ctx =
+        this.options.getImportContext?.() ||
+        this.options.getContext?.() ||
+        {};
+
       for (const confirmedAcc of selectedAccounts) {
-        learnAdaptiveAccountPattern(confirmedAcc, this.lastOcrTextFallback || '');
+        learnAdaptiveAccountPattern(
+          confirmedAcc,
+          this.lastOcrTextFallback || '',
+          ctx.storage
+        );
       }
 
-      const state = this.options.getState?.();
-      const ctx = this.options.getImportContext?.() || {};
+      const learnCheckbox =
+        typeof document !== 'undefined'
+          ? document.getElementById('import-account-learn-format-checkbox')
+          : null;
+      const shouldLearnFormat =
+        (learnCheckbox ? Boolean(learnCheckbox.checked) : this.learnFormatEnabled !== false) ||
+        hasUserEditedExtractedAccounts(this.initialExtractedSnapshot, selectedAccounts);
 
-      if (selectedAccounts.length > 1) {
+      if (shouldLearnFormat) {
+        const learnedResult = await learnBankTemplateFromConfirmation({
+          originalExtracted: this.initialExtractedSnapshot,
+          confirmedAccounts: selectedAccounts,
+          ocrText: this.lastOcrTextFallback || '',
+          bankName: payload.bankName,
+          firestoreDb: ctx.firestoreDb,
+          firestoreModule: ctx.firestoreModule,
+          indexedDb: ctx.indexedDb,
+          storage: ctx.storage,
+        });
+        this.lastLearnedTemplate = learnedResult?.template || null;
+      }
+
+      const selectedTransactions = (payload.detectedTransactions || []).filter(
+        (tx) => tx.selected !== false && tx.duplicateAction !== DUPLICATE_TRANSACTION_ACTIONS.SKIP
+      );
+
+      if (selectedAccounts.length > 1 || (selectedTransactions.length === 0 && !this.matchedExistingAccount)) {
         const batchResult = await saveBatchAccountsToFirestore(
           {
             bankName: payload.bankName,
@@ -2130,15 +2624,19 @@ export class ImportAccountModal {
           state,
           ctx
         );
+        const enrichedBatchResult = {
+          ...batchResult,
+          learnedTemplate: this.lastLearnedTemplate,
+        };
         this.setIsImportAccountModalOpen(false);
         this.options.showToast?.(batchResult.toastMessage);
-        this.options.onCreated?.(batchResult);
+        this.options.onCreated?.(enrichedBatchResult);
         this.options.onAccountCreated?.(
           batchResult.createdAccounts?.[0] || null,
           [],
-          batchResult
+          enrichedBatchResult
         );
-        return batchResult;
+        return enrichedBatchResult;
       }
 
       if (this.matchedExistingAccount?.id) {
@@ -2146,11 +2644,15 @@ export class ImportAccountModal {
       }
 
       const created = await persistImportedAccountAndTransactions(payload, state, ctx);
+      const enrichedCreated = {
+        ...created,
+        learnedTemplate: this.lastLearnedTemplate,
+      };
       this.setIsImportAccountModalOpen(false);
       this.options.showToast?.(created.toastMessage);
-      this.options.onCreated?.(created);
-      this.options.onAccountCreated?.(created.account, created.transactions, created);
-      return created;
+      this.options.onCreated?.(enrichedCreated);
+      this.options.onAccountCreated?.(created.account, created.transactions, enrichedCreated);
+      return enrichedCreated;
     } catch (err) {
       this.showError(err?.message || 'Error al guardar la cuenta y movimientos.');
       if (confirmBtn) confirmBtn.disabled = false;
