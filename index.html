@@ -1352,7 +1352,7 @@
       <div>
         <h3 id="smart-scan-dialog-title">📷 Escanear Documento / PDF</h3>
         <p id="smart-scan-subtitle" style="font-size: 0.78rem; color: var(--text-secondary); margin-top: 2px;">
-          Motor unificado de clasificación OCR y asociación automática a cuentas del workspace
+          Motor unificado de clasificación OCR, conciliación de Estados de Cuenta y asociación automática a cuentas
         </p>
       </div>
       <button type="button" class="btn-icon" data-close-modal="smart-scan-dialog" aria-label="Cerrar escáner inteligente">✕</button>
@@ -1360,7 +1360,7 @@
 
     <div id="smart-scan-progress-box" class="voucher-progress-box is-hidden" aria-live="polite">
       <div class="voucher-progress-labels">
-        <span id="smart-scan-progress-status">Analizando documento...</span>
+        <span id="smart-scan-progress-status">⏳ Procesando documento con OCR local...</span>
         <strong id="smart-scan-progress-pct">0%</strong>
       </div>
       <progress id="smart-scan-progress-bar" class="native-progress" value="0" max="100"></progress>
@@ -1368,18 +1368,72 @@
 
     <form id="smart-scan-confirm-form">
       <div class="voucher-preview-grid">
-        <div class="voucher-image-column">
-          <img
-            id="smart-scan-preview-img"
-            class="voucher-preview-img"
-            alt="Vista previa del documento escaneado"
-            src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="
+        <div class="voucher-image-column" id="smart-scan-dropzone">
+          <input
+            type="file"
+            id="smart-scan-modal-file-input"
+            accept="image/png,image/jpeg,image/webp,image/*,application/pdf,.pdf"
+            class="sr-only"
           />
+          <div id="smart-scan-thumbnail-container" class="smart-scan-thumbnail-container">
+            <canvas
+              id="smart-scan-preview-canvas"
+              class="voucher-preview-canvas is-hidden"
+              aria-label="Lienzo de renderizado de primera página de PDF"
+            ></canvas>
+            <img
+              id="smart-scan-preview-img"
+              class="voucher-preview-img"
+              alt="Vista previa del documento escaneado"
+              src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="
+              style="cursor: pointer;"
+              title="Haz clic o arrastra un documento (PNG, JPG, WEBP, PDF)"
+            />
+          </div>
+          <button
+            type="button"
+            id="btn-smart-scan-pick-file"
+            class="btn-secondary btn-sm"
+            data-action="pick-smart-scan-file"
+            style="margin-top: 0.5rem; width: 100%;"
+          >📂 Seleccionar o arrastrar imagen / PDF</button>
           <div id="smart-scan-match-badges" class="voucher-match-badges"></div>
         </div>
 
         <div class="voucher-fields-column">
           <div id="smart-scan-tax-summary" class="voucher-tax-summary is-hidden"></div>
+
+          <!-- Banner de creación dinámica cuando la cuenta identificada no existe en Firestore -->
+          <div
+            id="smart-scan-missing-account-banner"
+            class="is-hidden"
+            role="alert"
+            style="padding: 0.85rem 1rem; border-radius: var(--radius-md); background: rgba(245, 158, 11, 0.14); border: 1px solid rgba(245, 158, 11, 0.45); margin-bottom: 0.85rem;"
+          >
+            <strong id="smart-scan-missing-account-workspace-notice" style="display: block; font-size: 0.84rem; color: #fbbf24; margin-bottom: 0.25rem;">
+              ⚠️ La cuenta N.º S/N no se encuentra en tu espacio financiero.
+            </strong>
+            <strong id="smart-scan-missing-account-alert" style="display: block; font-size: 0.82rem; color: #fbbf24; margin-bottom: 0.25rem;">
+              ⚠️ La cuenta N.º S/N no existe. Se creará automáticamente
+            </strong>
+            <p id="smart-scan-missing-account-message" style="font-size: 0.8rem; color: #fbbf24; font-weight: 600; margin: 0 0 0.6rem 0;">
+              ⚠️ La cuenta N.º S/N no existe en tu espacio. Se creará automáticamente con la información del documento.
+            </p>
+            <div style="display: flex; flex-wrap: wrap; gap: 0.55rem;">
+              <button
+                type="button"
+                id="btn-accept-create-account"
+                class="btn-primary btn-sm"
+                data-action="accept-create-account"
+              >✨ Crear Cuenta N.º S/N y Asociar Movimientos</button>
+              <button
+                type="button"
+                id="btn-cancel-create-account"
+                class="btn-secondary btn-sm"
+                data-action="cancel-create-account"
+              >Cancelar</button>
+            </div>
+          </div>
 
           <div
             id="smart-scan-duplicate-warning"
@@ -1411,54 +1465,15 @@
 
           <div class="form-grid-2">
             <div class="field">
-              <label for="smart-scan-doc-type-select">Tipo de Documento</label>
-              <select id="smart-scan-doc-type-select" name="tipoDocumento">
+              <label for="document-type">Tipo de Documento</label>
+              <select id="document-type" name="tipoDocumento">
                 <option value="Voucher POS">Voucher POS</option>
                 <option value="Factura/Recibo">Factura/Recibo</option>
                 <option value="Comprobante de Crédito (Ingreso)">Comprobante de Crédito (Ingreso)</option>
                 <option value="Comprobante de Débito (Gasto)">Comprobante de Débito (Gasto)</option>
+                <option value="Estado de Cuenta (Múltiples Movimientos)">Estado de Cuenta (Múltiples Movimientos)</option>
               </select>
             </div>
-            <div class="field">
-              <label for="smart-scan-date-input">Fecha del Comprobante</label>
-              <input type="date" id="smart-scan-date-input" name="fecha" required />
-            </div>
-          </div>
-
-          <div class="field">
-            <label for="smart-scan-merchant-input">Comercio / Concepto Detectado</label>
-            <input
-              type="text"
-              id="smart-scan-merchant-input"
-              name="comercio"
-              required
-              placeholder="Ej: Supermercados La Colonia / Transferencia ACH"
-            />
-          </div>
-
-          <div class="form-grid-2">
-            <div class="field">
-              <label for="smart-scan-amount-input">Monto Total</label>
-              <input
-                type="number"
-                id="smart-scan-amount-input"
-                name="monto"
-                step="0.01"
-                min="0.01"
-                required
-                placeholder="0.00"
-              />
-            </div>
-            <div class="field">
-              <label for="smart-scan-currency-select">Moneda</label>
-              <select id="smart-scan-currency-select" name="moneda">
-                <option value="HNL">Lempiras (HNL)</option>
-                <option value="USD">Dólares (USD)</option>
-              </select>
-            </div>
-          </div>
-
-          <div class="form-grid-2">
             <div class="field">
               <label for="smart-scan-identified-account-input">Cuenta / Últimos 4 Dígitos</label>
               <input
@@ -1469,19 +1484,98 @@
                 placeholder="Ej: 4589 o 200014589"
               />
             </div>
+          </div>
+
+          <div class="form-grid-2">
             <div class="field">
-              <label for="smart-scan-category-select">Categoría Sugerida</label>
-              <select id="smart-scan-category-select" name="categoryId" required></select>
+              <label for="smart-scan-currency-select">Moneda</label>
+              <select id="smart-scan-currency-select" name="moneda">
+                <option value="HNL">Lempiras (HNL)</option>
+                <option value="USD">Dólares (USD)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="associated-account">Cuenta Asociada</label>
+              <select id="associated-account" data-legacy-id="smart-scan-account-select" name="accountId"></select>
+              <small id="smart-scan-account-match-hint" style="display: block; margin-top: 0.28rem; font-size: 0.76rem; color: var(--text-secondary);"></small>
             </div>
           </div>
 
-          <div class="field">
-            <label for="smart-scan-account-select">Cuenta Asociada</label>
-            <select id="smart-scan-account-select" name="accountId" required></select>
-            <small id="smart-scan-account-match-hint" style="display: block; margin-top: 0.28rem; font-size: 0.76rem; color: var(--text-secondary);"></small>
+          <!-- Campos exclusivos de comprobante individual (se ocultan en modo Estado de Cuenta) -->
+          <div id="smart-scan-single-fields">
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="smart-scan-date-input">Fecha del Comprobante</label>
+                <input type="date" id="smart-scan-date-input" name="fecha" required />
+              </div>
+              <div class="field">
+                <label for="smart-scan-amount-input">Monto Total</label>
+                <input
+                  type="number"
+                  id="smart-scan-amount-input"
+                  name="monto"
+                  step="0.01"
+                  min="0.01"
+                  required
+                  placeholder="0.00"
+                />
+              </div>
+            </div>
+
+            <div class="form-grid-2">
+              <div class="field">
+                <label for="smart-scan-merchant-input">Comercio / Concepto Detectado</label>
+                <input
+                  type="text"
+                  id="smart-scan-merchant-input"
+                  name="comercio"
+                  required
+                  placeholder="Ej: Supermercados La Colonia / Transferencia ACH"
+                />
+              </div>
+              <div class="field">
+                <label for="smart-scan-category-select">Categoría Sugerida</label>
+                <select id="smart-scan-category-select" name="categoryId" required></select>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sección/tabla visual interactiva para "Estado de Cuenta (Múltiples Movimientos)" -->
+          <div id="smart-scan-statement-section" class="is-hidden" style="margin-top: 0.75rem;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+              <strong style="font-size: 0.85rem;">📋 Movimientos Extraídos del Estado de Cuenta</strong>
+              <button
+                type="button"
+                id="btn-smart-scan-add-row"
+                class="btn-secondary btn-sm"
+                data-action="add-statement-row"
+              >+ Agregar Fila</button>
+            </div>
+            <div class="statement-table-wrapper" style="max-height: 290px; overflow-y: auto;">
+              <table class="statement-table" aria-label="Movimientos extraídos del Estado de Cuenta">
+                <thead>
+                  <tr>
+                    <th scope="col" style="width: 44px; text-align: center;">[x]</th>
+                    <th scope="col">Fecha</th>
+                    <th scope="col">Concepto/Comercio</th>
+                    <th scope="col">Monto</th>
+                    <th scope="col">Tipo (Ingreso/Gasto)</th>
+                    <th scope="col" style="text-align: center;">Acción</th>
+                  </tr>
+                </thead>
+                <tbody id="smart-scan-statement-tbody"></tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>
+
+      <div
+        id="smart-scan-statement-footer-summary"
+        class="smart-scan-footer-summary is-hidden"
+        aria-live="polite"
+        style="margin-top: 0.75rem; padding: 0.65rem 0.9rem; border-radius: var(--radius-md); background: var(--bg-elevated); border: 1px solid var(--surface-border); font-size: 0.85rem; font-weight: 700; color: var(--text-primary); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;"
+      >Total Seleccionado: L 0.00 | N.º de Movimientos: 0</div>
 
       <div style="display: flex; gap: 0.6rem; margin-top: 0.75rem; flex-wrap: wrap;">
         <button type="button" class="btn-secondary" data-close-modal="smart-scan-dialog">Cancelar</button>

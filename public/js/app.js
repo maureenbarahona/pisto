@@ -117,6 +117,9 @@ import {
   getTransactionTypeForDocument,
   classifySmartScanDocumentType,
   extractIdentifiedAccountNumber,
+  detectBankAndAccountMetadata,
+  extractStatementTransactionsFromText,
+  learnStatementFormatTemplate,
   matchAccountFromWorkspace,
   detectSmartScanDuplicate,
   parseSmartScanText,
@@ -133,8 +136,13 @@ import {
 import {
   SmartScanModal,
   SMART_SCAN_MODAL_ID,
+  DOCUMENT_TYPE_SELECT_ID,
   DUPLICATE_RESOLUTION_ACTIONS,
+  formatMissingAccountBannerMessage,
+  formatSmartScanSubmitButtonLabel,
+  renderStatementTransactionsRowsMarkup,
   renderSmartScanModalMarkup,
+  confirmAndPersistStatementBatch,
   confirmAndPersistSmartScanTransaction,
 } from './ui/smartScanModal.js';
 
@@ -180,6 +188,9 @@ export {
   getTransactionTypeForDocument,
   classifySmartScanDocumentType,
   extractIdentifiedAccountNumber,
+  detectBankAndAccountMetadata,
+  extractStatementTransactionsFromText,
+  learnStatementFormatTemplate,
   matchAccountFromWorkspace,
   detectSmartScanDuplicate,
   parseSmartScanText,
@@ -192,8 +203,13 @@ export {
   renderSmartScanBannerMarkup,
   SmartScanModal,
   SMART_SCAN_MODAL_ID,
+  DOCUMENT_TYPE_SELECT_ID,
   DUPLICATE_RESOLUTION_ACTIONS,
+  formatMissingAccountBannerMessage,
+  formatSmartScanSubmitButtonLabel,
+  renderStatementTransactionsRowsMarkup,
   renderSmartScanModalMarkup,
+  confirmAndPersistStatementBatch,
   confirmAndPersistSmartScanTransaction,
 };
 
@@ -1466,20 +1482,26 @@ export class FinanceAppController {
         await this.handleStatementFileSelected(file);
       },
       onSaved: (result) => {
-        if (!result?.saved || !result?.transaction) return;
-        const txDate = String(result.transaction.date || '');
+        if (!result?.saved) return;
+        const savedList = Array.isArray(result.transactions)
+          ? result.transactions
+          : result.transaction
+            ? [result.transaction]
+            : [];
+        if (savedList.length === 0) return;
+
         const currentMonthPrefix = new Date().toISOString().slice(0, 7);
-        if (
-          txDate &&
-          !txDate.startsWith(currentMonthPrefix) &&
-          this.state.settings.periodFilter === 'month'
-        ) {
+        const hasOtherMonth = savedList.some((tx) => {
+          const txDate = String(tx?.date || '');
+          return txDate && !txDate.startsWith(currentMonthPrefix);
+        });
+        if (hasOtherMonth && this.state.settings.periodFilter === 'month') {
           this.state.settings.periodFilter = 'all';
           this.state.settings.startDate = '';
           this.state.settings.endDate = '';
         }
         this.state.aiTelemetry.localParsesSaved =
-          (this.state.aiTelemetry.localParsesSaved || 0) + 1;
+          (this.state.aiTelemetry.localParsesSaved || 0) + savedList.length;
         this.repo.saveState(this.state);
         this.renderAll();
       },
@@ -1491,9 +1513,13 @@ export class FinanceAppController {
       onFileSelected: (file) => {
         const preferredAccountId = this.preferredStatementAccountId || '';
         this.preferredStatementAccountId = null;
+        const geminiApiKey =
+          this.authService?.geminiKeyStore?.getApiKey?.() ||
+          this.authService?.getGeminiApiKey?.() ||
+          '';
         void this.smartScanModal.processFileAndOpen(file, {
           preferredAccountId,
-          geminiApiKey: this.authService?.getGeminiApiKey?.() || '',
+          geminiApiKey,
         });
       },
     });
@@ -2055,7 +2081,9 @@ export class FinanceAppController {
         this.repo.saveState(this.state);
         this.renderAll();
       } else if (action === 'trigger-smart-scan') {
-        document.getElementById(SMART_SCAN_FILE_INPUT_ID)?.click();
+        if (!actionEl.dataset.smartScanBound) {
+          document.getElementById(SMART_SCAN_FILE_INPUT_ID)?.click();
+        }
       } else if (action === 'smart-parse-ai') {
         this.handleGenkitSmartParse();
       } else if (action === 'generate-ai-insights') {

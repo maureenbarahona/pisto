@@ -3048,5 +3048,62 @@ dialog[open]::backdrop,
   }
 }
 
+/* -------------------------------------------------------------------------- */
+/* Smart Scan PDF Thumbnail Container & Expanded Statement Modal Layout       */
+/* -------------------------------------------------------------------------- */
+.smart-scan-thumbnail-container {
+  position: relative;
+  width: 100%;
+  min-height: 220px;
+  max-height: 290px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--surface-border);
+  background: var(--bg-elevated);
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
 
+.smart-scan-thumbnail-container:hover {
+  border-color: var(--color-brand);
+}
 
+.voucher-preview-canvas {
+  width: 100%;
+  max-height: 290px;
+  object-fit: contain;
+  display: block;
+}
+
+.smart-scan-modal-expanded {
+  max-width: min(1140px, 96vw) !important;
+  width: 100%;
+  transition: max-width 0.22s ease;
+}
+
+.smart-scan-modal-expanded .voucher-preview-grid {
+  grid-template-columns: 240px 1fr;
+}
+
+@media (max-width: 820px) {
+  .smart-scan-modal-expanded .voucher-preview-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.smart-scan-footer-summary {
+  margin-top: 0.75rem;
+  padding: 0.65rem 0.9rem;
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  border: 1px solid var(--surface-border);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+}

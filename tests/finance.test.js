@@ -5058,8 +5058,781 @@ describe('Unified Smart Scan Button, Classification & OCR Engine, Auto-Account A
   });
 });
 
+describe('31. Evolución de SmartScanModal.js para Estados de Cuenta Multi-Movimiento, Creación Dinámica de Cuenta con writeBatch y Aprendizaje Adaptativo (bank_templates)', () => {
+  it('incluye la opción "Estado de Cuenta (Múltiples Movimientos)" en <select id="document-type">, oculta campos individuales y renderiza la tabla interactiva con edición, selección y eliminación', async () => {
+    const {
+      SMART_SCAN_DOCUMENT_TYPES,
+      parseSmartScanText,
+    } = await import('../src/js/services/smartScanExtractor.js');
+    const {
+      DOCUMENT_TYPE_SELECT_ID,
+      formatSmartScanSubmitButtonLabel,
+      renderStatementTransactionsRowsMarkup,
+      renderSmartScanModalMarkup,
+    } = await import('../src/js/components/SmartScanModal.js');
 
+    // 1. Verificar opción en SMART_SCAN_DOCUMENT_TYPES y en <select id="document-type">
+    assert.equal(
+      SMART_SCAN_DOCUMENT_TYPES.BANK_STATEMENT,
+      'Estado de Cuenta (Múltiples Movimientos)'
+    );
+    assert.equal(DOCUMENT_TYPE_SELECT_ID, 'document-type');
 
+    const modalHtml = renderSmartScanModalMarkup();
+    assert.ok(modalHtml.includes('id="document-type"'));
+    assert.ok(
+      modalHtml.includes(
+        '<option value="Estado de Cuenta (Múltiples Movimientos)">Estado de Cuenta (Múltiples Movimientos)</option>'
+      )
+    );
+    assert.ok(modalHtml.includes('id="smart-scan-single-fields"'));
+    assert.ok(modalHtml.includes('id="smart-scan-statement-section"'));
+    assert.ok(modalHtml.includes('id="smart-scan-statement-tbody"'));
+    assert.ok(modalHtml.includes('Concepto/Comercio'));
+    assert.ok(modalHtml.includes('Tipo (Ingreso/Gasto)'));
 
+    // 2. Detectar automáticamente un Estado de Cuenta con múltiples movimientos desde OCR
+    const rawStatementText = `
+      BAC CREDOMATIC HONDURAS
+      ESTADO DE CUENTA DE AHORROS
+      Cuenta No: 2000998877
+      Moneda: HNL
+      12/10/2026 SUPERMERCADOS LA COLONIA L. 1,450.00
+      14/10/2026 DEPOSITO DE PLANILLA QUINCENAL L. 18,500.00
+      16/10/2026 ESTACION UNO TEGUCIGALPA L. 980.50
+    `;
+    const parsedStatement = parseSmartScanText(rawStatementText, {});
+    assert.equal(
+      parsedStatement.tipoDocumento,
+      'Estado de Cuenta (Múltiples Movimientos)'
+    );
+    assert.equal(parsedStatement.isMultiRowStatement, true);
+    assert.equal(parsedStatement.cuentaIdentificada, '2000998877');
+    assert.equal(parsedStatement.bancoDetectado, 'BAC Credomatic Honduras');
+    assert.equal(parsedStatement.statementTransactions.length, 3);
+    assert.equal(parsedStatement.statementTransactions[0].tipo, 'expense');
+    assert.equal(parsedStatement.statementTransactions[0].monto, 1450);
+    assert.equal(parsedStatement.statementTransactions[1].tipo, 'income');
+    assert.equal(parsedStatement.statementTransactions[1].monto, 18500);
 
+    // 3. Renderizar filas interactivas con columnas: Checkbox [x] | Fecha | Concepto/Comercio | Monto | Tipo (Ingreso/Gasto) | Acción (🗑️ Eliminar)
+    const rowsHtml = renderStatementTransactionsRowsMarkup(
+      parsedStatement.statementTransactions
+    );
+    assert.ok(rowsHtml.includes('data-scan-row-check="0"'));
+    assert.ok(rowsHtml.includes('data-scan-row-field="fecha"'));
+    assert.ok(rowsHtml.includes('data-scan-row-field="comercio"'));
+    assert.ok(rowsHtml.includes('data-scan-row-field="monto"'));
+    assert.ok(rowsHtml.includes('data-scan-row-field="tipo"'));
+    assert.ok(rowsHtml.includes('data-scan-row-delete="0"'));
+    assert.ok(rowsHtml.includes('🗑️ Eliminar'));
 
+    // 4. Botón dinámico de guardado
+    assert.equal(formatSmartScanSubmitButtonLabel(false, 3), 'Guardar Movimiento');
+    assert.equal(
+      formatSmartScanSubmitButtonLabel(true, 3),
+      'Guardar 3 Movimientos Seleccionados'
+    );
+    assert.equal(
+      formatSmartScanSubmitButtonLabel(true, 1),
+      'Guardar 1 Movimientos Seleccionados'
+    );
+  });
+
+  it('valida si la cuenta asociada existe en Firestore, muestra el banner de creación dinámica, ejecuta writeBatch para crear cuenta + transacciones y guarda el patrón en bank_templates', async () => {
+    const {
+      formatMissingAccountBannerMessage,
+      confirmAndPersistStatementBatch,
+    } = await import('../src/js/components/SmartScanModal.js');
+    const {
+      getLocalBankTemplatesSync,
+    } = await import('../src/js/services/templateLearner.js');
+
+    // 1. Verificar mensaje exacto del banner de cuenta inexistente
+    const bannerMsg = formatMissingAccountBannerMessage('2000998877');
+    assert.equal(
+      bannerMsg,
+      '⚠️ La cuenta N.º 2000998877 no existe en tu espacio. Se creará automáticamente con la información del documento.'
+    );
+
+    // 2. Simular Firestore writeBatch + setDoc para creación atómica de cuenta + movimientos + bank_templates
+    const batchOperations = [];
+    let batchCommitted = false;
+    const directSetDocs = [];
+
+    const mockFirestoreModule = {
+      doc: (_db, ...pathSegments) => ({ path: pathSegments.join('/') }),
+      collection: (_db, ...pathSegments) => ({ path: pathSegments.join('/') }),
+      writeBatch: () => ({
+        set: (ref, data, options) => {
+          batchOperations.push({ op: 'set', path: ref.path, data, options });
+        },
+        update: (ref, data) => {
+          batchOperations.push({ op: 'update', path: ref.path, data });
+        },
+        commit: async () => {
+          batchCommitted = true;
+        },
+      }),
+      setDoc: async (ref, data, options) => {
+        directSetDocs.push({ path: ref.path, data, options });
+      },
+    };
+
+    const state = {
+      activeWorkspaceId: 'ws_statement_batch',
+      settings: { exchangeRateUSD: 24.85 },
+      accounts: [
+        {
+          id: 'acc_other',
+          name: 'Ficohsa Ahorro',
+          accountNumber: '1122',
+          currency: 'HNL',
+          initialBalance: 5000,
+          currentBalance: 5000,
+        },
+      ],
+      transactions: [],
+    };
+
+    const statementTransactions = [
+      {
+        selected: true,
+        fecha: '2026-10-12',
+        comercio: 'SUPERMERCADOS LA COLONIA',
+        monto: '1,450.00',
+        moneda: 'HNL',
+        tipo: 'expense',
+        categoryId: 'groceries',
+      },
+      {
+        selected: true,
+        fecha: '2026-10-14',
+        comercio: 'DEPOSITO DE PLANILLA',
+        monto: '18,500.00',
+        moneda: 'HNL',
+        tipo: 'income',
+        categoryId: 'salary',
+      },
+      {
+        selected: false, // Desmarcado por el usuario -> no debe importarse
+        fecha: '2026-10-16',
+        comercio: 'MOVIMIENTO OMITIDO',
+        monto: '500.00',
+        moneda: 'HNL',
+        tipo: 'expense',
+        categoryId: 'other',
+      },
+    ];
+
+    const rawStatementText = `
+      BAC CREDOMATIC HONDURAS
+      ESTADO DE CUENTA DE AHORROS
+      Cuenta: 2000998877
+      12/10/2026 SUPERMERCADOS LA COLONIA 1,450.00
+      14/10/2026 DEPOSITO DE PLANILLA 18,500.00
+    `;
+
+    const result = await confirmAndPersistStatementBatch({
+      statementTransactions,
+      accountMetadata: {
+        bankName: 'BAC Credomatic Honduras',
+        accountNumber: '2000998877',
+        accountType: 'bank',
+        currency: 'HNL',
+      },
+      selectedAccountId: '',
+      createMissingAccount: true,
+      state,
+      firestoreDb: {},
+      firestoreModule: mockFirestoreModule,
+      workspaceId: 'ws_statement_batch',
+      rawText: rawStatementText,
+      wasEditedByUser: true,
+    });
+
+    assert.equal(result.saved, true);
+    assert.equal(result.savedCount, 2);
+    assert.ok(result.createdAccount);
+    assert.equal(result.createdAccount.accountNumber, '2000998877');
+    assert.equal(result.createdAccount.institution, 'BAC Credomatic Honduras');
+    assert.equal(result.createdAccount.currency, 'HNL');
+
+    // Verificar que la nueva cuenta fue agregada al estado y su saldo fue recalculado (+18,500 - 1,450 = 17,050)
+    assert.equal(state.accounts.length, 2);
+    assert.equal(result.newAccountBalance, 17050);
+
+    // Verificar que writeBatch se ejecutó creando la cuenta en `accounts` y los 2 movimientos seleccionados en `transactions`
+    assert.equal(batchCommitted, true);
+    assert.ok(
+      batchOperations.some(
+        (op) =>
+          op.path === `workspaces/ws_statement_batch/accounts/${result.accountId}` &&
+          op.data.accountNumber === '2000998877'
+      )
+    );
+    const txBatchWrites = batchOperations.filter((op) =>
+      op.path.startsWith('workspaces/ws_statement_batch/transactions/')
+    );
+    assert.equal(txBatchWrites.length, 2);
+
+    // 3. Verificar Aprendizaje Adaptativo en `bank_templates` (IndexedDB local + Firestore)
+    assert.ok(result.learnedTemplate);
+    assert.equal(result.learnedTemplate.bankName, 'BAC Credomatic Honduras');
+    assert.ok(
+      directSetDocs.some((docWrite) => docWrite.path.startsWith('bank_templates/'))
+    );
+    const localTemplates = getLocalBankTemplatesSync();
+    assert.ok(
+      localTemplates.some((tpl) => tpl.bankName === 'BAC Credomatic Honduras')
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 32. Estrategia Híbrida de Extracción en SmartScanModal (OCR Local Tesseract.js -> Gemini 2.5 Flash Respaldo)
+// ---------------------------------------------------------------------------
+describe('32. Hybrid Smart Scan Extraction (Tesseract.js Local OCR -> Gemini 2.5 Flash Fallback & UI Sync)', () => {
+  it('captura archivos PNG, JPG, WEBP y PDF vía change o drop, prioriza Tesseract.js local con limpiadores regex y muestra "⏳ Procesando documento con OCR local..."', async () => {
+    const {
+      LOCAL_OCR_LOADING_STATUS,
+      applySmartScanRegexCleaners,
+      evaluateLocalOcrCompleteness,
+      extractSmartScanDocument,
+    } = await import('../src/js/services/smartScanExtractor.js');
+    const {
+      extractFileFromInputOrDropEvent,
+    } = await import('../src/js/components/TransactionsView.js');
+
+    assert.equal(LOCAL_OCR_LOADING_STATUS, '⏳ Procesando documento con OCR local...');
+
+    // 1. Verificar captura de archivos desde evento `change` y desde evento `drop`
+    const fakePdfFile = new Blob(['%PDF-1.4 fake statement'], { type: 'application/pdf' });
+    fakePdfFile.name = 'estado_cuenta_bac.pdf';
+    const fakeWebpFile = new Blob(['RIFF....WEBP'], { type: 'image/webp' });
+    fakeWebpFile.name = 'comprobante_pos.webp';
+
+    const fromChange = extractFileFromInputOrDropEvent({
+      target: { files: [fakeWebpFile] },
+    });
+    const fromDrop = extractFileFromInputOrDropEvent({
+      dataTransfer: { files: [fakePdfFile] },
+    });
+    assert.equal(fromChange, fakeWebpFile);
+    assert.equal(fromDrop, fakePdfFile);
+
+    // 2. Verificar limpiadores regex (Fecha DD/MM/YYYY y YYYY-MM-DD, Montos con comas "3,901.33" -> 3901.33, Cuenta/Tarjeta y Banco/Comercio)
+    const rawOcrSample = `
+      BAC CREDOMATIC HONDURAS
+      SUPERMERCADOS LA COLONIA
+      FECHA: 22/10/2026
+      TARJETA VISA: **** **** **** 4589
+      TOTAL A PAGAR: L. 3,901.33
+    `;
+    const cleaned = applySmartScanRegexCleaners(rawOcrSample);
+    assert.equal(cleaned.date, '2026-10-22');
+    assert.equal(cleaned.hasExplicitDate, true);
+    assert.equal(cleaned.amount, 3901.33);
+    assert.equal(cleaned.hasExplicitAmount, true);
+    assert.equal(cleaned.accountNumber, '4589');
+    assert.equal(cleaned.hasAccountNumber, true);
+    assert.equal(cleaned.hasBankOrMerchant, true);
+
+    // 3. Ejecutar Paso 1 (Tesseract.js worker local exitoso -> NO invoca Gemini Flash)
+    const progressMessages = [];
+    let geminiCalled = false;
+    const mockTesseractWorker = {
+      recognize: async () => ({
+        data: {
+          text: rawOcrSample,
+          confidence: 91,
+        },
+      }),
+    };
+
+    const result = await extractSmartScanDocument(
+      fakeWebpFile,
+      {
+        accounts: [
+          {
+            id: 'acc_visa_4589',
+            name: 'Visa BAC *4589',
+            accountNumber: '4589',
+            currency: 'HNL',
+          },
+        ],
+      },
+      {
+        tesseractWorker: mockTesseractWorker,
+        geminiApiKey: 'AIzaSyFakeKey',
+        fetchImpl: async () => {
+          geminiCalled = true;
+          throw new Error('No debe llamarse a Gemini cuando el OCR local es completo');
+        },
+      },
+      (status) => {
+        progressMessages.push(status);
+      }
+    );
+
+    assert.ok(progressMessages.includes('⏳ Procesando documento con OCR local...'));
+    assert.equal(geminiCalled, false);
+    assert.equal(result.usedGeminiFallback, false);
+    assert.equal(result.extractionSource, 'local-ocr');
+    assert.equal(result.fecha, '2026-10-22');
+    assert.equal(result.monto, 3901.33);
+    assert.equal(result.cuentaIdentificada, '4589');
+    assert.equal(result.accountId, 'acc_visa_4589');
+    assert.equal(
+      evaluateLocalOcrCompleteness(result, rawOcrSample, 91).isComplete,
+      true
+    );
+  });
+
+  it('activa el respaldo Gemini 2.5 Flash ("🤖 Refinando análisis con Gemini Flash AI...") con JSON Schema cuando Tesseract.js falla o devuelve texto incompleto, y sincroniza los campos y alertas del modal', async () => {
+    const {
+      LOCAL_OCR_LOADING_STATUS,
+      GEMINI_FALLBACK_LOADING_STATUS,
+      SMART_SCAN_GEMINI_JSON_SCHEMA,
+      extractSmartScanDocument,
+    } = await import('../src/js/services/smartScanExtractor.js');
+    const {
+      formatMissingAccountAlertText,
+    } = await import('../src/js/components/SmartScanModal.js');
+
+    assert.equal(GEMINI_FALLBACK_LOADING_STATUS, '🤖 Refinando análisis con Gemini Flash AI...');
+    assert.ok(SMART_SCAN_GEMINI_JSON_SCHEMA.properties.bankName);
+    assert.ok(SMART_SCAN_GEMINI_JSON_SCHEMA.properties.documentType);
+    assert.ok(SMART_SCAN_GEMINI_JSON_SCHEMA.properties.date);
+    assert.ok(SMART_SCAN_GEMINI_JSON_SCHEMA.properties.amount);
+    assert.ok(SMART_SCAN_GEMINI_JSON_SCHEMA.properties.currency);
+    assert.ok(SMART_SCAN_GEMINI_JSON_SCHEMA.properties.accountNumber);
+    assert.ok(SMART_SCAN_GEMINI_JSON_SCHEMA.properties.transactions);
+
+    // Simular imagen PNG donde Tesseract.js devuelve texto ilegible/incompleto
+    const fakePngBlob = new Blob(['\x89PNG\r\n\x1a\nfakedata'], { type: 'image/png' });
+    fakePngBlob.name = 'estado_cuenta_borroso.png';
+
+    const recordedStatuses = [];
+    let capturedGeminiRequest = null;
+
+    const failingOcrWorker = {
+      recognize: async () => ({
+        data: {
+          text: '~~~ ### ???',
+          confidence: 12,
+        },
+      }),
+    };
+
+    const mockFetch = async (url, init) => {
+      capturedGeminiRequest = {
+        url,
+        body: JSON.parse(init.body),
+      };
+      return {
+        ok: true,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      bankName: 'Banco Atlántida',
+                      documentType: 'Estado de Cuenta (Múltiples Movimientos)',
+                      date: '2026-10-20',
+                      merchant: 'Estado de Cuenta Octubre',
+                      amount: '3,901.33',
+                      currency: 'HNL',
+                      accountNumber: '213130058771',
+                      transactions: [
+                        {
+                          date: '18/10/2026',
+                          merchant: 'SUPERMERCADOS LA COLONIA',
+                          amount: '1,401.33',
+                          type: 'expense',
+                          currency: 'HNL',
+                        },
+                        {
+                          date: '2026-10-20',
+                          merchant: 'DEPOSITO DE AHORRO CON T/D',
+                          amount: '2,500.00',
+                          type: 'income',
+                          currency: 'HNL',
+                        },
+                      ],
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      };
+    };
+
+    const extracted = await extractSmartScanDocument(
+      fakePngBlob,
+      {
+        accounts: [
+          {
+            id: 'acc_existing_1111',
+            name: 'Cuenta BAC',
+            accountNumber: '1111',
+            currency: 'HNL',
+          },
+        ],
+      },
+      {
+        tesseractWorker: failingOcrWorker,
+        geminiApiKey: 'AIzaSyTestGemini25FlashKey',
+        fetchImpl: mockFetch,
+      },
+      (status) => {
+        recordedStatuses.push(status);
+      }
+    );
+
+    // 1. Verificar transición de estados de carga en la UI: OCR Local -> Gemini Flash AI
+    assert.ok(recordedStatuses.includes(LOCAL_OCR_LOADING_STATUS));
+    assert.ok(recordedStatuses.includes(GEMINI_FALLBACK_LOADING_STATUS));
+    assert.ok(
+      recordedStatuses.indexOf(LOCAL_OCR_LOADING_STATUS) <
+        recordedStatuses.indexOf(GEMINI_FALLBACK_LOADING_STATUS)
+    );
+
+    // 2. Verificar que la petición a Gemini 2.5 Flash envió Base64 y el JSON Schema estructurado
+    assert.ok(capturedGeminiRequest);
+    assert.ok(capturedGeminiRequest.url.includes('gemini-2.5-flash:generateContent'));
+    assert.equal(
+      capturedGeminiRequest.body.generationConfig.responseMimeType,
+      'application/json'
+    );
+    assert.deepEqual(
+      capturedGeminiRequest.body.generationConfig.responseSchema,
+      SMART_SCAN_GEMINI_JSON_SCHEMA
+    );
+    assert.ok(
+      capturedGeminiRequest.body.contents[0].parts[1].inline_data.data.length > 0
+    );
+
+    // 3. Verificar valores extraídos y normalizados
+    assert.equal(extracted.usedGeminiFallback, true);
+    assert.equal(extracted.extractionSource, 'gemini-2.5-flash');
+    assert.equal(extracted.bankName, 'Banco Atlántida');
+    assert.equal(extracted.tipoDocumento, 'Estado de Cuenta (Múltiples Movimientos)');
+    assert.equal(extracted.fecha, '2026-10-20');
+    assert.equal(extracted.monto, 3901.33);
+    assert.equal(extracted.moneda, 'HNL');
+    assert.equal(extracted.cuentaIdentificada, '213130058771');
+    assert.equal(extracted.accountExists, false);
+    assert.equal(extracted.statementItems.length, 2);
+    assert.equal(extracted.statementItems[0].fecha, '2026-10-18');
+    assert.equal(extracted.statementItems[0].monto, 1401.33);
+    assert.equal(extracted.statementItems[0].tipo, 'expense');
+    assert.equal(extracted.statementItems[1].fecha, '2026-10-20');
+    assert.equal(extracted.statementItems[1].monto, 2500);
+    assert.equal(extracted.statementItems[1].tipo, 'income');
+
+    // 4. Verificar alerta cuando la cuenta detectada no existe en el workspace de Firestore
+    assert.equal(
+      formatMissingAccountAlertText(extracted.cuentaIdentificada),
+      '⚠️ La cuenta N.º 213130058771 no existe. Se creará automáticamente'
+    );
+  });
+});
+
+describe('33. Miniaturas de PDF (pdfjs-dist), Extracción Completa de Campos, Creación Dinámica de Cuentas y Resumen de Estado de Cuenta', () => {
+  it('renderiza la primera página de un archivo PDF en el Canvas de HTML5 usando pdfjs-dist y genera la miniatura compartida para imágenes y PDFs', async () => {
+    const {
+      PDFJS_CDN_ESM_URL,
+      PDFJS_WORKER_CDN_URL,
+      renderPdfFirstPageThumbnail,
+      inferSmartScanCategory,
+      extractSmartScanDocument,
+    } = await import('../src/js/services/smartScanExtractor.js');
+    const {
+      SMART_SCAN_THUMBNAIL_CONTAINER_ID,
+      SMART_SCAN_PREVIEW_CANVAS_ID,
+      SMART_SCAN_PREVIEW_IMG_ID,
+      ASSOCIATED_ACCOUNT_SELECT_ID,
+      STATEMENT_FOOTER_SUMMARY_ID,
+      renderDocumentPreviewThumbnail,
+      renderSmartScanModalMarkup,
+    } = await import('../src/js/components/SmartScanModal.js');
+
+    assert.ok(PDFJS_CDN_ESM_URL.includes('pdfjs-dist'));
+    assert.ok(PDFJS_WORKER_CDN_URL.includes('pdf.worker'));
+
+    // Verificar contenedor de miniatura responsivo compartido y select #associated-account en el markup
+    const markup = renderSmartScanModalMarkup();
+    assert.ok(markup.includes(`id="${SMART_SCAN_THUMBNAIL_CONTAINER_ID}"`));
+    assert.ok(markup.includes(`id="${SMART_SCAN_PREVIEW_CANVAS_ID}"`));
+    assert.ok(markup.includes(`id="${SMART_SCAN_PREVIEW_IMG_ID}"`));
+    assert.ok(markup.includes(`id="${ASSOCIATED_ACCOUNT_SELECT_ID}"`));
+    assert.ok(markup.includes(`id="${STATEMENT_FOOTER_SUMMARY_ID}"`));
+
+    // Simular renderizado de primera página de PDF en Canvas HTML5
+    let canvasRendered = false;
+    const mockCanvas = {
+      width: 0,
+      height: 0,
+      classList: {
+        add: () => {},
+        remove: () => {},
+      },
+      getContext: (type) => {
+        assert.equal(type, '2d');
+        return { fillRect: () => {} };
+      },
+      toDataURL: (mime) => {
+        assert.equal(mime, 'image/png');
+        return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      },
+    };
+
+    const mockPdfjsLib = {
+      GlobalWorkerOptions: { workerSrc: '' },
+      getDocument: () => ({
+        promise: Promise.resolve({
+          numPages: 2,
+          getPage: async (pageNumber) => {
+            assert.equal(pageNumber, 1);
+            return {
+              getViewport: ({ scale }) => ({
+                width: Math.round(600 * scale),
+                height: Math.round(800 * scale),
+              }),
+              render: ({ canvasContext, viewport }) => {
+                assert.ok(canvasContext);
+                assert.ok(viewport.width > 0);
+                canvasRendered = true;
+                return { promise: Promise.resolve() };
+              },
+              getTextContent: async () => ({
+                items: [
+                  { str: 'BANCO ATLANTIDA' },
+                  { str: 'SUPERMERCADOS LA COLONIA' },
+                  { str: 'FECHA: 2026-10-22' },
+                  { str: 'CUENTA: 213130058771' },
+                  { str: 'TOTAL: L 3,901.33' },
+                ],
+              }),
+            };
+          },
+        }),
+      }),
+    };
+
+    const fakePdf = new Blob(['%PDF-1.7 sample pdf'], { type: 'application/pdf' });
+    fakePdf.name = 'recibo_colonia.pdf';
+
+    const pdfThumbResult = await renderPdfFirstPageThumbnail(fakePdf, {
+      pdfjsLib: mockPdfjsLib,
+      canvas: mockCanvas,
+    });
+
+    assert.equal(canvasRendered, true);
+    assert.ok(pdfThumbResult.thumbnailDataUrl.startsWith('data:image/png;base64,'));
+    assert.equal(pdfThumbResult.pageCount, 2);
+    assert.ok(pdfThumbResult.pageText.includes('SUPERMERCADOS LA COLONIA'));
+
+    // Verificar contenedor compartido para PDF e Imagen en renderDocumentPreviewThumbnail
+    const mockPreviewImg = {
+      src: '',
+      dataset: {},
+      classList: { add: () => {}, remove: () => {} },
+    };
+    const mockContainer = {
+      dataset: {},
+    };
+    const mockDoc = {
+      getElementById: (id) => {
+        if (id === SMART_SCAN_PREVIEW_CANVAS_ID) return mockCanvas;
+        if (id === SMART_SCAN_PREVIEW_IMG_ID) return mockPreviewImg;
+        if (id === SMART_SCAN_THUMBNAIL_CONTAINER_ID) return mockContainer;
+        return null;
+      },
+      createElement: (tag) => (tag === 'canvas' ? mockCanvas : {}),
+    };
+
+    const previewResult = await renderDocumentPreviewThumbnail(fakePdf, mockDoc, {
+      pdfjsLib: mockPdfjsLib,
+    });
+    assert.equal(previewResult.isPdf, true);
+    assert.equal(mockContainer.dataset.previewType, 'pdf');
+    assert.ok(mockPreviewImg.src.startsWith('data:image/png;base64,'));
+
+    // Verificar extracción completa de campos + categoriaSugerida pertinente
+    assert.equal(
+      inferSmartScanCategory('SUPERMERCADOS LA COLONIA', '', 'expense').categoriaSugerida,
+      'Supermercado'
+    );
+    assert.equal(
+      inferSmartScanCategory('ENEE ENERGIA HONDURAS', '', 'expense').categoriaSugerida,
+      'Servicios Públicos'
+    );
+    assert.equal(
+      inferSmartScanCategory('GASOLINERA UNO', '', 'expense').categoriaSugerida,
+      'Combustible'
+    );
+    assert.equal(
+      inferSmartScanCategory('RESTAURANTE EL FOGON', '', 'expense').categoriaSugerida,
+      'Restaurantes'
+    );
+    assert.equal(
+      inferSmartScanCategory('PAGO DE PLANILLA QUINCENAL', '', 'income').categoriaSugerida,
+      'Salario'
+    );
+
+    const extractedPdf = await extractSmartScanDocument(
+      fakePdf,
+      { accounts: [] },
+      {
+        pdfjsLib: mockPdfjsLib,
+        canvas: mockCanvas,
+      }
+    );
+    assert.equal(extractedPdf.comercio, 'SUPERMERCADOS LA COLONIA');
+    assert.equal(extractedPdf.bankName, 'Banco Atlántida');
+    assert.equal(extractedPdf.fecha, '2026-10-22');
+    assert.equal(extractedPdf.monto, 3901.33);
+    assert.equal(extractedPdf.moneda, 'HNL');
+    assert.equal(extractedPdf.cuentaIdentificada, '213130058771');
+    assert.equal(extractedPdf.categoriaSugerida, 'Supermercado');
+    assert.ok(extractedPdf.thumbnailDataUrl.startsWith('data:image/png;base64,'));
+  });
+
+  it('asocia cuentas existentes en #associated-account o crea dinámicamente la cuenta faltante con el botón "✨ Crear Cuenta N.º {accountNumber} y Asociar Movimientos" y actualiza el pie del Estado de Cuenta', async () => {
+    const fs = await import('node:fs/promises');
+    const {
+      matchAccountFromWorkspace,
+    } = await import('../src/js/services/smartScanExtractor.js');
+    const {
+      formatMissingAccountWorkspaceNotice,
+      formatCreateAndAssociateAccountButtonLabel,
+      formatStatementFooterSummary,
+      confirmAndPersistSmartScanTransaction,
+      confirmAndPersistStatementBatch,
+    } = await import('../src/js/components/SmartScanModal.js');
+
+    // 1. Verificar textos de aviso de cuenta no existente y botón de creación dinámica
+    assert.equal(
+      formatMissingAccountWorkspaceNotice('213130058771'),
+      '⚠️ La cuenta N.º 213130058771 no se encuentra en tu espacio financiero.'
+    );
+    assert.equal(
+      formatCreateAndAssociateAccountButtonLabel('213130058771'),
+      '✨ Crear Cuenta N.º 213130058771 y Asociar Movimientos'
+    );
+
+    // 2. Verificar coincidencia por número completo o últimos 4 dígitos
+    const workspaceAccounts = [
+      { id: 'acc_bac_4589', name: 'BAC Credomatic *4589', accountNumber: '726934589', currency: 'HNL' },
+    ];
+    const matchedLast4 = await matchAccountFromWorkspace('4589', workspaceAccounts);
+    assert.equal(matchedLast4.accountExists, true);
+    assert.equal(matchedLast4.account.id, 'acc_bac_4589');
+
+    const unmatched = await matchAccountFromWorkspace('213130058771', workspaceAccounts);
+    assert.equal(unmatched.accountExists, false);
+    assert.equal(unmatched.account, null);
+
+    // 3. Verificar resumen dinámico del pie del modal en modo Estado de Cuenta
+    const statementRows = [
+      { selected: true, fecha: '2026-10-18', concepto: 'SUPERMERCADOS LA COLONIA', monto: '1,400.00', tipo: 'expense' },
+      { selected: true, fecha: '2026-10-20', concepto: 'DEPOSITO DE AHORRO', monto: '2,501.33', tipo: 'income' },
+      { selected: false, fecha: '2026-10-21', concepto: 'CARGO OMITIDO', monto: '500.00', tipo: 'expense' },
+    ];
+    assert.equal(
+      formatStatementFooterSummary(statementRows, 'HNL'),
+      'Total Seleccionado: L 3,901.33 | N.º de Movimientos: 2'
+    );
+
+    // 4. Verificar creación de cuenta en Firestore seguida de inserción de transacción individual
+    const firestoreDocs = new Map();
+    const mockFirestoreModule = {
+      doc: (_db, ...segments) => ({ path: segments.join('/') }),
+      setDoc: async (ref, data) => {
+        firestoreDocs.set(ref.path, data);
+      },
+    };
+
+    const stateSingle = { accounts: [], transactions: [] };
+    const singleResult = await confirmAndPersistSmartScanTransaction(
+      {
+        tipoDocumento: 'Comprobante de Crédito (Ingreso)',
+        comercio: 'DEPOSITO DE AHORRO CON T/D',
+        fecha: '2026-10-22',
+        monto: '3,901.33',
+        moneda: 'HNL',
+        cuentaIdentificada: '213130058771',
+        categoriaSugerida: 'Salario',
+        categoryId: 'cat_salary',
+        bankName: 'Banco Atlántida',
+        createMissingAccount: true,
+      },
+      {
+        state: stateSingle,
+        workspaceId: 'ws_demo',
+        firestoreDb: {},
+        firestoreModule: mockFirestoreModule,
+      }
+    );
+
+    assert.ok(singleResult.createdAccount);
+    assert.equal(singleResult.createdAccount.accountNumber, '213130058771');
+    assert.equal(singleResult.createdAccount.institution, 'Banco Atlántida');
+    assert.equal(singleResult.transaction.accountId, singleResult.createdAccount.id);
+    assert.equal(singleResult.transaction.amount, 3901.33);
+    assert.equal(singleResult.transaction.categoriaSugerida, 'Salario');
+    assert.equal(firestoreDocs.size, 2);
+
+    // 5. Verificar creación de cuenta en Firestore seguida de inserción de lote de Estado de Cuenta
+    const firestoreBatchDocs = new Map();
+    const stateBatch = { accounts: [], transactions: [] };
+    const batchResult = await confirmAndPersistStatementBatch(
+      {
+        rows: statementRows,
+        cuentaIdentificada: '99887766',
+        bankName: 'BAC Credomatic',
+        moneda: 'HNL',
+        createMissingAccount: true,
+      },
+      {
+        state: stateBatch,
+        workspaceId: 'ws_demo',
+        firestoreDb: {},
+        firestoreModule: {
+          doc: (_db, ...segments) => ({ path: segments.join('/') }),
+          setDoc: async (ref, data) => {
+            firestoreBatchDocs.set(ref.path, data);
+          },
+        },
+      }
+    );
+
+    assert.ok(batchResult.createdAccount);
+    assert.equal(batchResult.createdAccount.accountNumber, '99887766');
+    assert.equal(batchResult.savedCount, 2);
+    assert.equal(stateBatch.transactions.length, 2);
+
+    // 6. Garantizar cero llamadas a console.log en los módulos refactorizados
+    for (const relPath of [
+      'src/js/services/smartScanExtractor.js',
+      'src/js/components/SmartScanModal.js',
+      'src/js/components/TransactionsView.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Expected zero console.log in ${relPath}`
+      );
+    }
+  });
+});
