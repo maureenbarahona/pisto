@@ -384,41 +384,22 @@
         <div class="smart-nlp-box">
           <div class="voucher-scanner-banner">
             <div class="voucher-banner-info">
-              <strong>📷 Escáner de Voucher POS &amp; 📄 Estado de Cuenta PDF (Open-Source ML · 0 Tokens)</strong>
-              <span>Decodifica fotos de vouchers o estados de cuenta bancarios en PDF (fecha, concepto, monto en Lempiras/Dólares) con detección automática de duplicados.</span>
+              <strong>📷 Escaneo Inteligente de Documentos y PDF</strong>
+              <span id="smart-scan-banner-description">Escanea facturas, recibos, vouchers POS, comprobantes de crédito/débito o estados de cuenta en PDF para registrar movimientos automáticamente.</span>
             </div>
             <div class="voucher-banner-actions">
               <input
                 type="file"
-                id="voucher-file-input"
-                accept="image/*,application/pdf"
-                capture="environment"
-                class="sr-only"
-              />
-              <input
-                type="file"
-                id="statement-file-input"
-                accept="application/pdf,image/*"
+                id="smart-scan-file-input"
+                accept="image/png,image/jpeg,image/webp,image/*,application/pdf,.pdf"
                 class="sr-only"
               />
               <button
                 type="button"
-                id="btn-scan-voucher"
+                id="btn-smart-scan"
                 class="btn-primary"
-                data-action="trigger-voucher-upload"
-                aria-label="Escanear foto o PDF de voucher POS"
-              >
-                📷 Escanear Voucher
-              </button>
-              <button
-                type="button"
-                id="btn-upload-statement"
-                class="btn-secondary"
-                data-action="trigger-statement-upload"
-                aria-label="Subir estado de cuenta bancario en formato PDF"
-              >
-                📄 Subir Estado de Cuenta PDF
-              </button>
+                data-action="trigger-smart-scan"
+              >📷 Escanear Documento / PDF</button>
             </div>
           </div>
 
@@ -1364,126 +1345,148 @@
   </dialog>
 
   <!-- ==================================================================== -->
-  <!-- MODAL 5: ESCÁNER DE VOUCHER / FACTURA PDF (OPEN-SOURCE ML OCR)       -->
+  <!-- MODAL 5: MODAL DE CONFIRMACIÓN ÚNICO (SMART SCAN DOCUMENTO / PDF)    -->
   <!-- ==================================================================== -->
-  <dialog id="voucher-scanner-dialog" class="modal-dialog modal-dialog-wide" closedby="any" aria-labelledby="voucher-dialog-title">
+  <dialog id="smart-scan-dialog" class="modal-dialog modal-dialog-wide" closedby="any" aria-labelledby="smart-scan-dialog-title">
     <div class="modal-header">
-      <h2 id="voucher-dialog-title">📷 Escáner ML de Voucher / Factura</h2>
-      <form method="dialog">
-        <button type="submit" class="btn-secondary btn-sm" id="btn-close-voucher-dialog" aria-label="Cerrar modal de escáner de voucher">Cerrar</button>
-      </form>
-    </div>
-
-    <div id="voucher-progress-box" class="voucher-progress-box is-hidden">
-      <div class="voucher-progress-labels">
-        <span id="voucher-progress-status">Preprocesando imagen con Visión Computacional...</span>
-        <strong id="voucher-progress-pct">15%</strong>
+      <div>
+        <h3 id="smart-scan-dialog-title">📷 Escanear Documento / PDF</h3>
+        <p id="smart-scan-subtitle" style="font-size: 0.78rem; color: var(--text-secondary); margin-top: 2px;">
+          Motor unificado de clasificación OCR y asociación automática a cuentas del workspace
+        </p>
       </div>
-      <progress id="voucher-progress-bar" class="native-progress" max="100" value="15"></progress>
+      <button type="button" class="btn-icon" data-close-modal="smart-scan-dialog" aria-label="Cerrar escáner inteligente">✕</button>
     </div>
 
-    <form id="voucher-confirm-form">
+    <div id="smart-scan-progress-box" class="voucher-progress-box is-hidden" aria-live="polite">
+      <div class="voucher-progress-labels">
+        <span id="smart-scan-progress-status">Analizando documento...</span>
+        <strong id="smart-scan-progress-pct">0%</strong>
+      </div>
+      <progress id="smart-scan-progress-bar" class="native-progress" value="0" max="100"></progress>
+    </div>
+
+    <form id="smart-scan-confirm-form">
       <div class="voucher-preview-grid">
         <div class="voucher-image-column">
           <img
-            id="voucher-preview-img"
+            id="smart-scan-preview-img"
             class="voucher-preview-img"
-            alt="Vista previa del voucher escaneado"
+            alt="Vista previa del documento escaneado"
+            src="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="
           />
-          <div id="voucher-match-badges" class="voucher-match-badges"></div>
+          <div id="smart-scan-match-badges" class="voucher-match-badges"></div>
         </div>
 
         <div class="voucher-fields-column">
+          <div id="smart-scan-tax-summary" class="voucher-tax-summary is-hidden"></div>
+
+          <div
+            id="smart-scan-duplicate-warning"
+            class="is-hidden"
+            role="alert"
+            style="padding: 0.85rem 1rem; border-radius: var(--radius-md); background: rgba(245, 158, 11, 0.14); border: 1px solid rgba(245, 158, 11, 0.45); margin-bottom: 0.85rem;"
+          >
+            <strong style="display: block; color: #fbbf24; font-size: 0.86rem; margin-bottom: 0.3rem;">
+              ⚠️ Posible Movimiento Duplicado Detectado
+            </strong>
+            <p id="smart-scan-duplicate-detail" style="font-size: 0.78rem; color: var(--text-secondary); margin: 0 0 0.6rem 0;">
+              Ya existe un movimiento con la misma fecha, monto y concepto en la cuenta seleccionada.
+            </p>
+            <div style="display: flex; flex-wrap: wrap; gap: 0.65rem;" role="radiogroup" aria-label="Acción ante movimiento duplicado">
+              <label style="display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; cursor: pointer;">
+                <input type="radio" name="duplicateResolution" value="overwrite" />
+                <span>Sobreescribir</span>
+              </label>
+              <label style="display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; cursor: pointer;">
+                <input type="radio" name="duplicateResolution" value="create_new" checked />
+                <span>Crear Nueva</span>
+              </label>
+              <label style="display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; cursor: pointer;">
+                <input type="radio" name="duplicateResolution" value="skip" />
+                <span>Omitir</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="form-grid-2">
+            <div class="field">
+              <label for="smart-scan-doc-type-select">Tipo de Documento</label>
+              <select id="smart-scan-doc-type-select" name="tipoDocumento">
+                <option value="Voucher POS">Voucher POS</option>
+                <option value="Factura/Recibo">Factura/Recibo</option>
+                <option value="Comprobante de Crédito (Ingreso)">Comprobante de Crédito (Ingreso)</option>
+                <option value="Comprobante de Débito (Gasto)">Comprobante de Débito (Gasto)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="smart-scan-date-input">Fecha del Comprobante</label>
+              <input type="date" id="smart-scan-date-input" name="fecha" required />
+            </div>
+          </div>
+
           <div class="field">
-            <label for="voucher-merchant-input">Comercio detectado</label>
+            <label for="smart-scan-merchant-input">Comercio / Concepto Detectado</label>
             <input
               type="text"
-              id="voucher-merchant-input"
-              name="merchant"
+              id="smart-scan-merchant-input"
+              name="comercio"
               required
-              placeholder="Ej. PRICE SMART TEG"
+              placeholder="Ej: Supermercados La Colonia / Transferencia ACH"
             />
           </div>
 
           <div class="form-grid-2">
             <div class="field">
-              <label for="voucher-amount-input">Monto Total</label>
+              <label for="smart-scan-amount-input">Monto Total</label>
               <input
                 type="number"
-                id="voucher-amount-input"
-                name="amount"
+                id="smart-scan-amount-input"
+                name="monto"
                 step="0.01"
                 min="0.01"
                 required
+                placeholder="0.00"
               />
             </div>
-
             <div class="field">
-              <label for="voucher-currency-select">Moneda</label>
-              <select id="voucher-currency-select" name="currency">
-                <option value="HNL">HNL (L)</option>
-                <option value="USD">USD ($)</option>
-                <option value="EUR">EUR (€)</option>
-                <option value="CRC">CRC (₡)</option>
-                <option value="MXN">MXN ($)</option>
-                <option value="COP">COP ($)</option>
-                <option value="CLP">CLP ($)</option>
-                <option value="ARS">ARS ($)</option>
+              <label for="smart-scan-currency-select">Moneda</label>
+              <select id="smart-scan-currency-select" name="moneda">
+                <option value="HNL">Lempiras (HNL)</option>
+                <option value="USD">Dólares (USD)</option>
               </select>
             </div>
           </div>
 
           <div class="form-grid-2">
             <div class="field">
-              <label for="voucher-date-input">Fecha del Voucher</label>
-              <input type="date" id="voucher-date-input" name="date" required />
-            </div>
-
-            <div class="field">
-              <label for="voucher-card-last4-input">Últimos 4 dígitos tarjeta</label>
+              <label for="smart-scan-identified-account-input">Cuenta / Últimos 4 Dígitos</label>
               <input
                 type="text"
-                id="voucher-card-last4-input"
-                name="cardLast4"
-                maxlength="8"
-                placeholder="Ej. 0618"
+                id="smart-scan-identified-account-input"
+                name="cuentaIdentificada"
+                maxlength="22"
+                placeholder="Ej: 4589 o 200014589"
               />
+            </div>
+            <div class="field">
+              <label for="smart-scan-category-select">Categoría Sugerida</label>
+              <select id="smart-scan-category-select" name="categoryId" required></select>
             </div>
           </div>
 
           <div class="field">
-            <label for="voucher-category-select">Categoría asociada</label>
-            <select id="voucher-category-select" name="categoryId" required></select>
-          </div>
-
-          <div class="field">
-            <label for="voucher-account-select">Cuenta asociada (por N.º de Cuenta / Tarjeta)</label>
-            <select id="voucher-account-select" name="accountId" required></select>
-          </div>
-
-          <div id="voucher-link-digits-row" class="field" style="flex-direction: row; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
-            <input type="checkbox" id="voucher-save-digits-checkbox" name="saveDigitsToAccount" checked />
-            <label for="voucher-save-digits-checkbox" id="voucher-save-digits-label" style="margin: 0; font-size: 0.8125rem;">
-              Vincular últimos dígitos detectados al Número de Cuenta seleccionado
-            </label>
+            <label for="smart-scan-account-select">Cuenta Asociada</label>
+            <select id="smart-scan-account-select" name="accountId" required></select>
+            <small id="smart-scan-account-match-hint" style="display: block; margin-top: 0.28rem; font-size: 0.76rem; color: var(--text-secondary);"></small>
           </div>
         </div>
       </div>
 
-      <div id="voucher-tax-summary" class="voucher-tax-summary is-hidden"></div>
-
       <div style="display: flex; gap: 0.6rem; margin-top: 0.75rem; flex-wrap: wrap;">
-        <button
-          type="button"
-          class="btn-secondary"
-          data-action="trigger-voucher-upload"
-          style="flex: 0 0 auto;"
-          aria-label="Seleccionar otra foto o PDF de voucher"
-        >
-          📷 Otra Foto/PDF
-        </button>
-        <button type="submit" id="btn-save-voucher-tx" class="btn-primary" style="flex: 1;">
-          Guardar Transacción del Voucher
+        <button type="button" class="btn-secondary" data-close-modal="smart-scan-dialog">Cancelar</button>
+        <button type="submit" id="btn-save-smart-scan-tx" class="btn-primary" style="flex: 1;">
+          Guardar Movimiento
         </button>
       </div>
     </form>

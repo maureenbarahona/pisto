@@ -4637,6 +4637,427 @@ describe('29. Limpieza Completa de Estado en Logout y Estado Inicial para Visita
   });
 });
 
+// ---------------------------------------------------------------------------
+// 30. Botón Único "📷 Escanear Documento / PDF", Motor Unificado de Clasificación/OCR,
+//     Asociación Automática a Cuentas en Firestore y SmartScanModal
+// ---------------------------------------------------------------------------
+describe('Unified Smart Scan Button, Classification & OCR Engine, Auto-Account Association & SmartScanModal', () => {
+  it('1. unifica la UI en la pestaña Transacciones con el único botón #btn-smart-scan y el texto descriptivo requerido', async () => {
+    const fs = await import('node:fs/promises');
+    const {
+      SMART_SCAN_BUTTON_ID,
+      SMART_SCAN_BUTTON_LABEL,
+      SMART_SCAN_BANNER_DESCRIPTION,
+      renderSmartScanBannerMarkup,
+      TransactionsView,
+    } = await import('../src/js/components/TransactionsView.js');
+
+    assert.equal(SMART_SCAN_BUTTON_ID, 'btn-smart-scan');
+    assert.equal(SMART_SCAN_BUTTON_LABEL, '📷 Escanear Documento / PDF');
+    assert.equal(
+      SMART_SCAN_BANNER_DESCRIPTION,
+      'Escanea facturas, recibos, vouchers POS, comprobantes de crédito/débito o estados de cuenta en PDF para registrar movimientos automáticamente.'
+    );
+
+    const bannerHtml = renderSmartScanBannerMarkup();
+    assert.ok(bannerHtml.includes('id="btn-smart-scan"'));
+    assert.ok(bannerHtml.includes('📷 Escanear Documento / PDF'));
+    assert.ok(bannerHtml.includes(SMART_SCAN_BANNER_DESCRIPTION));
+    assert.equal(bannerHtml.includes('btn-scan-voucher'), false);
+    assert.equal(bannerHtml.includes('btn-upload-statement'), false);
+
+    // Verificar en index.html y public/index.html
+    for (const htmlPath of ['index.html', 'public/index.html']) {
+      const html = await fs.readFile(new URL(`../${htmlPath}`, import.meta.url), 'utf8');
+      assert.ok(
+        html.includes('id="btn-smart-scan"'),
+        `Debe existir #btn-smart-scan en ${htmlPath}`
+      );
+      assert.ok(
+        html.includes('📷 Escanear Documento / PDF'),
+        `Debe mostrar "📷 Escanear Documento / PDF" en ${htmlPath}`
+      );
+      assert.ok(
+        html.includes(SMART_SCAN_BANNER_DESCRIPTION),
+        `Debe incluir el texto descriptivo exacto en ${htmlPath}`
+      );
+      assert.equal(
+        html.includes('id="btn-scan-voucher"'),
+        false,
+        `No debe existir el botón antiguo #btn-scan-voucher en ${htmlPath}`
+      );
+      assert.equal(
+        html.includes('id="btn-upload-statement"'),
+        false,
+        `No debe existir el botón antiguo #btn-upload-statement en ${htmlPath}`
+      );
+    }
+
+    // Verificar montaje de TransactionsView sobre un contenedor con botones legados
+    const fakeBanner = {
+      innerHTML: '<button id="btn-scan-voucher"></button><button id="btn-upload-statement"></button>',
+      querySelector: (sel) => {
+        if (sel === '#btn-scan-voucher' && fakeBanner.innerHTML.includes('btn-scan-voucher')) {
+          return {};
+        }
+        return null;
+      },
+    };
+    const view = new TransactionsView();
+    view.mountSmartScanBanner(fakeBanner);
+    assert.ok(fakeBanner.innerHTML.includes('id="btn-smart-scan"'));
+    assert.ok(fakeBanner.innerHTML.includes(SMART_SCAN_BANNER_DESCRIPTION));
+  });
+
+  it('2. clasifica documentos (Voucher POS, Factura/Recibo, Comprobante de Crédito, Comprobante de Débito) y sanitiza comas de miles ("3,901.33" -> 3901.33)', async () => {
+    const {
+      SMART_SCAN_DOCUMENT_TYPES,
+      sanitizeSmartScanAmount,
+      classifySmartScanDocumentType,
+      parseSmartScanText,
+      extractSmartScanDocument,
+    } = await import('../src/js/services/smartScanExtractor.js');
+
+    assert.equal(sanitizeSmartScanAmount('3,901.33'), 3901.33);
+    assert.equal(sanitizeSmartScanAmount('L. 14,250.75'), 14250.75);
+    assert.equal(sanitizeSmartScanAmount('$ 1,050.00'), 1050.0);
+
+    // a) Voucher POS
+    const posSample = `
+      BAC CREDOMATIC
+      COMPRA POS
+      SUPERMERCADOS LA COLONIA
+      FECHA: 18/10/2026
+      TARJETA VISA **** 4589
+      AUTORIZACION: 991204
+      LOTE: 044
+      TOTAL: L. 3,901.33
+    `;
+    assert.equal(
+      classifySmartScanDocumentType(posSample),
+      SMART_SCAN_DOCUMENT_TYPES.VOUCHER_POS
+    );
+    const parsedPos = await parseSmartScanText(posSample, { accounts: [], transactions: [] });
+    assert.equal(parsedPos.fecha, '2026-10-18');
+    assert.equal(parsedPos.monto, 3901.33);
+    assert.equal(parsedPos.moneda, 'HNL');
+    assert.equal(parsedPos.tipoDocumento, 'Voucher POS');
+    assert.equal(parsedPos.tipoTransaccion, 'expense');
+    assert.equal(parsedPos.cuentaIdentificada, '4589');
+
+    // b) Comprobante de Crédito (Ingreso)
+    const creditSample = `
+      BANPAIS
+      COMPROBANTE DE CREDITO
+      TRANSFERENCIA RECIBIDA ACH
+      FECHA: 2026-10-20
+      CUENTA DESTINO: 210045998821
+      MONTO TOTAL: USD 1,250.50
+    `;
+    assert.equal(
+      classifySmartScanDocumentType(creditSample),
+      SMART_SCAN_DOCUMENT_TYPES.CREDIT_SLIP
+    );
+    const parsedCredit = await extractSmartScanDocument(creditSample, {
+      accounts: [],
+      transactions: [],
+    });
+    assert.equal(parsedCredit.fecha, '2026-10-20');
+    assert.equal(parsedCredit.monto, 1250.5);
+    assert.equal(parsedCredit.moneda, 'USD');
+    assert.equal(parsedCredit.tipoDocumento, 'Comprobante de Crédito (Ingreso)');
+    assert.equal(parsedCredit.tipoTransaccion, 'income');
+    assert.equal(parsedCredit.cuentaIdentificada, '210045998821');
+
+    // c) Comprobante de Débito (Gasto)
+    const debitSample = `
+      BANCO ATLANTIDA
+      COMPROBANTE DE DEBITO
+      TRANSFERENCIA ENVIADA A TERCEROS
+      FECHA: 19/10/2026
+      CUENTA ORIGEN: *7732
+      TOTAL: L 2,400.00
+    `;
+    assert.equal(
+      classifySmartScanDocumentType(debitSample),
+      SMART_SCAN_DOCUMENT_TYPES.DEBIT_SLIP
+    );
+    const parsedDebit = await parseSmartScanText(debitSample, {
+      accounts: [],
+      transactions: [],
+    });
+    assert.equal(parsedDebit.fecha, '2026-10-19');
+    assert.equal(parsedDebit.monto, 2400);
+    assert.equal(parsedDebit.tipoDocumento, 'Comprobante de Débito (Gasto)');
+    assert.equal(parsedDebit.tipoTransaccion, 'expense');
+    assert.equal(parsedDebit.cuentaIdentificada, '7732');
+
+    // d) Factura/Recibo
+    const invoiceSample = `
+      FARMACIA KIELSA
+      RTN 08019002112233
+      FACTURA SAR 000-001-01-00049120
+      FECHA: 21/10/2026
+      TOTAL A PAGAR: L 645.20
+    `;
+    assert.equal(
+      classifySmartScanDocumentType(invoiceSample),
+      SMART_SCAN_DOCUMENT_TYPES.INVOICE_RECEIPT
+    );
+  });
+
+  it('3. consulta las cuentas en Firestore del workspace y asocia automáticamente si coincide accountNumber o últimos 4 dígitos, o habilita selección manual si no coincide', async () => {
+    const { matchAccountFromWorkspace } = await import(
+      '../src/js/services/smartScanExtractor.js'
+    );
+
+    const firestoreAccountsDocs = [
+      {
+        id: 'acc_bac_ahorro',
+        data: () => ({
+          id: 'acc_bac_ahorro',
+          name: 'BAC Ahorro Lempiras',
+          accountNumber: '200014589904',
+          currency: 'HNL',
+          archived: false,
+        }),
+      },
+      {
+        id: 'acc_ficohsa_tc',
+        data: () => ({
+          id: 'acc_ficohsa_tc',
+          name: 'Ficohsa Infinite',
+          accountNumber: '4589',
+          currency: 'USD',
+          archived: false,
+        }),
+      },
+      {
+        id: 'acc_archived_old',
+        data: () => ({
+          id: 'acc_archived_old',
+          name: 'Cuenta Archivada',
+          accountNumber: '1111',
+          currency: 'HNL',
+          archived: true,
+        }),
+      },
+    ];
+
+    let queriedPath = null;
+    const mockFirestoreModule = {
+      collection: (_db, ...segments) => {
+        queriedPath = segments.join('/');
+        return { path: queriedPath };
+      },
+      getDocs: async () => ({
+        docs: firestoreAccountsDocs,
+      }),
+    };
+
+    // Caso A: Coincidencia por últimos 4 dígitos ("9904" -> acc_bac_ahorro)
+    const matchByLast4 = await matchAccountFromWorkspace('9904', [], {
+      firestoreDb: {},
+      firestoreModule: mockFirestoreModule,
+      workspaceId: 'ws_demo_user',
+    });
+    assert.equal(queriedPath, 'workspaces/ws_demo_user/accounts');
+    assert.equal(matchByLast4.matched, true);
+    assert.equal(matchByLast4.accountId, 'acc_bac_ahorro');
+    assert.equal(matchByLast4.matchedAccount.name, 'BAC Ahorro Lempiras');
+    assert.equal(matchByLast4.activeAccounts.length, 2); // excluye archivada
+
+    // Caso B: Coincidencia exacta por número completo ("200014589904" -> acc_bac_ahorro)
+    const matchByFull = await matchAccountFromWorkspace('200014589904', [], {
+      firestoreDb: {},
+      firestoreModule: mockFirestoreModule,
+      workspaceId: 'ws_demo_user',
+    });
+    assert.equal(matchByFull.matched, true);
+    assert.equal(matchByFull.accountId, 'acc_bac_ahorro');
+
+    // Caso C: Sin coincidencia ("8812") -> matched: false y devuelve lista completa de cuentas activas
+    const noMatch = await matchAccountFromWorkspace('8812', [], {
+      firestoreDb: {},
+      firestoreModule: mockFirestoreModule,
+      workspaceId: 'ws_demo_user',
+    });
+    assert.equal(noMatch.matched, false);
+    assert.equal(noMatch.accountId, '');
+    assert.equal(noMatch.activeAccounts.length, 2);
+  });
+
+  it('4. en SmartScanModal detecta duplicados ("Sobreescribir", "Crear Nueva", "Omitir"), guarda en Firestore y actualiza el saldo de la cuenta asociada', async () => {
+    const fs = await import('node:fs/promises');
+    const {
+      DUPLICATE_RESOLUTION_ACTIONS,
+      confirmAndPersistSmartScanTransaction,
+      renderSmartScanModalMarkup,
+    } = await import('../src/js/components/SmartScanModal.js');
+    const { detectSmartScanDuplicate } = await import(
+      '../src/js/services/smartScanExtractor.js'
+    );
+
+    const modalHtml = renderSmartScanModalMarkup();
+    assert.ok(modalHtml.includes('value="overwrite"'));
+    assert.ok(modalHtml.includes('Sobreescribir'));
+    assert.ok(modalHtml.includes('value="create_new"'));
+    assert.ok(modalHtml.includes('Crear Nueva'));
+    assert.ok(modalHtml.includes('value="skip"'));
+    assert.ok(modalHtml.includes('Omitir'));
+
+    const state = {
+      activeWorkspaceId: 'ws_test_scan',
+      settings: { exchangeRateUSD: 24.85 },
+      accounts: [
+        {
+          id: 'acc_main',
+          name: 'BAC Ahorro',
+          accountNumber: '4589',
+          currency: 'HNL',
+          initialBalance: 10000,
+          currentBalance: 10000,
+        },
+      ],
+      transactions: [
+        {
+          id: 'tx_existing_1',
+          type: 'expense',
+          amount: 3901.33,
+          currency: 'HNL',
+          categoryId: 'groceries',
+          accountId: 'acc_main',
+          date: '2026-10-18',
+          note: 'LA COLONIA · Cuenta/Tarjeta *4589',
+        },
+      ],
+    };
+
+    // 4a. Detectar movimiento duplicado (misma fecha, monto y concepto)
+    const dupCheck = detectSmartScanDuplicate(
+      {
+        fecha: '2026-10-18',
+        comercio: 'LA COLONIA',
+        monto: '3,901.33',
+        moneda: 'HNL',
+      },
+      state.transactions,
+      'acc_main'
+    );
+    assert.equal(dupCheck.isDuplicate, true);
+    assert.equal(dupCheck.duplicateTx.id, 'tx_existing_1');
+
+    // 4b. Opción "Omitir" (skip) -> no modifica ni crea transacciones
+    const skipRes = await confirmAndPersistSmartScanTransaction({
+      extractedData: {
+        fecha: '2026-10-18',
+        comercio: 'LA COLONIA',
+        monto: '3,901.33',
+        moneda: 'HNL',
+        tipoDocumento: 'Voucher POS',
+        cuentaIdentificada: '4589',
+        accountId: 'acc_main',
+      },
+      state,
+      duplicateResolution: DUPLICATE_RESOLUTION_ACTIONS.SKIP,
+      duplicateTx: dupCheck.duplicateTx,
+    });
+    assert.equal(skipRes.saved, false);
+    assert.equal(skipRes.action, 'skip');
+    assert.equal(state.transactions.length, 1);
+
+    // 4c. Opción "Sobreescribir" (overwrite) -> actualiza transacción existente y recalcula saldo en Firestore
+    const firestoreWrites = [];
+    const mockFirestoreModule = {
+      doc: (_db, ...pathParts) => ({ path: pathParts.join('/') }),
+      setDoc: async (ref, data) => {
+        firestoreWrites.push({ op: 'setDoc', path: ref.path, data });
+      },
+      updateDoc: async (ref, data) => {
+        firestoreWrites.push({ op: 'updateDoc', path: ref.path, data });
+      },
+    };
+
+    const overwriteRes = await confirmAndPersistSmartScanTransaction({
+      extractedData: {
+        fecha: '2026-10-18',
+        comercio: 'LA COLONIA ACTUALIZADO',
+        monto: '4,000.00',
+        moneda: 'HNL',
+        tipoDocumento: 'Voucher POS',
+        cuentaIdentificada: '4589',
+        accountId: 'acc_main',
+        categoryId: 'groceries',
+      },
+      state,
+      duplicateResolution: DUPLICATE_RESOLUTION_ACTIONS.OVERWRITE,
+      duplicateTx: dupCheck.duplicateTx,
+      firestoreDb: {},
+      firestoreModule: mockFirestoreModule,
+      workspaceId: 'ws_test_scan',
+    });
+
+    assert.equal(overwriteRes.saved, true);
+    assert.equal(overwriteRes.action, 'overwrite');
+    assert.equal(state.transactions.length, 1);
+    assert.equal(state.transactions[0].amount, 4000);
+    assert.equal(overwriteRes.newAccountBalance, 6000); // 10,000 - 4,000
+    assert.equal(state.accounts[0].currentBalance, 6000);
+    assert.ok(
+      firestoreWrites.some((w) => w.path === 'workspaces/ws_test_scan/transactions/tx_existing_1')
+    );
+    assert.ok(
+      firestoreWrites.some(
+        (w) => w.path === 'workspaces/ws_test_scan/accounts/acc_main' && w.data.balance === 6000
+      )
+    );
+
+    // 4d. Confirmar un "Comprobante de Crédito (Ingreso)" ("Crear Nueva") -> incrementa el saldo de la cuenta
+    const creditRes = await confirmAndPersistSmartScanTransaction({
+      extractedData: {
+        fecha: '2026-10-21',
+        comercio: 'DEPOSITO DE PLANILLA',
+        monto: '2,500.00',
+        moneda: 'HNL',
+        tipoDocumento: 'Comprobante de Crédito (Ingreso)',
+        cuentaIdentificada: '4589',
+        accountId: 'acc_main',
+        categoryId: 'salary',
+      },
+      state,
+      duplicateResolution: DUPLICATE_RESOLUTION_ACTIONS.CREATE_NEW,
+      firestoreDb: {},
+      firestoreModule: mockFirestoreModule,
+      workspaceId: 'ws_test_scan',
+    });
+
+    assert.equal(creditRes.saved, true);
+    assert.equal(creditRes.transaction.type, 'income');
+    assert.equal(state.transactions.length, 2);
+    assert.equal(creditRes.newAccountBalance, 8500); // 6,000 + 2,500
+    assert.equal(state.accounts[0].currentBalance, 8500);
+
+    // 5. Verificar cero console.log en todos los archivos entregados
+    for (const relPath of [
+      'src/js/services/smartScanExtractor.js',
+      'src/js/components/TransactionsView.js',
+      'src/js/components/SmartScanModal.js',
+      'public/js/app.js',
+      'src/js/app.js',
+    ]) {
+      const content = await fs.readFile(new URL(`../${relPath}`, import.meta.url), 'utf8');
+      const stripped = content
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/\/\/.*$/gm, '');
+      assert.equal(
+        stripped.includes('console.log('),
+        false,
+        `Cero llamados a console.log permitidos en ${relPath}`
+      );
+    }
+  });
+});
+
 
 
 

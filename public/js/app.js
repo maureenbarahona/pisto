@@ -110,6 +110,33 @@ import {
   signOutWithCompleteCleanup,
   syncLogoutButtonVisibility,
 } from './services/auth.js';
+import {
+  SMART_SCAN_DOCUMENT_TYPES,
+  SUPPORTED_SMART_SCAN_MIMES,
+  sanitizeSmartScanAmount,
+  getTransactionTypeForDocument,
+  classifySmartScanDocumentType,
+  extractIdentifiedAccountNumber,
+  matchAccountFromWorkspace,
+  detectSmartScanDuplicate,
+  parseSmartScanText,
+  extractSmartScanDocument,
+} from './services/smartScanExtractor.js';
+import {
+  TransactionsView,
+  SMART_SCAN_BUTTON_ID,
+  SMART_SCAN_FILE_INPUT_ID,
+  SMART_SCAN_BUTTON_LABEL,
+  SMART_SCAN_BANNER_DESCRIPTION,
+  renderSmartScanBannerMarkup,
+} from './ui/transactionsView.js';
+import {
+  SmartScanModal,
+  SMART_SCAN_MODAL_ID,
+  DUPLICATE_RESOLUTION_ACTIONS,
+  renderSmartScanModalMarkup,
+  confirmAndPersistSmartScanTransaction,
+} from './ui/smartScanModal.js';
 
 export {
   openImportModal,
@@ -147,6 +174,27 @@ export {
   handleUnauthenticatedVisitorState,
   signOutWithCompleteCleanup,
   syncLogoutButtonVisibility,
+  SMART_SCAN_DOCUMENT_TYPES,
+  SUPPORTED_SMART_SCAN_MIMES,
+  sanitizeSmartScanAmount,
+  getTransactionTypeForDocument,
+  classifySmartScanDocumentType,
+  extractIdentifiedAccountNumber,
+  matchAccountFromWorkspace,
+  detectSmartScanDuplicate,
+  parseSmartScanText,
+  extractSmartScanDocument,
+  TransactionsView,
+  SMART_SCAN_BUTTON_ID,
+  SMART_SCAN_FILE_INPUT_ID,
+  SMART_SCAN_BUTTON_LABEL,
+  SMART_SCAN_BANNER_DESCRIPTION,
+  renderSmartScanBannerMarkup,
+  SmartScanModal,
+  SMART_SCAN_MODAL_ID,
+  DUPLICATE_RESOLUTION_ACTIONS,
+  renderSmartScanModalMarkup,
+  confirmAndPersistSmartScanTransaction,
 };
 
 export class FinanceAppController {
@@ -219,7 +267,7 @@ export class FinanceAppController {
     this.setupAccountDetailModal();
     this.setupCategoryModal();
     this.setupDeleteWarningModal();
-    this.setupVoucherScannerModal();
+    this.setupSmartScanModal();
     this.setupStatementImportModal();
     this.setupValidationAriaSync();
     this.setupPrivacyConsentBanner();
@@ -1026,7 +1074,7 @@ export class FinanceAppController {
 
     uploadStmtBtn?.addEventListener('click', () => {
       this.preferredStatementAccountId = this.activeDetailAccountId;
-      document.getElementById('statement-file-input')?.click();
+      document.getElementById(SMART_SCAN_FILE_INPUT_ID)?.click();
     });
 
     addTxBtn?.addEventListener('click', () => {
@@ -1394,219 +1442,62 @@ export class FinanceAppController {
   }
 
   /**
-   * Configures the Open-Source ML Voucher & PDF Invoice Scanner Modal (#voucher-scanner-dialog).
+   * Configures the unified Smart Scan button (#btn-smart-scan) in TransactionsView
+   * and the single confirmation modal (#smart-scan-dialog) via SmartScanModal.
    */
-  setupVoucherScannerModal() {
-    const scannerDialog = document.getElementById('voucher-scanner-dialog');
-    const fileInput = document.getElementById('voucher-file-input');
-    const confirmForm = document.getElementById('voucher-confirm-form');
-    const last4Input = document.getElementById('voucher-card-last4-input');
-    const accountSelect = document.getElementById('voucher-account-select');
-
-    if (scannerDialog) {
-      attachDialogLightDismissFallback(scannerDialog);
+  setupSmartScanModal() {
+    const dialogEl = document.getElementById(SMART_SCAN_MODAL_ID);
+    if (dialogEl) {
+      attachDialogLightDismissFallback(dialogEl);
     }
 
-    fileInput?.addEventListener('change', (e) => {
-      const file = e.target.files?.[0];
-      if (file) {
-        this.handleVoucherFileSelected(file);
-      }
-      fileInput.value = '';
-    });
-
-    // Live re-matching when user edits the last 4 digits field
-    last4Input?.addEventListener('input', () => {
-      const digits = extractLast4Digits(last4Input.value);
-      if (digits.length === 4 && accountSelect) {
-        const match = matchAccountForVoucher(
-          this.state.accounts,
-          digits,
-          this.lastScannedVoucher?.detectedBank
-        );
-        if (match.accountId) {
-          accountSelect.value = match.accountId;
-        }
-      }
-    });
-
-    confirmForm?.addEventListener('submit', (e) => {
-      e.preventDefault();
-      if (!confirmForm.checkValidity()) return;
-
-      const formData = new FormData(confirmForm);
-      const merchant = String(formData.get('merchant') || 'Comercio').trim();
-      const amount = Number.parseFloat(formData.get('amount') || '0');
-      const currency = String(formData.get('currency') || 'HNL');
-      const date = String(formData.get('date') || new Date().toISOString().slice(0, 10));
-      const categoryId = String(formData.get('categoryId') || 'groceries');
-      const accountId = String(formData.get('accountId') || this.state.accounts[0]?.id);
-      const cardLast4 = extractLast4Digits(formData.get('cardLast4') || '');
-      const saveDigits = formData.get('saveDigitsToAccount') === 'on';
-
-      // Optionally associate the cardLast4 digits with the chosen account if requested
-      if (saveDigits && cardLast4) {
-        const targetAcc = this.state.accounts.find((a) => a.id === accountId);
-        if (targetAcc && !targetAcc.accountNumber) {
-          targetAcc.accountNumber = cardLast4;
-        }
-      }
-
-      const noteParts = [merchant];
-      if (cardLast4) noteParts.push(`Tarjeta *${cardLast4}`);
-
-      const newTx = this.recordWorkspaceTransaction({
-        type: TRANSACTION_TYPES.EXPENSE,
-        amount,
-        currency,
-        categoryId,
-        accountId,
-        date,
-        note: noteParts.join(' · '),
-      });
-
-      this.state.transactions.unshift(newTx);
-      const currentMonthPrefix = new Date().toISOString().slice(0, 7);
-      if (!date.startsWith(currentMonthPrefix) && this.state.settings.periodFilter === 'month') {
-        this.state.settings.periodFilter = 'all';
-        this.state.settings.startDate = '';
-        this.state.settings.endDate = '';
-      }
-      this.state.aiTelemetry.localParsesSaved = (this.state.aiTelemetry.localParsesSaved || 0) + 1;
-      this.repo.saveState(this.state);
-
-      scannerDialog?.close();
-      this.showToast(
-        `📷 Voucher de "${merchant}" registrado (${Money.format(newTx.amount, newTx.currency)})`
-      );
-      this.renderAll();
-    });
-  }
-
-  /**
-   * Processes an uploaded/captured voucher image or PDF invoice with Open-Source ML OCR.
-   * Automatically redirects to the Bank Statement importer if the uploaded document is a multi-row statement.
-   * @param {File} file
-   */
-  async handleVoucherFileSelected(file) {
-    const scannerDialog = document.getElementById('voucher-scanner-dialog');
-    const progressBox = document.getElementById('voucher-progress-box');
-    const progressStatus = document.getElementById('voucher-progress-status');
-    const progressPct = document.getElementById('voucher-progress-pct');
-    const progressBar = document.getElementById('voucher-progress-bar');
-    const saveBtn = document.getElementById('btn-save-voucher-tx');
-
-    this.populateVoucherSelectOptions();
-
-    if (scannerDialog && !scannerDialog.open) {
-      scannerDialog.showModal();
-    }
-
-    if (progressBox) progressBox.classList.remove('is-hidden');
-    if (saveBtn) saveBtn.disabled = true;
-
-    try {
-      const decoded = await decodeVoucherFile(file, this.state, (status, pct) => {
-        if (progressStatus) progressStatus.textContent = status;
-        if (progressPct) progressPct.textContent = `${pct}%`;
-        if (progressBar) progressBar.value = pct;
-      });
-
-      // Check if the uploaded file is actually a Bank / Credit Card Statement with multiple rows
-      const stmtCheck = parseBankStatementText(decoded.rawText || '', this.state);
-      const hasStatementHeader =
-        /ESTADO\s+DE\s+CUENTA|FECHA\s+DE\s+CORTE|PAGO\s+DE\s+CONTADO|DETALLE\s+DE\s+TRANSACCIONES|SALDO\s+ANTERIOR/i.test(
-          decoded.rawText || ''
-        );
-
-      if (stmtCheck.items.length >= 2 || (file.type === 'application/pdf' && hasStatementHeader)) {
-        scannerDialog?.close();
+    this.smartScanModal = new SmartScanModal({
+      doc: document,
+      getState: () => this.state,
+      getWorkspaceId: () => this.getActiveWorkspaceId(),
+      firestoreDb: this.authService?.db || null,
+      firestoreModule: this.authService?.firestoreModule || null,
+      recordTransactionFn: (txInput) => this.recordWorkspaceTransaction(txInput),
+      showToast: (msg) => this.showToast(msg),
+      onMultiRowStatementDetected: async (file) => {
         this.showToast(
-          '📄 Estado de Cuenta detectado. Abriendo conciliador detallado de transacciones...'
+          '📄 Estado de Cuenta PDF con múltiples filas detectado. Abriendo conciliador...'
         );
         await this.handleStatementFileSelected(file);
-        return;
-      }
-
-      this.lastScannedVoucher = decoded;
-
-      const previewImg = document.getElementById('voucher-preview-img');
-      if (previewImg && decoded.originalDataUrl) {
-        previewImg.src = decoded.originalDataUrl;
-      }
-
-      document.getElementById('voucher-merchant-input').value = decoded.merchant || '';
-      document.getElementById('voucher-amount-input').value = decoded.amount > 0 ? decoded.amount : '';
-      document.getElementById('voucher-currency-select').value = decoded.currency || 'HNL';
-      document.getElementById('voucher-date-input').value = decoded.date;
-      document.getElementById('voucher-card-last4-input').value = decoded.cardLast4 || '';
-      document.getElementById('voucher-category-select').value = decoded.categoryId;
-      document.getElementById('voucher-account-select').value = decoded.accountId;
-
-      // Render match badges
-      const badgesEl = document.getElementById('voucher-match-badges');
-      if (badgesEl) {
-        const matchBadgeText =
-          decoded.accountMatchType === 'account_number'
-            ? `✅ Asociada por N.º *${decoded.cardLast4} → ${decoded.matchedAccountName}`
-            : decoded.accountMatchType === 'institution'
-              ? `🏦 Asociada por Entidad (${decoded.detectedBank}) → ${decoded.matchedAccountName}`
-              : decoded.cardLast4
-                ? `💳 Tarjeta detectada: *${decoded.cardLast4} (seleccione cuenta para vincular)`
-                : `ℹ️ Sin dígitos de tarjeta visibles en voucher`;
-
-        badgesEl.innerHTML = `
-          <div class="voucher-pill">${matchBadgeText}</div>
-          ${decoded.detectedBank ? `<div class="voucher-pill">Entidad POS: <strong>${decoded.detectedBank}</strong></div>` : ''}
-        `;
-      }
-
-      // Render tax breakdown if present on voucher
-      const taxSummaryEl = document.getElementById('voucher-tax-summary');
-      if (taxSummaryEl) {
-        const { subtotal, isv, devolIsv } = decoded.breakdown || {};
-        if (subtotal > 0 || isv > 0) {
-          taxSummaryEl.classList.remove('is-hidden');
-          taxSummaryEl.innerHTML = `
-            <strong>Desglose detectado en voucher:</strong>
-            Subtotal: ${Money.format(subtotal, decoded.currency)} ·
-            ISV: ${Money.format(isv, decoded.currency)}
-            ${devolIsv > 0 ? ` · Devolución ISV: -${Money.format(devolIsv, decoded.currency)}` : ''} ·
-            <strong>Total: ${Money.format(decoded.amount, decoded.currency)}</strong>
-          `;
-        } else {
-          taxSummaryEl.classList.add('is-hidden');
+      },
+      onSaved: (result) => {
+        if (!result?.saved || !result?.transaction) return;
+        const txDate = String(result.transaction.date || '');
+        const currentMonthPrefix = new Date().toISOString().slice(0, 7);
+        if (
+          txDate &&
+          !txDate.startsWith(currentMonthPrefix) &&
+          this.state.settings.periodFilter === 'month'
+        ) {
+          this.state.settings.periodFilter = 'all';
+          this.state.settings.startDate = '';
+          this.state.settings.endDate = '';
         }
-      }
-    } catch (error) {
-      this.showToast(`Aviso al escanear voucher: ${error.message}`);
-    } finally {
-      if (progressBox) progressBox.classList.add('is-hidden');
-      if (saveBtn) saveBtn.disabled = false;
-    }
-  }
+        this.state.aiTelemetry.localParsesSaved =
+          (this.state.aiTelemetry.localParsesSaved || 0) + 1;
+        this.repo.saveState(this.state);
+        this.renderAll();
+      },
+    });
+    this.smartScanModal.ensureDialogElement();
 
-  populateVoucherSelectOptions() {
-    const catSelect = document.getElementById('voucher-category-select');
-    const accSelect = document.getElementById('voucher-account-select');
-
-    if (catSelect) {
-      const expenseCats = this.state.categories.filter((c) => c.type === TRANSACTION_TYPES.EXPENSE);
-      catSelect.innerHTML = expenseCats
-        .map((c) => `<option value="${c.id}">${c.name}</option>`)
-        .join('');
-    }
-
-    if (accSelect) {
-      const activeAccounts = filterActiveAccounts(this.state.accounts);
-      accSelect.innerHTML = activeAccounts
-        .map((a) => {
-          const numBadge = a.accountNumber ? ` (N.º *${extractLast4Digits(a.accountNumber) || a.accountNumber})` : '';
-          const instBadge = a.institution ? ` · ${a.institution}` : '';
-          return `<option value="${a.id}">${a.name}${numBadge}${instBadge} [${a.currency}]</option>`;
-        })
-        .join('');
-    }
+    this.transactionsView = new TransactionsView({
+      doc: document,
+      onFileSelected: (file) => {
+        const preferredAccountId = this.preferredStatementAccountId || '';
+        this.preferredStatementAccountId = null;
+        void this.smartScanModal.processFileAndOpen(file, {
+          preferredAccountId,
+          geminiApiKey: this.authService?.getGeminiApiKey?.() || '',
+        });
+      },
+    });
+    this.transactionsView.mountSmartScanBanner();
   }
 
   /**
@@ -2163,10 +2054,8 @@ export class FinanceAppController {
         this.state.settings.endDate = '';
         this.repo.saveState(this.state);
         this.renderAll();
-      } else if (action === 'trigger-voucher-upload') {
-        document.getElementById('voucher-file-input')?.click();
-      } else if (action === 'trigger-statement-upload') {
-        document.getElementById('statement-file-input')?.click();
+      } else if (action === 'trigger-smart-scan') {
+        document.getElementById(SMART_SCAN_FILE_INPUT_ID)?.click();
       } else if (action === 'smart-parse-ai') {
         this.handleGenkitSmartParse();
       } else if (action === 'generate-ai-insights') {
