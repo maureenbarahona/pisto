@@ -89,19 +89,36 @@ export const FIRESTORE_WORKSPACES_CACHE_PREFIX = 'pisto_firestore_workspaces_doc
 export const FIRESTORE_EMAIL_WORKSPACE_PREFIX = 'pisto_workspace_by_email_';
 
 export const SUPPORTED_COUNTRIES = Object.freeze([
-  { code: 'HN', name: 'Honduras', flag: '🇭🇳', defaultCurrency: 'HNL' },
-  { code: 'US', name: 'Estados Unidos', flag: '🇺🇸', defaultCurrency: 'USD' },
-  { code: 'CR', name: 'Costa Rica', flag: '🇨🇷', defaultCurrency: 'CRC' },
-  { code: 'MX', name: 'México', flag: '🇲🇽', defaultCurrency: 'MXN' },
-  { code: 'GT', name: 'Guatemala', flag: '🇬🇹', defaultCurrency: 'USD' },
-  { code: 'SV', name: 'El Salvador', flag: '🇸🇻', defaultCurrency: 'USD' },
-  { code: 'NI', name: 'Nicaragua', flag: '🇳🇮', defaultCurrency: 'USD' },
-  { code: 'PA', name: 'Panamá', flag: '🇵🇦', defaultCurrency: 'USD' },
-  { code: 'CO', name: 'Colombia', flag: '🇨🇴', defaultCurrency: 'COP' },
-  { code: 'CL', name: 'Chile', flag: '🇨🇱', defaultCurrency: 'CLP' },
-  { code: 'AR', name: 'Argentina', flag: '🇦🇷', defaultCurrency: 'ARS' },
-  { code: 'ES', name: 'España', flag: '🇪🇸', defaultCurrency: 'EUR' },
+  { code: 'HN', name: 'Honduras', flag: '🇭🇳', defaultCurrency: 'HNL', taxName: 'ISV', taxRate: 0.15 },
+  { code: 'GT', name: 'Guatemala', flag: '🇬🇹', defaultCurrency: 'GTQ', taxName: 'IVA', taxRate: 0.12 },
+  { code: 'SV', name: 'El Salvador', flag: '🇸🇻', defaultCurrency: 'USD', taxName: 'IVA', taxRate: 0.13 },
+  { code: 'CR', name: 'Costa Rica', flag: '🇨🇷', defaultCurrency: 'CRC', taxName: 'IVA', taxRate: 0.13 },
+  { code: 'NI', name: 'Nicaragua', flag: '🇳🇮', defaultCurrency: 'NIO', taxName: 'IVA', taxRate: 0.15 },
+  { code: 'PA', name: 'Panamá', flag: '🇵🇦', defaultCurrency: 'USD', taxName: 'ITBMS', taxRate: 0.07 },
+  { code: 'MX', name: 'México', flag: '🇲🇽', defaultCurrency: 'MXN', taxName: 'IVA', taxRate: 0.16 },
+  { code: 'US', name: 'Estados Unidos', flag: '🇺🇸', defaultCurrency: 'USD', taxName: 'Sales Tax', taxRate: 0.08 },
+  { code: 'CO', name: 'Colombia', flag: '🇨🇴', defaultCurrency: 'COP', taxName: 'IVA', taxRate: 0.19 },
+  { code: 'CL', name: 'Chile', flag: '🇨🇱', defaultCurrency: 'CLP', taxName: 'IVA', taxRate: 0.19 },
+  { code: 'AR', name: 'Argentina', flag: '🇦🇷', defaultCurrency: 'ARS', taxName: 'IVA', taxRate: 0.21 },
+  { code: 'ES', name: 'España', flag: '🇪🇸', defaultCurrency: 'EUR', taxName: 'IVA', taxRate: 0.21 },
 ]);
+
+/**
+ * Normalizes an ISO country code (e.g. "HN", "GT", "SV", "CR", "NI", "PA", "MX", "US"),
+ * defaulting to "HN" (Honduras) when omitted or invalid.
+ * @param {unknown} rawCountry
+ * @returns {string}
+ */
+export function normalizeCountryCode(rawCountry = 'HN') {
+  const candidate = String(rawCountry || '')
+    .trim()
+    .toUpperCase();
+  if (!candidate) return 'HN';
+  if (SUPPORTED_COUNTRIES.some((c) => c.code === candidate)) {
+    return candidate;
+  }
+  return 'HN';
+}
 
 /**
  * Formats a detailed diagnostic error message containing both `error.code` and `error.message`
@@ -153,9 +170,7 @@ export function createUserProfile(input) {
     cleanDisplayName;
   const cleanEmail = String(input.email || '').trim().toLowerCase().slice(0, 120);
   const cleanPhotoURL = String(input.photoURL || '').trim().slice(0, 500);
-  const validCountry = SUPPORTED_COUNTRIES.some((c) => c.code === input.country)
-    ? String(input.country)
-    : 'HN';
+  const validCountry = normalizeCountryCode(input.country);
   const validCurrency = input.defaultCurrency && CURRENCIES[input.defaultCurrency]
     ? String(input.defaultCurrency)
     : 'HNL';
@@ -842,6 +857,7 @@ export class FirebaseAuthProfileService {
             !existingData.displayName ||
             !existingData.email ||
             typeof existingData.photoURL !== 'string' ||
+            !existingData.country ||
             !existingData.createdAt ||
             !existingData.workspaceId ||
             existingData.workspaceId === 'ws_default' ||
@@ -857,6 +873,7 @@ export class FirebaseAuthProfileService {
               existingData.name || existingData.displayName || user.displayName || 'Usuario Google',
             email: existingData.email || user.email || '',
             photoURL: existingData.photoURL || user.photoURL || '',
+            country: normalizeCountryCode(existingData.country || user.country || 'HN'),
             createdAt: existingData.createdAt || nowIso,
             updatedAt: nowIso,
             hasCompletedOnboarding: resolvedCompleted,
@@ -1679,10 +1696,11 @@ export class FirebaseAuthProfileService {
     this.setItem(docKey, JSON.stringify(updatedProfile));
     this.currentProfile = updatedProfile;
 
-    if (this.currentUser && this.currentUser.uid === uid && updatedProfile.name) {
+    if (this.currentUser && this.currentUser.uid === uid) {
       this.currentUser = {
         ...this.currentUser,
-        displayName: updatedProfile.name,
+        ...(updatedProfile.name ? { displayName: updatedProfile.name } : {}),
+        country: updatedProfile.country,
       };
       this.setItem(LOCAL_AUTH_SESSION_KEY, JSON.stringify(this.currentUser));
     }
@@ -1691,14 +1709,14 @@ export class FirebaseAuthProfileService {
       try {
         const userDocRef = this.firestoreModule.doc(this.firestoreDb, 'users', uid);
         let updatedViaUpdateDoc = false;
-        if (
-          updates?.hasCompletedOnboarding === true &&
-          typeof this.firestoreModule.updateDoc === 'function'
-        ) {
+        if (typeof this.firestoreModule.updateDoc === 'function') {
           try {
             await this.firestoreModule.updateDoc(userDocRef, {
               ...updates,
-              hasCompletedOnboarding: true,
+              country: updatedProfile.country,
+              ...(updates?.hasCompletedOnboarding === true
+                ? { hasCompletedOnboarding: true }
+                : {}),
               updatedAt: updatedProfile.updatedAt,
             });
             updatedViaUpdateDoc = true;

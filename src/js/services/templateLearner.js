@@ -29,6 +29,12 @@ import {
   normalizeScanDateToIso,
   classifyTransactionType,
 } from '../../../public/js/schemas/accountScan.js';
+import {
+  DEFAULT_USER_COUNTRY,
+  normalizeUserCountryCode,
+  getCountryRegionalConfig,
+  getActiveUserCountry,
+} from './user.js';
 
 export const BANK_TEMPLATES_COLLECTION = 'bank_templates';
 export const BANK_TEMPLATES_LOCAL_STORE = 'bank_templates_local';
@@ -39,12 +45,13 @@ export const BANK_TEMPLATES_STORAGE_MIRROR_KEY = 'pisto_bank_templates_local_v1'
 const inMemoryTemplatesStore = new Map();
 
 /**
- * Plantillas base pre-entrenadas para formatos bancarios frecuentes (Promerica App, BAC Web, BAC App, Atlántida).
+ * Plantillas base pre-entrenadas para formatos bancarios frecuentes por país (`country`).
  */
 export const DEFAULT_BANK_TEMPLATES = Object.freeze([
   Object.freeze({
     bankId: 'promerica_app',
     bankName: 'Banco Promerica',
+    country: 'HN',
     keywords: Object.freeze([
       'Banco Promerica',
       'Cuentas de cheques y ahorros',
@@ -62,6 +69,7 @@ export const DEFAULT_BANK_TEMPLATES = Object.freeze([
   Object.freeze({
     bankId: 'bac_web',
     bankName: 'BAC Credomatic',
+    country: 'HN',
     keywords: Object.freeze([
       'Resumen de productos',
       'Banca en Línea',
@@ -81,6 +89,7 @@ export const DEFAULT_BANK_TEMPLATES = Object.freeze([
   Object.freeze({
     bankId: 'bac_mobile',
     bankName: 'BAC Credomatic',
+    country: 'HN',
     keywords: Object.freeze([
       'Cuentas personales',
       'Tarjetas personales',
@@ -101,6 +110,7 @@ export const DEFAULT_BANK_TEMPLATES = Object.freeze([
   Object.freeze({
     bankId: 'atlantida_mobile',
     bankName: 'Banco Atlántida',
+    country: 'HN',
     keywords: Object.freeze([
       'Banco Atlántida',
       'CUENTA DE AHORRO SOS',
@@ -114,15 +124,100 @@ export const DEFAULT_BANK_TEMPLATES = Object.freeze([
       currentBalance: '(?:L\\.?|LPS|HNL|USD|\\$)\\s*(\\d{1,3}(?:,\\d{3})*\\.\\d{2}|\\d+\\.\\d{2})',
     }),
   }),
+  Object.freeze({
+    bankId: 'ficohsa_hn_mobile',
+    bankName: 'Banco Ficohsa',
+    country: 'HN',
+    keywords: Object.freeze([
+      'Banco Ficohsa',
+      'Ficohsa',
+      'Interbanca Ficohsa',
+      'Cuenta Ficohsa',
+    ]),
+    extractionRules: Object.freeze({
+      accountNumber: '\\b(\\d{8,16})\\b',
+      accountType: '(Cuenta\\s+de\\s+Ahorros?|Cuenta\\s+de\\s+Cheques|Tarjeta\\s+Ficohsa)',
+      currency: '(L\\.?|LPS|HNL|USD|\\$)',
+      currentBalance: '(?:L\\.?|LPS|HNL|USD|\\$)\\s*(\\d{1,3}(?:,\\d{3})*\\.\\d{2}|\\d+\\.\\d{2})',
+    }),
+  }),
+  Object.freeze({
+    bankId: 'banpais_hn_mobile',
+    bankName: 'Banpaís',
+    country: 'HN',
+    keywords: Object.freeze([
+      'Banpaís',
+      'Banco del País',
+      'BP en Línea',
+      'Cuenta Banpaís',
+    ]),
+    extractionRules: Object.freeze({
+      accountNumber: '\\b(\\d{8,16})\\b',
+      accountType: '(Cuenta\\s+de\\s+Ahorros?|Cuenta\\s+de\\s+Cheques|Tarjeta\\s+Banpa[ií]s)',
+      currency: '(L\\.?|LPS|HNL|USD|\\$)',
+      currentBalance: '(?:L\\.?|LPS|HNL|USD|\\$)\\s*(\\d{1,3}(?:,\\d{3})*\\.\\d{2}|\\d+\\.\\d{2})',
+    }),
+  }),
+  Object.freeze({
+    bankId: 'industrial_gt_app',
+    bankName: 'Banco Industrial',
+    country: 'GT',
+    keywords: Object.freeze([
+      'Banco Industrial',
+      'Bi en Línea',
+      'Cuenta Monetaria Bi',
+      'Ahorro Bi',
+    ]),
+    extractionRules: Object.freeze({
+      accountNumber: '\\b(\\d{7,16})\\b',
+      accountType: '(Cuenta\\s+Monetaria|Cuenta\\s+de\\s+Ahorros?|Tarjeta\\s+Bi)',
+      currency: '(GTQ|Q\\.?|Quetzales|USD|\\$)',
+      currentBalance: '(?:GTQ|Q\\.?|USD|\\$)\\s*(\\d{1,3}(?:,\\d{3})*\\.\\d{2}|\\d+\\.\\d{2})',
+    }),
+  }),
+  Object.freeze({
+    bankId: 'banrural_gt_app',
+    bankName: 'Banrural',
+    country: 'GT',
+    keywords: Object.freeze([
+      'Banrural',
+      'Banca Virtual Banrural',
+      'Amigo Financiero',
+    ]),
+    extractionRules: Object.freeze({
+      accountNumber: '\\b(\\d{8,16})\\b',
+      accountType: '(Cuenta\\s+Monetaria|Cuenta\\s+de\\s+Ahorros?)',
+      currency: '(GTQ|Q\\.?|Quetzales|USD|\\$)',
+      currentBalance: '(?:GTQ|Q\\.?|USD|\\$)\\s*(\\d{1,3}(?:,\\d{3})*\\.\\d{2}|\\d+\\.\\d{2})',
+    }),
+  }),
 ]);
 
 /**
- * Normaliza un indicador de moneda (LPS/HNL/L/Lempiras -> HNL, USD/$/US$/Dólares -> USD).
+ * Normaliza un indicador de moneda adaptándose al país del usuario cuando no se explicita divisa.
  * @param {string} rawCurrency
- * @returns {'HNL'|'USD'}
+ * @param {string} [country='HN']
+ * @returns {string}
  */
-export function normalizeTemplateCurrency(rawCurrency) {
+export function normalizeTemplateCurrency(rawCurrency, country = DEFAULT_USER_COUNTRY) {
   const token = String(rawCurrency || '').trim().toUpperCase();
+  const regional = getCountryRegionalConfig(country);
+
+  if (/\bGTQ\b|\bQUETZAL(?:ES)?\b|(?:^|[^\w])Q\.?(?=\s*\d|$)/i.test(token)) {
+    return 'GTQ';
+  }
+  if (/\bCRC\b|\bCOL[OÓ]N(?:ES)?\b|₡/i.test(token)) {
+    return 'CRC';
+  }
+  if (/\bNIO\b|\bC[OÓ]RDOBAS?\b|C\$/i.test(token)) {
+    return 'NIO';
+  }
+  if (/\bMXN\b|\bMEX\$|\bPESOS?\s+MEX/i.test(token)) {
+    return 'MXN';
+  }
+  if (/\bHNL\b|\bLPS\b|\bLEMPIRAS?\b|(?:^|[^\w])L\.?(?=\s*\d|$)/i.test(token)) {
+    return 'HNL';
+  }
   if (
     token.includes('USD') ||
     token.includes('US$') ||
@@ -130,9 +225,18 @@ export function normalizeTemplateCurrency(rawCurrency) {
     token.includes('DOLAR') ||
     token.includes('DÓLAR')
   ) {
+    if (
+      normalizeUserCountryCode(country) === 'MX' &&
+      !token.includes('USD') &&
+      !token.includes('US$') &&
+      !token.includes('DOLAR') &&
+      !token.includes('DÓLAR')
+    ) {
+      return 'MXN';
+    }
     return 'USD';
   }
-  return 'HNL';
+  return regional.defaultCurrency || 'HNL';
 }
 
 /**
@@ -260,15 +364,103 @@ export function normalizeBankTemplate(rawTemplate = {}) {
         }))
     : [];
 
+  const country = normalizeUserCountryCode(rawTemplate.country || DEFAULT_USER_COUNTRY);
+
   return {
     bankId,
     bankName,
+    country,
     keywords,
     extractionRules,
+    ...(rawTemplate.documentType ? { documentType: String(rawTemplate.documentType) } : {}),
+    ...(rawTemplate.statementRules && typeof rawTemplate.statementRules === 'object'
+      ? { statementRules: { ...rawTemplate.statementRules } }
+      : {}),
+    ...(rawTemplate.accountInfo && typeof rawTemplate.accountInfo === 'object'
+      ? { accountInfo: { ...rawTemplate.accountInfo } }
+      : {}),
     ...(learnedAccounts.length > 0 ? { learnedAccounts } : {}),
     ...(rawTemplate.fingerprint ? { fingerprint: String(rawTemplate.fingerprint) } : {}),
     updatedAt: String(rawTemplate.updatedAt || new Date().toISOString()),
   };
+}
+
+/**
+ * Filtra y ordena la lista de `bank_templates` según el `country` seleccionado por el usuario,
+ * priorizando los bancos específicos del país (ej. Atlántida, BAC, Ficohsa, Promerica, Banpaís para HN).
+ *
+ * @param {Array<object>} [templates=[]]
+ * @param {string} [country='HN']
+ * @param {{ strictCountry?: boolean }} [options]
+ * @returns {Array<ReturnType<typeof normalizeBankTemplate>>}
+ */
+export function filterBankTemplatesByCountry(
+  templates = [],
+  country = DEFAULT_USER_COUNTRY,
+  options = {}
+) {
+  const targetCountry = normalizeUserCountryCode(country);
+  const regional = getCountryRegionalConfig(targetCountry);
+  const priorityBanksLower = regional.priorityBanks.map((b) =>
+    b
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+  );
+
+  const normalizedList = (Array.isArray(templates) ? templates : [])
+    .filter((t) => t && typeof t === 'object')
+    .map((t) => ({
+      ...normalizeBankTemplate(t),
+      _hadExplicitCountry: Boolean(t.country),
+    }));
+
+  const exactCountryMatches = normalizedList.filter(
+    (tpl) => tpl.country === targetCountry || !tpl._hadExplicitCountry
+  );
+
+  // If strictCountry is requested or we have exact matches for the target country,
+  // exclude templates explicitly registered for a different country unless they belong to a regional priority bank
+  const filtered = normalizedList.filter((tpl) => {
+    if (tpl.country === targetCountry) return true;
+    if (options.strictCountry === true || options.strictCountryOnly === true) return false;
+    if (!tpl._hadExplicitCountry) return true;
+    const normBank = tpl.bankName
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
+    return priorityBanksLower.some((pb) => normBank.includes(pb) || pb.includes(normBank));
+  });
+
+  const baseResult = filtered.length > 0 ? filtered : exactCountryMatches;
+
+  return baseResult
+    .sort((a, b) => {
+      const aCountryScore = a.country === targetCountry ? 20 : 0;
+      const bCountryScore = b.country === targetCountry ? 20 : 0;
+
+      const aBankNorm = a.bankName
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+      const bBankNorm = b.bankName
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+
+      const aPriorityIdx = priorityBanksLower.findIndex(
+        (pb) => aBankNorm.includes(pb) || pb.includes(aBankNorm)
+      );
+      const bPriorityIdx = priorityBanksLower.findIndex(
+        (pb) => bBankNorm.includes(pb) || pb.includes(bBankNorm)
+      );
+
+      const aBankScore = aPriorityIdx >= 0 ? 15 - Math.min(aPriorityIdx, 10) : 0;
+      const bBankScore = bPriorityIdx >= 0 ? 15 - Math.min(bPriorityIdx, 10) : 0;
+
+      return bCountryScore + bBankScore - (aCountryScore + aBankScore);
+    })
+    .map(({ _hadExplicitCountry, ...cleanTpl }) => cleanTpl);
 }
 
 function seedInMemoryDefaults() {
@@ -439,6 +631,9 @@ export async function getAllLocalBankTemplates(options = {}) {
  * @returns {Promise<Array<ReturnType<typeof normalizeBankTemplate>>>}
  */
 export async function fetchBankTemplatesFromFirestore(options = {}) {
+  const targetCountry = options.country
+    ? normalizeUserCountryCode(options.country)
+    : getActiveUserCountry(options);
   const localTemplates = await getAllLocalBankTemplates(options);
   const merged = new Map(localTemplates.map((tpl) => [tpl.bankId, tpl]));
 
@@ -451,13 +646,35 @@ export async function fetchBankTemplatesFromFirestore(options = {}) {
   ) {
     try {
       const colRef = firestoreModule.collection(firestoreDb, BANK_TEMPLATES_COLLECTION);
-      const snap = await firestoreModule.getDocs(colRef);
+      let queryTarget = colRef;
+      if (
+        typeof firestoreModule.query === 'function' &&
+        typeof firestoreModule.where === 'function' &&
+        targetCountry
+      ) {
+        try {
+          queryTarget = firestoreModule.query(
+            colRef,
+            firestoreModule.where('country', '==', targetCountry)
+          );
+        } catch {
+          queryTarget = colRef;
+        }
+      }
+      let snap = await firestoreModule.getDocs(queryTarget);
+      if (
+        (!snap || !Array.isArray(snap.docs) || snap.docs.length === 0) &&
+        queryTarget !== colRef
+      ) {
+        snap = await firestoreModule.getDocs(colRef);
+      }
       const docs = Array.isArray(snap?.docs) ? snap.docs : [];
       for (const docSnap of docs) {
         const rawData = typeof docSnap.data === 'function' ? docSnap.data() : docSnap;
         if (rawData && typeof rawData === 'object') {
           const norm = normalizeBankTemplate({
             bankId: docSnap.id || rawData.bankId,
+            country: rawData.country || targetCountry,
             ...rawData,
           });
           merged.set(norm.bankId, norm);
@@ -469,7 +686,11 @@ export async function fetchBankTemplatesFromFirestore(options = {}) {
     }
   }
 
-  return Array.from(merged.values());
+  const allMerged = Array.from(merged.values());
+  return filterBankTemplatesByCountry(allMerged, targetCountry, {
+    strictCountry: Boolean(options.strictCountry || options.strictCountryOnly),
+    strictCountryOnly: Boolean(options.strictCountryOnly || options.strictCountry),
+  });
 }
 
 /**
@@ -572,21 +793,40 @@ export function computeLayoutFingerprint(rawText) {
 }
 
 /**
- * Encuentra la plantilla de `bank_templates_local` que mejor coincide con el texto OCR.
+ * Encuentra la plantilla de `bank_templates_local` que mejor coincide con el texto OCR,
+ * priorizando los bancos y reglas del `country` seleccionado por el usuario.
  * @param {string} rawText
  * @param {Array<object>} [templates]
+ * @param {string|object} [countryOrOptions='HN']
  * @returns {ReturnType<typeof normalizeBankTemplate> | null}
  */
-export function matchBankTemplateFromText(rawText, templates = null) {
+export function matchBankTemplateFromText(
+  rawText,
+  templates = null,
+  countryOrOptions = DEFAULT_USER_COUNTRY
+) {
   const text = String(rawText || '').trim();
   if (!text) return null;
 
+  const targetCountry =
+    typeof countryOrOptions === 'string'
+      ? normalizeUserCountryCode(countryOrOptions)
+      : getActiveUserCountry(countryOrOptions);
+  const regional = getCountryRegionalConfig(targetCountry);
+  const priorityBanksLower = regional.priorityBanks.map((b) =>
+    b
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+  );
+
   const lowerText = text.toLowerCase();
-  const candidateTemplates =
+  const rawCandidates =
     Array.isArray(templates) && templates.length > 0
-      ? templates.map((t) => normalizeBankTemplate(t))
+      ? templates
       : getLocalBankTemplatesSync();
 
+  const candidateTemplates = filterBankTemplatesByCountry(rawCandidates, targetCountry);
   const textFingerprint = computeLayoutFingerprint(text);
 
   let bestTemplate = null;
@@ -613,6 +853,20 @@ export function matchBankTemplateFromText(rawText, templates = null) {
         if (rawNumToken && rawNumToken.length >= 4 && lowerText.includes(rawNumToken)) {
           score += 8;
         }
+      }
+    }
+
+    // Priorizar plantillas que coinciden con el país seleccionado y sus bancos principales
+    if (score > 0) {
+      if (tpl.country === targetCountry) {
+        score += 4;
+      }
+      const normBank = String(tpl.bankName || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+      if (priorityBanksLower.some((pb) => normBank.includes(pb) || pb.includes(normBank))) {
+        score += 3;
       }
     }
 
@@ -1173,17 +1427,20 @@ export async function runLocalOcrEngine(fileOrDataUrl, options = {}) {
  * }>}
  */
 export async function extractOfflineWithLearnedTemplates(ocrText, options = {}) {
-  const templates =
+  const targetCountry = getActiveUserCountry(options);
+  const rawTemplates =
     Array.isArray(options.templates) && options.templates.length > 0
       ? options.templates.map((t) => normalizeBankTemplate(t))
       : await getAllLocalBankTemplates(options);
+  const templates = filterBankTemplatesByCountry(rawTemplates, targetCountry);
 
-  const matchedTemplate = matchBankTemplateFromText(ocrText, templates);
+  const matchedTemplate = matchBankTemplateFromText(ocrText, templates, targetCountry);
   if (!matchedTemplate) {
     return {
       matched: false,
       template: null,
       bankName: '',
+      country: targetCountry,
       accountsList: [],
       detectedTransactions: [],
     };
@@ -1194,6 +1451,7 @@ export async function extractOfflineWithLearnedTemplates(ocrText, options = {}) 
     matched: extraction.matched,
     template: matchedTemplate,
     bankName: extraction.bankName,
+    country: matchedTemplate.country || targetCountry,
     accountsList: extraction.accountsList,
     transactionsList: extraction.detectedTransactions,
     detectedTransactions: extraction.detectedTransactions,
@@ -1407,10 +1665,12 @@ export async function learnBankTemplateFromConfirmation(params = {}) {
 
   const userEdited = hasUserEditedExtractedAccounts(params.originalExtracted, confirmedList);
   const fingerprint = ocrText ? computeLayoutFingerprint(ocrText) : existing?.fingerprint || '';
+  const targetCountry = getActiveUserCountry(params);
 
   const templateDoc = normalizeBankTemplate({
     bankId,
     bankName: primaryBankName,
+    country: targetCountry,
     keywords: mergedKeywords,
     extractionRules,
     learnedAccounts,

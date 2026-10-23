@@ -177,7 +177,9 @@ export class ProfileViewController {
     const clearKeyBtn = document.getElementById('btn-clear-gemini-key');
     const signOutBtn = document.getElementById('btn-profile-signout');
     const openAuthBtn = document.getElementById('btn-profile-open-auth');
-    const countrySelect = document.getElementById('profile-country-select');
+    const countrySelect =
+      document.getElementById('user-country') ||
+      document.getElementById('profile-country-select');
     const currencySelect = document.getElementById('profile-currency-select');
     const personalViewCheckbox = document.getElementById('profile-personal-view-checkbox');
 
@@ -186,6 +188,17 @@ export class ProfileViewController {
         (c) => `<option value="${c.code}">${c.flag} ${c.name} (${c.defaultCurrency})</option>`
       ).join('');
     }
+
+    countrySelect?.addEventListener('change', async () => {
+      const selectedCountry = String(countrySelect.value || 'HN').trim().toUpperCase() || 'HN';
+      const user = this.authService.getCurrentUser();
+      const uid = user?.uid || 'local_default_user';
+      const updated = await this.authService.saveUserProfile(uid, {
+        country: selectedCountry,
+      });
+      this.renderProfileTab();
+      this.callbacks?.onAuthAndProfileUpdated?.(user, updated, 'country-changed');
+    });
 
     toggleKeyBtn?.addEventListener('click', () => {
       const keyInput = document.getElementById('profile-gemini-key-input');
@@ -440,7 +453,9 @@ export class ProfileViewController {
     openAuthBtn?.classList.toggle('is-hidden', isAuthenticated);
 
     const nameInput = document.getElementById('profile-name-input');
-    const countrySelect = document.getElementById('profile-country-select');
+    const countrySelect =
+      document.getElementById('user-country') ||
+      document.getElementById('profile-country-select');
     const currencySelect = document.getElementById('profile-currency-select');
     const geminiKeyInput = document.getElementById('profile-gemini-key-input');
     const geminiKeyBadge = document.getElementById('profile-gemini-key-status');
